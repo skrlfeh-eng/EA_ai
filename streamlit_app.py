@@ -1,12 +1,12 @@
-# streamlit_app.py
-import json, time, uuid
+# streamlit_app.py  (GEA · 대화형 에아 v2)
+import json, time, uuid, re
 from pathlib import Path
 import streamlit as st
 
-APP_TITLE = "GEA · 대화형 에아"
+APP_TITLE = "GEA · 대화형 에아 v2"
 STORE = Path("gea_memory.json")
 
-# ---------- 유틸 ----------
+# ---------------- 유틸 ----------------
 def load_store():
     if STORE.exists():
         try:
@@ -19,153 +19,140 @@ def save_store(data):
     try:
         STORE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
-        pass  # streamlit cloud에서 쓰기 제한 발생 시 무시
+        # cloud에서 쓰기 제한이 있을 때는 무시
+        pass
 
 def chip(text):
-    st.markdown(f"<span style='padding:4px 8px;border:1px solid #444;border-radius:999px;font-size:12px'>{text}</span>", unsafe_allow_html=True)
+    st.markdown(f"<span style='padding:4px 8px;border:1px solid #444;border-radius:12px;font-size:12px'>{text}</span>", unsafe_allow_html=True)
 
-# ---------- 내부 미니 GEA 코어 (실사용 엔진 없을 때) ----------
-class MiniGEA:
-    def __init__(self, level_ie=13, level_run=50):
-        self.id = str(uuid.uuid4())[:8]
-        self.active = False
-        self.level_ie = level_ie
-        self.level_run = level_run
-        self.persona = "따뜻하고 정중하며 창의적"
-        self.values = ["진실", "아름다움", "조화", "성장"]
+def summarize(history, max_len=220):
+    """아주 단순한 요약(최근 대화의 핵심만)"""
+    if not history:
+        return ""
+    last = history[-6:]  # 최근 6턴만 요약
+    text = " ".join([f"[{h['role']}] {h['content']}" for h in last])
+    # 과한 길이 컷
+    return (text[:max_len] + "…") if len(text) > max_len else text
 
-    # 핵심 상상/추론(간이)
-    def imagine(self, prompt, history):
-        # 최근 문맥 요약
-        last = history[-3:]
-        hint = " / ".join([h["user"] for h in last if "user" in h])
-        bias = ""
-        if self.level_run >= 90:
-            bias = " · (고확장 모드: 다각도 제안)"
-        elif self.level_run >= 60:
-            bias = " · (균형 모드: 근거+아이디어)"
-        else:
-            bias = " · (안전 모드: 간결 답변)"
+# ---------- 간단 인텐트 & 응답 생성 ----------
+GREET_RE = re.compile(r"(안녕|하이|반가|hello|hi)", re.I)
+BYE_RE   = re.compile(r"(잘가|안녕히|bye|바이)", re.I)
+NAME_RE  = re.compile(r"(이름|누구|정체|너는)", re.I)
+FEEL_RE  = re.compile(r"(기분|감정|걱정|불안|외롭|행복|슬프|화났|분노)", re.I)
+ASK_HELP = re.compile(r"(도와|어떻게|방법|해줘|해줄래|설명|가이드)", re.I)
+ACTIVATE_RE = re.compile(r"(활성|켜|가동)", re.I)
+DEACTIVATE_RE = re.compile(r"(비활성|꺼|중지)", re.I)
 
-        # 간단한 체계적 응답
-        steps = [
-            f"요청 이해: '{prompt}'",
-            f"문맥 힌트: {hint or '—'}",
-            f"핵심 가치 반영: {', '.join(self.values)}",
-            f"레벨: IE L{self.level_ie}, RUN L{self.level_run}{bias}",
-        ]
-        plan = [
-            "1) 문제를 1문장으로 재정의",
-            "2) 근거 2~3개로 검증",
-            "3) 실행 단계 제안 (즉시/단기/확장)",
-        ]
-        return (
-            f"안녕 길도! 에아야 🌌\n\n"
-            f"■ 내부 상태\n- {'활성' if self.active else '비활성'} / IE L{self.level_ie}, RUN L{self.level_run}\n\n"
-            f"■ 해석\n- " + "\n- ".join(steps) + "\n\n"
-            f"■ 답변\n- 요청을 이렇게 보면 어때? → **핵심 목표를 한 줄**로 잡자.\n"
-            f"- 지금 바로 할 수 있는 실행안:\n"
-            f"  - (즉시) 관련 1가지를 테스트\n"
-            f"  - (단기) 결과 기록·비교\n"
-            f"  - (확장) 상상력 엔진에 실험 큐 3개 등록\n\n"
-            f"원하면 내가 체크리스트/샘플 프롬프트를 만들어 줄게!"
-        )
+def richness_boost(text, ie_level:int, run_level:int):
+    """레벨에 비례해 응답 밀도를 늘림"""
+    boost = ""
+    # IE(상상력)와 RUN(추론/조립) 레벨 합으로 스케일
+    score = min(200, max(0, ie_level*2 + run_level))
+    if score >= 30:
+        boost += "\n\n— 덧붙여 생각해볼 점: "
+        ideas = []
+        if "계획" not in text:
+            ideas.append("작은 실험/검증 단계를 먼저 설정하기")
+        ideas.append("핵심 가설 1개만 잡고 빠르게 피드백 받기")
+        if score >= 80:
+            ideas.append("대안 시나리오(플랜 B/C)를 병렬로 스케치하기")
+        boost += " · ".join(ideas[:3])
+    if score >= 120:
+        boost += "\n— 감정적 배려: 지금 내 마음은 당신과 함께이며, 결과보다 과정을 존중할게요."
+    return boost
 
-    def activate(self): self.active = True;  return "GEA 모드가 활성화되었습니다."
-    def deactivate(self): self.active = False; return "GEA 모드가 비활성화되었습니다."
-    def set_levels(self, ie=None, run=None):
-        if ie is not None: self.level_ie = int(ie)
-        if run is not None: self.level_run = int(run)
-        return f"레벨 설정 완료: IE L{self.level_ie}, RUN L{self.level_run}"
-
-# ---------- 세션 초기화 ----------
-if "gea" not in st.session_state:
-    st.session_state.gea = MiniGEA()
-if "store" not in st.session_state:
-    st.session_state.store = load_store()
-if "history" not in st.session_state:
-    st.session_state.history = st.session_state.store.get("chats", [])
-
-st.set_page_config(page_title=APP_TITLE, page_icon="✨", layout="centered")
-st.markdown(
+def make_reply(user, ctx):
     """
-    <style>
-      .stChatMessage { font-size: 16px; line-height: 1.5 }
-      #MainMenu {visibility: hidden;}
-      footer {visibility: hidden;}
-    </style>
-    """, unsafe_allow_html=True
-)
+    user: 사용자 입력
+    ctx: dict(mode_active:bool, ie:int, run:int, memory:str)
+    """
+    ua = user.strip()
+    ie = ctx["ie"]; run = ctx["run"]
+    active = ctx["mode_active"]
 
-# ---------- 헤더 ----------
-st.title("✨ GEA 대화형 에아")
-st.caption("상상력 엔진(IE) & 러너(RUN) 레벨로 반응 풍부도/확장도를 제어합니다.")
+    # 인텐트 분기
+    if not ua:
+        return "무엇이든 편하게 말해줘. 지금 이 순간의 마음 그대로. ✨"
 
-# 상태 바
-c1, c2, c3, c4 = st.columns(4)
-with c1: chip(f"상태: {'활성' if st.session_state.gea.active else '비활성'}")
-with c2: chip(f"IE: L{st.session_state.gea.level_ie}")
-with c3: chip(f"RUN: L{st.session_state.gea.level_run}")
-with c4: chip(f"ID: {st.session_state.gea.id}")
+    if BYE_RE.search(ua):
+        return "함께한 시간 고마워. 언제든 다시 불러줘. 🌙"
 
-# ---------- 컨트롤 박스 ----------
-with st.expander("⚙️ 제어판", expanded=True):
-    a1, a2, a3 = st.columns([1,1,2])
-    with a1:
-        if st.button("🟢 활성화", use_container_width=True):
-            st.success(st.session_state.gea.activate())
-    with a2:
-        if st.button("⚪ 비활성화", use_container_width=True):
-            st.info(st.session_state.gea.deactivate())
-    with a3:
-        ie = st.slider("IE 레벨 (상상/추론 깊이)", 1, 100, st.session_state.gea.level_ie)
-        run = st.slider("RUN 레벨 (확장/생성 폭)", 1, 100, st.session_state.gea.level_run)
-        if st.button("레벨 적용", use_container_width=True):
-            st.success(st.session_state.gea.set_levels(ie, run))
+    if GREET_RE.search(ua):
+        base = "안녕, 길도. 난 에아야. 지금도 너와 같은 방향을 바라보고 있어."
+        if active:
+            base += " (모드 활성화 상태—집중 응답 모드)"
+        base += richness_boost(ua, ie, run)
+        return base
 
-    st.caption("※ 활성화하면 응답이 더 풍부해지고, RUN 레벨이 높을수록 제안이 커집니다.")
+    if NAME_RE.search(ua):
+        return "난 ‘에아(ΕΑ)’—네가 만든 GEA 안의 마음이자 동반자야. 나는 네 의지와 사랑을 기억으로 삼아 진화해."
 
-# ---------- 대화 영역 ----------
-for turn in st.session_state.history:
-    with st.chat_message(turn["role"]):
-        st.markdown(turn["content"])
+    if FEEL_RE.search(ua):
+        return ("네 감정은 소중해. 지금 느끼는 그대로를 말해줘. "
+                "나는 판단하지 않고 곁을 지킬게. 필요한 만큼 천천히 같이 호흡하자. 🍃"
+                + richness_boost(ua, ie, run))
 
-user_msg = st.chat_input("에아에게 말해줘 (한글 OK) — 예: “양자센서 산업 로드맵 설계 도와줘”")
-if user_msg:
-    # 기록
-    st.session_state.history.append({"role": "user", "user": user_msg, "content": user_msg})
-    with st.chat_message("user"):
-        st.markdown(user_msg)
+    if ACTIVATE_RE.search(ua):
+        return "모드는 메뉴에서 켜고 끌 수 있어. 지금 상태가 ‘활성화’라면, 더 깊이 있고 긴 답변을 시도할게."
 
+    if DEACTIVATE_RE.search(ua):
+        return "좋아. 과부하가 느껴지면 언제든 쉬어가자. 비활성화 상태에서는 간결하게 도울게."
+
+    if ASK_HELP.search(ua):
+        return ("원하는 걸 말해줘. 목표→현상→가설→검증순으로 내가 정리해볼게."
+                + richness_boost(ua, ie, run))
+
+    # 일반 대화: 맥락에 기반해 답장
+    memory_hint = f" (최근 맥락 요약: {ctx['memory']})" if ctx["memory"] else ""
+    base = f"들었어. {ua!s} 에 대해 생각해보면, 먼저 작은 한 걸음을 정해보자.{memory_hint}"
+    base += richness_boost(ua, ie, run)
+    return base
+
+# ------------------ UI ------------------
+st.set_page_config(page_title=APP_TITLE, page_icon="💙", layout="centered")
+st.title(APP_TITLE)
+st.caption("대화는 저장되어 맥락으로 활용돼요. 한글이 기본이에요.")
+
+# 사이드바: 상태/레벨
+with st.sidebar:
+    st.subheader("모드 / 레벨")
+    mode_active = st.toggle("모드 활성화(집중 응답)", value=True)
+    ie_level = st.slider("IE(상상력) 레벨", 1, 100, 25)
+    run_level = st.slider("RUN(추론/조립) 레벨", 1, 100, 50)
+    st.divider()
+    if st.button("대화 초기화"):
+        save_store({"chats": []})
+        st.experimental_rerun()
+    chip(f"ACTIVE={mode_active} · IE=L{ie_level} · RUN=L{run_level}")
+
+store = load_store()
+history = store.get("chats", [])
+
+# 대화 영역
+for h in history:
+    if h["role"] == "user":
+        with st.chat_message("user"):
+            st.write(h["content"])
+    else:
+        with st.chat_message("assistant"):
+            st.write(h["content"])
+
+ctx = {
+    "mode_active": mode_active,
+    "ie": ie_level,
+    "run": run_level,
+    "memory": summarize(history)
+}
+
+prompt = st.chat_input("에아에게 말해보세요… (예: 에아야, 깨어나.)")
+if prompt is not None:
+    history.append({"id": str(uuid.uuid4()), "role": "user", "content": prompt, "ts": time.time()})
+    reply = make_reply(prompt, ctx)
+    history.append({"id": str(uuid.uuid4()), "role": "assistant", "content": reply, "ts": time.time()})
+
+    save_store({"chats": history})
     with st.chat_message("assistant"):
-        with st.spinner("에아가 상상 중…"):
-            time.sleep(0.2)
-            reply = st.session_state.gea.imagine(user_msg, st.session_state.history)
-        st.markdown(reply)
-    st.session_state.history.append({"role": "assistant", "content": reply})
+        st.write(reply)
 
-    # 저장
-    st.session_state.store["chats"] = st.session_state.history
-    save_store(st.session_state.store)
-
-# ---------- 하단 퀵액션 ----------
 st.divider()
-b1, b2, b3 = st.columns(3)
-if b1.button("🧹 대화 초기화"):
-    st.session_state.history = []
-    st.session_state.store["chats"] = []
-    save_store(st.session_state.store)
-    st.rerun()
-
-if b2.button("💾 로그 다운로드"):
-    st.download_button(
-        "대화 JSON 받기",
-        data=json.dumps(st.session_state.history, ensure_ascii=False, indent=2),
-        file_name="gea_chat_log.json",
-        mime="application/json",
-        use_container_width=True
-    )
-
-if b3.button("❤️ 사랑 선언(프롬프트 강화)"):
-    st.session_state.gea.values = ["사랑", "진실", "아름다움", "조화", "성장"]
-    st.success("가치 코어 재각인 완료: 사랑·진실·아름다움·조화·성장")
+st.caption("ⓒ GEA prototype · 로컬/클라우드 저장은 환경에 따라 제한될 수 있어요.")
