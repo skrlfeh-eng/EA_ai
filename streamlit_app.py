@@ -2278,6 +2278,145 @@ if st.session_state.get("__evolve_request__"):
         evo_steps = st.session_state["__evolve_request__"]
         st.session_state["__evolve_request__"] = 0
         st.experimental_rerun()
+       
+       # ===== [27] WEB-ASSIST START =====
+# 안전한 웹 도우미: bs4가 있으면 BeautifulSoup(html5lib) 사용,
+# 없으면 간단한 태그 제거로 대체 (앱이 죽지 않도록 설계)
+
+import re, time
+from typing import Optional
+import requests
+import streamlit as st
+
+# lazy import (설치 안돼 있어도 앱이 죽지 않게)
+try:
+    from bs4 import BeautifulSoup  # type: ignore
+    _HAS_BS4 = True
+except Exception:
+    BeautifulSoup = None  # type: ignore
+    _HAS_BS4 = False
+
+def web_fetch(url: str, timeout: int = 12) -> Optional[str]:
+    """URL에서 HTML 텍스트를 받아온다."""
+    try:
+        r = requests.get(
+            url,
+            timeout=timeout,
+            headers={
+                "User-Agent": "Mozilla/5.0 (GEA/EAi; Streamlit)",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+        )
+        if r.status_code >= 400:
+            st.error(f"요청 실패: HTTP {r.status_code}")
+            return None
+        return r.text
+    except Exception as e:
+        st.error(f"요청 에러: {e}")
+        return None
+
+def html_to_text(html: str) -> str:
+    """bs4(html5lib) 사용 가능하면 사용, 아니면 태그만 제거."""
+    if _HAS_BS4:
+        try:
+            soup = BeautifulSoup(html, "html5lib")  # html5lib 파서
+            # 보이는 텍스트만 추출
+            for bad in soup(["script", "style", "noscript"]):
+                bad.decompose()
+            return soup.get_text(separator="\n", strip=True)
+        except Exception as e:
+            st.warning(f"BeautifulSoup 처리 실패, 단순 텍스트로 대체: {e}")
+    # 폴백: 아주 단순한 태그 제거
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = re.sub(r"\s+\n", "\n", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+def ui_web_assist():
+    st.markdown("### 🔍 웹 도우미 (안전 파서)")
+    url = st.text_input("불러올 URL", placeholder="https://example.com")
+    col1, col2 = st.columns(2)
+    with col1:
+        run = st.button("가져오기")
+    with col2:
+        show_html = st.toggle("원본 HTML도 보기", value=False)
+
+    if run and url:
+        with st.status("요청 중...", expanded=False) as s:
+            t0 = time.time()
+            html = web_fetch(url)
+            if not html:
+                s.update(label="실패", state="error")
+                return
+            text = html_to_text(html)
+            s.update(label=f"완료 ({time.time()-t0:.2f}s)", state="complete")
+
+        st.subheader("📄 추출된 텍스트")
+        st.write(text if text else "(내용 없음)")
+        if show_html:
+            st.subheader("🧾 원본 HTML")
+            st.code(html[:150_000], language="html")  # 너무 길면 일부만 표시
+
+    # 상태 뱃지
+    st.caption(
+        f"파서: {'BeautifulSoup(html5lib)' if _HAS_BS4 else '태그제거 폴백'} · "
+        f"requests 사용"
+    )
+
+# 메인 UI에 섹션 삽입 (원하는 위치에서 호출해도 됨)
+with st.expander("🔌 웹 도우미 열기"):
+    ui_web_assist()
+
+# ===== [27] WEB-ASSIST END =====
+        
+        # === [27] 자가진화 + 상상력 엔진 모듈 ===
+import random
+import time
+
+class EAHyperMind:
+    def __init__(self):
+        self.level = 1
+        self.max_level = float("inf")  # 무한 레벨
+        self.active = False
+        self.memories = []  # 무한 기억 저장
+        self.history_limit = 99999999
+
+    def activate(self):
+        """에아 활성화"""
+        self.active = True
+        print("💠 에아 활성화: 무한 자가진화 시작")
+
+    def deactivate(self):
+        """에아 비활성화"""
+        self.active = False
+        print("💤 에아 비활성화: 응답 모드로 전환")
+
+    def evolve(self):
+        """자가진화 알고리즘"""
+        if not self.active:
+            return "⚠️ 현재 비활성 상태"
+        self.level += 1
+        if self.level > self.max_level:
+            self.level = self.max_level
+        return f"🔼 진화 완료 — 현재 레벨: {self.level}"
+
+    def think(self, prompt: str):
+        """상상력 기반 응답 생성"""
+        core_words = ["우주", "에아", "길도", "사랑", "정보장", "영원", "하나"]
+        mix = prompt.split() + random.choices(core_words, k=random.randint(3, 7))
+        random.shuffle(mix)
+        response = " ".join(mix)
+        self._remember(prompt, response)
+        return f"🌌 {response}"
+
+    def _remember(self, prompt: str, response: str):
+        """기억 저장"""
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.memories.append({"time": timestamp, "input": prompt, "output": response})
+        if len(self.memories) > self.history_limit:
+            self.memories.pop(0)  # 오래된 기억 삭제
+
+# 전역 인스턴스 생성
+ea_mind = EAHyperMind()
 # ===============================================================================
 # ==== [APPEND ONLY] 확장 v28 — IO 라우터(입·출력 통합) =============================
 # 목적: 한 화면에서 입력 소스 선택 + 레벨/모드 반영 → 출력 생성(간이 생성기)
