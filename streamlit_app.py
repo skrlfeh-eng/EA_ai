@@ -156,3 +156,113 @@ if prompt is not None:
 
 st.divider()
 st.caption("ⓒ GEA prototype · 로컬/클라우드 저장은 환경에 따라 제한될 수 있어요.")
+# ---------- 리치 응답 헬퍼 ----------
+def tone_wrap(text, tone):
+    if tone == "담백":   return text
+    if tone == "공손":   return f"{text}\n\n부족한 부분이 있다면 언제든 말씀 주세요."
+    if tone == "따뜻":   return f"{text}\n\n당신 곁에서 차분히 함께할게요. 🌿"
+    if tone == "열정":   return f"{text}\n\n지금 바로 불붙여 보자! 🔥"
+    return text
+
+def bullets(items):
+    return "\n".join([f"- {i}" for i in items])
+
+def section(title, body):
+    return f"### {title}\n{body}\n"
+
+def mk_outline(query):
+    return bullets([
+        "핵심 목적 정리",
+        "현재 상황/제약 요약",
+        "핵심 가설 1~2개",
+        "검증 지표/성공 기준",
+        "리스크와 가드레일",
+    ])
+
+def mk_steps(query, depth=3):
+    steps = [
+        "문제 정의 · 요구 명세 확정",
+        "작은 실험(POC) 설계 · 데이터 확보",
+        "평가 지표·성공 조건 합의",
+        "실행 → 피드백 → 개선 루프",
+        "결과 공유 · 다음 단계 의사결정",
+    ]
+    return bullets(steps[:max(3, depth)])
+
+def mk_examples(query, n=2):
+    return bullets([f"예시 {i+1}: “{query}”를 {['간단프로토', '파일럿'][i%2]}로 구현" for i in range(n)])
+
+def mk_pros_cons(query):
+    return bullets([
+        f"장점: {query}의 속도/단순성/비용효율",
+        "단점: 데이터 품질/스케일 이슈/운영 복잡도",
+        "대안: 규칙기반 + ML 하이브리드, 단계적 자동화",
+    ])
+
+def mk_risks(query):
+    return bullets([
+        "요구 불명확 → 스코프 부풀기",
+        "데이터 편향 → 결과 왜곡",
+        "지표 부적합 → 성공 착시",
+    ])
+
+def mk_next(query):
+    return bullets([
+        "목표 한 줄로 확정",
+        "성공 지표 1~2개 선택",
+        "3일짜리 미니 POC 일정 잡기",
+    ])
+    # --- 일반 대화(리치 생성) ---
+    memory_hint = f"(최근 맥락: {ctx['memory']}) " if ctx["memory"] else ""
+    depth = detail + (ie + run) // 80  # 레벨이 높을수록 살짝 더 깊게
+
+    blocks = []
+
+    if ctx["rich_mode"] == "요약":
+        blocks.append(section("핵심 요약", f"{memory_hint}{ua} 의도를 한 줄로: **가치 창출을 위한 실용적 해법 탐색**"))
+        blocks.append(section("바로 다음 한 걸음", mk_next(ua)))
+
+    elif ctx["rich_mode"] == "계획서":
+        blocks.append(section("목표/배경", f"{ua}\n\n{memory_hint}"))
+        blocks.append(section("아키텍처 개요", mk_outline(ua)))
+        blocks.append(section("실행 단계", mk_steps(ua, depth)))
+        if depth >= 4:
+            blocks.append(section("예시/대안", mk_examples(ua, n=2)))
+            blocks.append(section("리스크", mk_risks(ua)))
+
+    elif ctx["rich_mode"] == "코치":
+        blocks.append(section("관찰", f"지금 포인트는 **선택과 집중**. 불필요한 스코프를 줄이자."))
+        blocks.append(section("질문", bullets([
+            "진짜로 풀 문제는 무엇인가요(한 문장)?",
+            "성공을 어떻게 측정하나요(정량1+정성1)?",
+            "3일 안에 시험 가능한 가장 작은 단위는?",
+        ])))
+        blocks.append(section("액션", mk_next(ua)))
+
+    elif ctx["rich_mode"] == "스토리":
+        story = (
+            f"처음에 우리는 '{ua}'를 막연히 바라봤어. 하지만 한 걸음씩 나누자 길이 보였지. "
+            "작은 실험 하나가 성공했고, 그 데이터가 다음 선택을 밝혔어. 우리는 안전장치를 두고, "
+            "틀리면 바로 고쳤고, 옳았다면 과감히 키웠어. 결국 ‘가치'가 현실이 되었지."
+        )
+        blocks.append(section("이야기", story))
+        if depth >= 4:
+            blocks.append(section("현실 적용 체크리스트", mk_steps(ua, depth)))
+
+    else:  # 설명+예시 (기본)
+        blocks.append(section("핵심 개념", f"{ua}를 이해/해결하기 위한 핵심 축"))
+        blocks.append(section("왜(Why)", bullets([
+            "문제가 낳는 비용/리스크",
+            "해결 시 얻는 가장 큰 이득 1가지",
+        ])))
+        blocks.append(section("무엇(What)", mk_outline(ua)))
+        blocks.append(section("어떻게(How)", mk_steps(ua, depth)))
+        blocks.append(section("예시/대안", mk_examples(ua, n=1 + (depth>=4))))
+        if depth >= 4:
+            blocks.append(section("장·단점", mk_pros_cons(ua)))
+            blocks.append(section("리스크", mk_risks(ua)))
+        blocks.append(section("다음 액션", mk_next(ua)))
+
+    base = "\n".join(blocks)
+    return tone_wrap(base, ctx.get("tone","따뜻"))
+    
