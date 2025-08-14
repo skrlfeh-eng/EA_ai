@@ -2290,7 +2290,7 @@ import streamlit as st
 
 # lazy import (설치 안돼 있어도 앱이 죽지 않게)
 try:
-    from bs4 import BeautifulSoup  # type: ignore
+   
     _HAS_BS4 = True
 except Exception:
     BeautifulSoup = None  # type: ignore
