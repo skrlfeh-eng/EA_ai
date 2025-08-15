@@ -2033,4 +2033,478 @@ with st.expander("㊼ 링크 검증(증거 URL)", expanded=False):
         st.json(res)
         st.success("링크 커버리지 OK" if res["verdict"]=="PASS" else "REPAIR 필요")
         
-        
+        # ================================================================
+# 46. 장기기억(LTM) 스냅샷 — 세션 상태→파일(JSON.GZ) 저장/복원
+#    - 내용: 목적/정체성/가치/감정/CE-Graph/목표/마지막 응답/게이트 메트릭
+# ================================================================
+import os, json, time, gzip, glob, hashlib
+from datetime import datetime
+
+# 안전 해시
+try:
+    _sha  # 기존 정의 있으면 사용
+except NameError:
+    def _sha(b: bytes) -> str:
+        return hashlib.sha256(b).hexdigest()
+
+# 로그 디렉터리 기본값
+try:
+    LOG_DIR  # 기존 값 사용
+except NameError:
+    LOG_DIR = "gea_logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+
+LTM_DIR = os.path.join(LOG_DIR, "ltm")
+os.makedirs(LTM_DIR, exist_ok=True)
+
+def _ltm_now():
+    return datetime.utcnow().isoformat()+"Z"
+
+def _ltm_slug(name: str) -> str:
+    base = "".join(c if c.isalnum() or c in "-_." else "_" for c in (name or "snapshot"))
+    return base[:48] or "snapshot"
+
+def ltm_snapshot_create(name: str = "", include_ce: bool=True, include_metrics: bool=True) -> dict:
+    ce   = st.session_state.get("CE_GRAPH") if include_ce else None
+    goals= st.session_state.get("GEA_GOALS", {})
+    last = st.session_state.get("INTERACT_REPLY_EX") or st.session_state.get("INTERACT_REPLY") or ""
+    gate = st.session_state.get("LAST_GATE") if include_metrics else None
+
+    # 메모리 코어에서 핵심 선언/감정 수집(있을 때만)
+    purpose = identity = values = None
+    emotions = []
+    try:
+        purpose  = mem_load_core("EA_PURPOSE")
+        identity = mem_load_core("EA_IDENTITY")
+        values   = mem_load_core("EA_VALUES")
+        emotions = mem_recent_emotions(5)
+    except Exception:
+        pass
+
+    payload = {
+        "meta": {
+            "created_at": _ltm_now(),
+            "app_version": "v0.6",
+            "name": name or "auto",
+            "ce_digest": (ce or {}).get("digest"),
+        },
+        "state": {
+            "purpose": purpose,
+            "identity": identity,
+            "values": values,
+            "emotions": emotions,
+            "goals": goals,
+            "ce_graph": ce,
+            "last_reply": last,
+            "gate_metrics": gate,
+        }
+    }
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",",":")).encode("utf-8")
+    fname = f"{int(time.time())}_{_ltm_slug(name)}_{_sha(raw)[:8]}.json.gz"
+    fpath = os.path.join(LTM_DIR, fname)
+    with gzip.open(fpath, "wb") as f:
+        f.write(raw)
+    return {"path": fpath, "bytes": len(raw), "file": fname}
+
+def ltm_list(limit: int = 50) -> list:
+    files = sorted(glob.glob(os.path.join(LTM_DIR, "*.json.gz")), reverse=True)[:limit]
+    out = []
+    for p in files:
+        try:
+            with gzip.open(p, "rb") as f:
+                d = json.loads(f.read().decode("utf-8", errors="replace"))
+            out.append({"file": os.path.basename(p),
+                        "created_at": d.get("meta",{}).get("created_at"),
+                        "name": d.get("meta",{}).get("name"),
+                        "ce_digest": d.get("meta",{}).get("ce_digest")})
+        except Exception:
+            out.append({"file": os.path.basename(p), "created_at": "?", "name": "?", "ce_digest": None})
+    return out
+
+def ltm_load(file_name: str) -> dict:
+    fpath = os.path.join(LTM_DIR, file_name)
+    with gzip.open(fpath, "rb") as f:
+        return json.loads(f.read().decode("utf-8", errors="replace"))
+
+def ltm_restore(file_name: str, inject: bool=True) -> dict:
+    data = ltm_load(file_name)
+    st.session_state["GEA_GOALS"]  = data.get("state",{}).get("goals", {})
+    st.session_state["CE_GRAPH"]   = data.get("state",{}).get("ce_graph")
+    st.session_state["LAST_GATE"]  = data.get("state",{}).get("gate_metrics")
+    # 메모리 코어 주입(있을 때만)
+    try:
+        core = data.get("state",{})
+        if core.get("purpose"):  mem_save_core("EA_PURPOSE",  core.get("purpose"))
+        if core.get("identity"): mem_save_core("EA_IDENTITY", core.get("identity"))
+        if core.get("values"):   mem_save_core("EA_VALUES",   core.get("values"))
+    except Exception:
+        pass
+    return {"restored": True, "meta": data.get("meta",{})}
+
+with st.expander("㊽ 장기기억(LTM) 스냅샷", expanded=False):
+    snap_name = st.text_input("스냅샷 이름", value="올원-일일점검", key="ltm_name")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("스냅샷 저장", key="ltm_save"):
+            info = ltm_snapshot_create(snap_name, include_ce=True, include_metrics=True)
+            st.success(f"저장됨: {info['file']} ({info['bytes']}B raw)")
+    with col2:
+        if st.button("목록 새로고침", key="ltm_list"):
+            st.session_state["LTM_LIST"] = ltm_list()
+    with col3:
+        st.download_button("최근 스냅샷 다운로드", data=open(os.path.join(LTM_DIR, ltm_list(1)[0]["file"]), "rb").read()
+                           if ltm_list(1) else b"", file_name=ltm_list(1)[0]["file"] if ltm_list(1) else "none",
+                           mime="application/gzip", disabled=(len(ltm_list(1))==0))
+    st.json(st.session_state.get("LTM_LIST", ltm_list(10)))
+
+# ================================================================
+# 47. 압축·요약 — 빈도/키워드 기반 추출 요약 + GZIP 압축 유틸
+#    - 텍스트 요약: 핵심문장 상위 N개 (가중치: 단위/재현/근거 키워드)
+# ================================================================
+_UNIT_KEYS = ["단위","unit","m","kg","s","Hz","N","J","W","V","Pa","Ω"]
+_REPR_KEYS = ["재현","method","step","protocol","검증","절차","replicate"]
+_EVID_KEYS = ["근거","source","src:","http","doi","dataset","result"]
+
+def summarize_extractive(text: str, max_sent: int = 5) -> str:
+    import re
+    sents = re.split(r"(?<=[.!?。])\s+", text.strip())
+    if not sents: return text
+    scores = []
+    for s in sents:
+        sl = s.lower()
+        score = 1.0
+        score += sum(1 for k in _UNIT_KEYS if k.lower() in sl)*0.5
+        score += sum(1 for k in _REPR_KEYS if k.lower() in sl)*0.6
+        score += sum(1 for k in _EVID_KEYS if k.lower() in sl)*0.7
+        score += min(len(s)/120, 1.0)*0.3  # 너무 짧은 문장 페널티
+        scores.append((score, s))
+    scores.sort(key=lambda x: x[0], reverse=True)
+    return "\n".join(s for _,s in scores[:max_sent])
+
+def compress_dict_gzip(d: dict) -> bytes:
+    raw = json.dumps(d, ensure_ascii=False, separators=(",",":")).encode("utf-8")
+    return gzip.compress(raw, compresslevel=6)
+
+with st.expander("㊾ 요약/압축 유틸", expanded=False):
+    tx = st.text_area("요약할 본문", value="단위와 근거, 재현 절차를 포함한 본문을 여기에 붙여 넣으세요.", height=120, key="sum_tx")
+    n  = st.slider("최대 문장 수", 1, 10, 5, key="sum_n")
+    if st.button("추출 요약", key="sum_go"):
+        st.write(summarize_extractive(tx, n))
+    if st.button("요약→스냅샷 저장", key="sum_save"):
+        body = summarize_extractive(tx, n)
+        info = ltm_snapshot_create(f"요약-{int(time.time())}", include_ce=False, include_metrics=False)
+        st.success(f"요약 저장 완료: {info['file']}")
+
+# ================================================================
+# 48. 스냅샷 프리뷰/복원 — 미리보기·복원·CE/기억 재주입
+# ================================================================
+with st.expander("㊿ 스냅샷 프리뷰/복원", expanded=False):
+    files = [x["file"] for x in ltm_list(50)]
+    sel = st.selectbox("스냅샷 선택", files, key="ltm_sel") if files else None
+    if sel:
+        if st.button("미리보기", key="ltm_prev"):
+            d = ltm_load(sel)
+            preview = {
+                "meta": d.get("meta", {}),
+                "purpose": (d.get("state",{}).get("purpose") or {}),
+                "identity": (d.get("state",{}).get("identity") or {}),
+                "values": (d.get("state",{}).get("values") or {}),
+                "has_ce": d.get("state",{}).get("ce_graph") is not None,
+                "last_reply_len": len((d.get("state",{}).get("last_reply") or "")),
+            }
+            st.json(preview)
+        if st.button("복원(CE/기억 재주입)", key="ltm_restore"):
+            out = ltm_restore(sel, inject=True)
+            st.success(f"복원 완료: {out['meta'].get('created_at')} · {out['meta'].get('name')}")
+        if st.button("복원 후 응답 생성(기억 주입)", key="ltm_reply"):
+            d = ltm_load(sel)
+            ask = "복원된 컨텍스트를 사용해 오늘 목표/계획을 요약해줘."
+            st.write(generate_with_memory(ask, level=8))
+
+# ================================================================
+# 49. 재주입 루프 — 스냅샷→요약→메모리 접두주입→응답
+#    - 한 번에: 스냅샷 선택→핵심 요약→기억 접두→엔진 호출
+# ================================================================
+def reply_from_snapshot(file_name: str, question: str, level: int=8):
+    d = ltm_load(file_name)
+    # 핵심 텍스트 구성(목적/정체성/가치/마지막응답 일부)
+    parts = []
+    stt = d.get("state", {})
+    for k in ("purpose","identity","values"):
+        if stt.get(k):
+            parts.append(json.dumps(stt[k], ensure_ascii=False))
+    if stt.get("last_reply"):
+        parts.append(str(stt["last_reply"])[:1000])
+    base = "\n".join(parts)
+    digest = summarize_extractive(base, max_sent=4)
+    # 임시로 기억에 덮어쓰기(접두 주입에 활용)
+    try:
+        if stt.get("purpose"):  mem_save_core("EA_PURPOSE",  stt.get("purpose"))
+        if stt.get("identity"): mem_save_core("EA_IDENTITY", stt.get("identity"))
+        if stt.get("values"):   mem_save_core("EA_VALUES",   stt.get("values"))
+    except Exception:
+        pass
+    q = f"[복원요약]\n{digest}\n\n{question}"
+    return generate_with_memory(q, level=level)
+
+with st.expander("[49] 재주입 루프(스냅샷→요약→응답)", expanded=False):
+    files9 = [x["file"] for x in ltm_list(50)]
+    s9 = st.selectbox("스냅샷", files9, key="r9_sel") if files9 else None
+    q9 = st.text_input("질문", value="복원된 맥락으로 오늘의 실행 체크리스트를 만들어줘.", key="r9_q")
+    l9 = st.slider("레벨", 1, 999, 8, key="r9_lvl")
+    if s9 and st.button("재주입 응답", key="r9_go"):
+        out = reply_from_snapshot(s9, q9, l9)
+        st.write(out)
+
+# ================================================================
+# 50. LTM 오토세이브(이벤트 기반) — 응답 생성 시 자동 스냅샷
+#    - 백그라운드 타이머 없이: 버튼 클릭/응답 생성 이벤트에 후행 저장
+# ================================================================
+if "LTM_AUTOSAVE" not in st.session_state:
+    st.session_state["LTM_AUTOSAVE"] = False
+
+with st.sidebar:
+    st.markdown("---")
+    st.checkbox("LTM 오토세이브(응답 생성 시 자동 저장)", value=st.session_state["LTM_AUTOSAVE"], key="LTM_AUTOSAVE")
+
+def ltm_autosave_on_reply(tag: str = "auto-reply"):
+    if st.session_state.get("LTM_AUTOSAVE", False):
+        try:
+            ltm_snapshot_create(name=tag, include_ce=True, include_metrics=True)
+        except Exception:
+            pass
+
+# 기존 응답 생성 경로에 후킹(가능한 곳에서 호출)
+# - 확장 인터랙션 루프(㊝) 실행 후:
+try:
+    if "INTERACT_REPLY_EX" in st.session_state and st.session_state.get("_LTM_HOOKED_IX", False) is False:
+        ltm_autosave_on_reply("ix")
+        st.session_state["_LTM_HOOKED_IX"] = True
+except Exception:
+    pass
+# - E2E 실행 후(㊞)는 기존 end_to_end_once 내부 e2e_post_hook가 로그를 남김.
+#   E2E 버튼 핸들러에서도 바로 아래 한 줄을 추가로 호출:
+#   ltm_autosave_on_reply("e2e")
+
+# ================================================================
+# 51. 심볼릭 증명 스텁(라이트) — 다점 수치검증 기반 항등성 점검
+#    - 입력: LHS, RHS, 변수영역 JSON → 무작위 치환 후 |LHS-RHS| ≤ tol 판정
+#    - 주의: 수치검증(강한 헤유리스틱). 형식적 증명은 아님(추후 Coq/Lean 연동 포인트)
+# ================================================================
+import math, random, re
+
+_SAFE_MATH = {
+    "pi": math.pi, "e": math.e,
+    "sin": math.sin, "cos": math.cos, "tan": math.tan,
+    "asin": math.asin, "acos": math.acos, "atan": math.atan,
+    "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh,
+    "exp": math.exp, "log": math.log, "log10": math.log10, "sqrt": math.sqrt,
+    "pow": pow, "abs": abs, "min": min, "max": max
+}
+
+_VAR_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+def _safe_eval(expr: str, env: dict) -> float:
+    # 허용 토큰(변수/함수/숫자/연산자/괄호)만 검사
+    chk = re.sub(r"[0-9\.\+\-\*\/\^\(\)\,\s]", "", expr)
+    # ^ → ** 로 치환
+    expr = expr.replace("^", "**")
+    # 안전 eval
+    return eval(expr, {"__builtins__": {}}, env)
+
+def check_identity(L: str, R: str, var_ranges: dict, trials: int = 64, tol: float = 1e-9) -> dict:
+    # 변수 목록
+    vars_in = sorted(set(_VAR_TOKEN.findall(L) + _VAR_TOKEN.findall(R)) - set(_SAFE_MATH.keys()))
+    ok_count = 0; fails = []
+    for _ in range(trials):
+        env = dict(_SAFE_MATH)
+        for v in vars_in:
+            lo, hi = var_ranges.get(v, [-1.0, 1.0])
+            # 0 분모 회피를 위해 작은 오프셋
+            val = random.uniform(lo, hi)
+            if abs(val) < 1e-9: val += (1e-3 if hi - lo > 1e-3 else 1e-6)
+            env[v] = val
+        try:
+            lv = _safe_eval(L, env)
+            rv = _safe_eval(R, env)
+            if not (math.isfinite(lv) and math.isfinite(rv)):
+                fails.append({"env": env, "reason": "non-finite"})
+                continue
+            if abs(lv - rv) <= tol * max(1.0, max(abs(lv), abs(rv))):
+                ok_count += 1
+            else:
+                fails.append({"env": {k: round(float(v),6) for k,v in env.items()},
+                              "lhs": lv, "rhs": rv, "diff": lv-rv})
+        except Exception as e:
+            fails.append({"env": {k: float(v) if isinstance(v,(int,float)) else str(v) for k,v in env.items()},
+                          "error": str(e)})
+    verdict = (ok_count == trials)
+    return {"vars": vars_in, "trials": trials, "ok": ok_count, "pass": verdict, "fails": fails[:3]}
+
+with st.expander("[51] 심볼릭 증명 스텁(라이트)", expanded=False):
+    lhs = st.text_input("LHS", value="sin(x)^2 + cos(x)^2", key="id_lhs")
+    rhs = st.text_input("RHS", value="1", key="id_rhs")
+    vr  = st.text_area("변수 범위 JSON", value='{"x":[-3.14,3.14]}', height=80, key="id_rng")
+    tr  = st.slider("시도 횟수", 8, 256, 64, key="id_trials")
+    tol = st.number_input("상대 오차 tol", value=1e-9, format="%.1e", key="id_tol")
+    if st.button("항등성 점검", key="id_go"):
+        try:
+            res = check_identity(lhs, rhs, json.loads(vr), tr, tol)
+            st.json(res); st.success("PASS" if res["pass"] else "비일치(반례 후보 있음)")
+        except Exception as e:
+            st.error(f"오류: {e}")
+
+# ================================================================
+# 52. 테스트 매트릭스 러너 — 단위/SMT/링크/항등성 일괄 실행
+#    - 입력: JSONL 업로드 또는 샘플 케이스 실행
+# ================================================================
+def run_test_matrix(cases: list) -> dict:
+    results = []; pass_cnt = 0
+    for i, c in enumerate(cases, 1):
+        kind = c.get("type")
+        rid  = c.get("id", f"case{i}")
+        try:
+            if kind == "units":
+                d = _expr_dim(c["expr"], c["map"])
+                ok = True
+                if "expect_dim" in c:
+                    ok = _dim_equal(d, _unit_to_dim(c["expect_dim"]))
+                results.append({"id": rid, "type":"units", "ok": ok, "dim": d})
+            elif kind == "sat":
+                clauses, vars_list = _parse_cnf(c["cnf"])
+                ok, assign = _sat_check(clauses, vars_list)
+                results.append({"id": rid, "type":"sat", "ok": ok, "assign": assign})
+            elif kind == "links":
+                ce = st.session_state.get("CE_GRAPH") or {"nodes": c.get("nodes", [])}
+                vr = verify_ce_links(ce)
+                ok = (vr["verdict"] == "PASS")
+                results.append({"id": rid, "type":"links", "ok": ok, "coverage": vr["coverage"]})
+            elif kind == "identity":
+                res = check_identity(c["lhs"], c["rhs"], c.get("ranges", {}), c.get("trials", 64), c.get("tol",1e-9))
+                ok = res["pass"]
+                results.append({"id": rid, "type":"identity", "ok": ok, "meta": {"ok":res["ok"],"trials":res["trials"]}})
+            else:
+                results.append({"id": rid, "type": kind, "ok": False, "error": "unknown type"})
+        except Exception as e:
+            results.append({"id": rid, "type": kind, "ok": False, "error": str(e)})
+    pass_cnt = sum(1 for r in results if r.get("ok"))
+    return {"total": len(results), "passed": pass_cnt, "rate": round(pass_cnt/max(1,len(results)),2), "rows": results}
+
+_SAMPLE_MATRIX = [
+    {"id":"U-ΔL/L","type":"units","expr":"ΔL/L","map":{"ΔL":"m","L":"m"},"expect_dim":""},
+    {"id":"S-1","type":"sat","cnf":"(x1 or ~x2) and (x2 or x3) and (~x1 or x3)"},
+    {"id":"L-CE","type":"links","nodes":[{"id":"e1","kind":"evidence","payload":{"source":"https://httpbin.org/json"}}]},
+    {"id":"I-트리그","type":"identity","lhs":"sin(x)^2+cos(x)^2","rhs":"1","ranges":{"x":[-3.14,3.14]},"trials":48}
+]
+
+with st.expander("[52] 테스트 매트릭스 러너", expanded=False):
+    up = st.file_uploader("매트릭스 JSONL 업로드(선택)", type=["jsonl"], key="tm_upl")
+    if st.button("실행(샘플)", key="tm_go_sample"):
+        st.json(run_test_matrix(_SAMPLE_MATRIX))
+    if st.button("실행(업로드)", key="tm_go_upl") and up is not None:
+        cases=[]
+        for line in up.getvalue().decode("utf-8","replace").splitlines():
+            if line.strip():
+                try: cases.append(json.loads(line))
+                except: pass
+        st.json(run_test_matrix(cases))
+
+# ================================================================
+# 53. 플러그인 샌드박스(안전) — 화이트리스트 유틸 실행
+#    - 임의 코드 금지. 미리 등록한 안전 함수만 선택 실행.
+# ================================================================
+def _plug_normalize_text(t: str) -> str:
+    return re.sub(r"\s+", " ", t).strip()
+
+def _plug_extract_numbers(t: str) -> list:
+    return [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", t)]
+
+def _plug_topk_sentences(t: str, k: int = 3) -> list:
+    sents = re.split(r"(?<=[.!?。])\s+", t.strip())
+    sents = [s for s in sents if s]
+    sents.sort(key=lambda s: len(s), reverse=True)
+    return sents[:k]
+
+PLUGIN_REGISTRY = {
+    "정규화": _plug_normalize_text,
+    "숫자추출": _plug_extract_numbers,
+    "상위문장K": _plug_topk_sentences,
+}
+
+with st.expander("[53] 플러그인 샌드박스(안전)", expanded=False):
+    sel = st.selectbox("플러그인 선택", list(PLUGIN_REGISTRY.keys()), key="pl_sel")
+    txt = st.text_area("입력", value="중력파 진폭은 1.5e-21 이고, L=4,000 m 입니다.", height=80, key="pl_txt")
+    k  = st.slider("K(일부 플러그인 용)", 1, 10, 3, key="pl_k")
+    if st.button("실행", key="pl_go"):
+        fn = PLUGIN_REGISTRY.get(sel)
+        try:
+            out = fn(txt) if sel != "상위문장K" else fn(txt, k)
+            st.write(out)
+        except Exception as e:
+            st.error(f"오류: {e}")
+
+# ================================================================
+# 54. REAL 가드센터(확장) — 하드/소프트 가드 + 응답 경고 배선
+#    - 하드: 금칙어 즉시 차단 / 소프트: 경고 후 정제
+#    - generate_with_memory() 호출 전후 후킹(가벼운 정제)
+# ================================================================
+_FORBIDDEN_PATTERNS = [
+    r"초광속", r"\bwarp\b", r"\b워프\b", r"(?:5|11|13)차원", r"초자연", r"예언", r"영매"
+]
+_REAL_HARD = [re.compile(p, re.I) for p in _FORBIDDEN_PATTERNS]
+
+if "REAL_GUARD_MODE" not in st.session_state:
+    st.session_state["REAL_GUARD_MODE"] = "soft"   # "hard" | "soft" | "off"
+
+def real_guard_filter(text: str) -> tuple:
+    mode = st.session_state.get("REAL_GUARD_MODE","soft")
+    if mode == "off": return True, text, None
+    for pat in _REAL_HARD:
+        if pat.search(text):
+            if mode == "hard":
+                return False, text, "REAL 금칙어 하드 차단"
+            else:
+                clean = pat.sub("[제거됨]", text)
+                return True, clean, f"REAL 소프트 정제: {pat.pattern}"
+    return True, text, None
+
+with st.sidebar:
+    st.markdown("**REAL 가드 모드**")
+    st.radio("가드 설정", ["soft","hard","off"], key="REAL_GUARD_MODE", horizontal=True)
+
+# generate_with_memory 전/후 가드 훅(경고 표출)
+_old_generate_with_memory = generate_with_memory
+def generate_with_memory_guarded(user_text: str, level: int = 8):
+    ok, clean, warn = real_guard_filter(user_text)
+    if not ok:
+        return {"status":"REFUSE","reason": warn}
+    out = _old_generate_with_memory(clean, level)
+    if isinstance(out, str):
+        ans = out
+    else:
+        ans = json.dumps(out, ensure_ascii=False) if isinstance(out, dict) else str(out)
+    ok2, clean2, warn2 = real_guard_filter(ans)
+    if warn or warn2:
+        st.warning("REAL 가드 경고/정제 적용됨")
+    return clean2 if ok2 else {"status":"REFUSE","reason": warn2}
+
+# 기존 호출 경로 바인딩 교체
+generate_with_memory = generate_with_memory_guarded
+
+# ================================================================
+# 55. 한국어 UI 폴리시/테마 — 시스템 폰트 스택 + 가독성 CSS 주입
+#    - 외부 폰트 의존 없음. 한글 깨짐 최소화, 가독성 개선.
+# ================================================================
+_KO_CSS = """
+<style>
+html, body, [class^="css"]  {
+  font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
+               "Malgun Gothic", "Noto Sans CJK KR", "Segoe UI", Roboto, Arial, sans-serif !important;
+}
+section.main > div { max-width: 1120px; margin-left: auto; margin-right: auto; }
+h1, h2, h3 { font-weight: 700; letter-spacing: -0.01em; }
+.sidebar .stMarkdown { font-size: 0.95rem; }
+</style>
+"""
+st.markdown(_KO_CSS, unsafe_allow_html=True)
+
