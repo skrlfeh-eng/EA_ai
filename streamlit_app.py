@@ -3794,4 +3794,104 @@ def thlog_tail(n: int = 30) -> list:
 with st.expander("[90] 임계치 히스토리 트래커", expanded=False):
     st.json(thlog_tail(30))
     
- 
+ # ================================================================
+# 91. 실험 리포트 자동 생성기 — 요약/메트릭/증거표를 MD+JSON 저장
+#    - HISTORY 최신 항목 + health_check + CE evidence 요약
+#    - 저장 위치: gea_logs/reports/
+# ================================================================
+# (필요 모듈: os, json, time, hashlib 는 상단에서 이미 import 되어 있다고 가정)
+REPORT_DIR = os.path.join(LOG_DIR, "reports")
+os.makedirs(REPORT_DIR, exist_ok=True)
+
+def _rows_from_ce(ce: dict, k: int = 20) -> list:
+    """CE_GRAPH의 evidence 노드를 표 형태로 일부 추려냄"""
+    try:
+        if not ce: return []
+        ev = [n for n in ce.get("nodes",[]) if n.get("kind")=="evidence"]
+        out=[]
+        for n in ev[:max(0,k)]:
+            p = n.get("payload") or {}
+            out.append({
+                "id": n.get("id"),
+                "source": p.get("source",""),
+                "score": p.get("score",None),
+                "span": p.get("span",[0,0])
+            })
+        return out
+    except Exception:
+        return []
+
+def make_report_md(title: str, last: dict, hc: dict, ce_rows: list) -> str:
+    """리포트를 Markdown 문자열로 생성"""
+    lines=[]
+    lines.append(f"# {title}")
+    lines.append("")
+    lines.append("## 1) 요약")
+    lines.append(f"- 질문: {str(last.get('q',''))[:300]}")
+    lines.append(f"- 응답 길이: {len(str(last.get('a','')))} chars")
+    lines.append("")
+    lines.append("## 2) 헬스체크")
+    verdicts = (hc or {}).get("verdicts",{}) or {}
+    for k,v in verdicts.items():
+        lines.append(f"- {k}: {v}")
+    if (hc or {}).get("link_cov") is not None:
+        try:
+            lines.append(f"- 링크 커버리지: {float(hc.get('link_cov')):.3f}")
+        except Exception:
+            pass
+    lines.append("")
+    lines.append("## 3) 증거 표 (상위)")
+    lines.append("| id | score | source |")
+    lines.append("|---|---:|---|")
+    for r in ce_rows[:30]:
+        lines.append(f"| {r.get('id','')} | {'' if r.get('score') is None else r.get('score')} | {str(r.get('source',''))[:120]} |")
+    lines.append("")
+    lines.append("## 4) 텍스트 하이라이트(키워드)")
+    try:
+        lines.append((highlight_keywords(str(last.get('a',''))) or "")[:2000])
+    except Exception:
+        lines.append("(하이라이트 생성 실패 — highlight_keywords 미정의/에러)")
+    return "\n".join(lines)
+
+def save_report(title: str) -> dict:
+    """HISTORY 최신 항목 기준 리포트를 MD/JSON으로 저장하고 경로 반환"""
+    hist = st.session_state.get("HISTORY",[])
+    if not hist:
+        return {"ok":False,"error":"no-history"}
+    last = hist[-1]
+    # health_check()와 CE_GRAPH는 기존 모듈에서 제공된다고 가정
+    try:
+        hc = health_check()
+    except Exception:
+        hc = {"verdicts": {"health":"N/A"}}
+    ce   = st.session_state.get("CE_GRAPH")
+    rows = _rows_from_ce(ce, 64)
+    md   = make_report_md(title, last, hc, rows)
+    js   = {"title":title,"last":last,"health":hc,"evidence":rows}
+    ts   = int(time.time())
+    base = f"report_{ts}_{hashlib.sha256(md.encode('utf-8')).hexdigest()[:8]}"
+    mdp  = os.path.join(REPORT_DIR, base+".md")
+    jsp  = os.path.join(REPORT_DIR, base+".json")
+    open(mdp,"w",encoding="utf-8").write(md)
+    json.dump(js, open(jsp,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+    return {"ok":True,"md":mdp,"json":jsp,"chars":len(md)}
+
+with st.expander("[91] 실험 리포트 자동 생성기", expanded=False):
+    rp_title = st.text_input("리포트 제목", value="GEA 실험 리포트", key="rp_ttl")
+    if st.button("리포트 생성/저장", key="rp_go"):
+        res = save_report(rp_title)
+        st.json(res)
+        if res.get("ok"):
+            try:
+                st.download_button("MD 다운로드",
+                                   data=open(res["md"],"rb").read(),
+                                   file_name=os.path.basename(res["md"]),
+                                   mime="text/markdown")
+                st.download_button("JSON 다운로드",
+                                   data=open(res["json"],"rb").read(),
+                                   file_name=os.path.basename(res["json"]),
+                                   mime="application/json")
+            except Exception as e:
+                st.warning(f"다운로드 버튼 생성 실패: {e}")
+                
+                
