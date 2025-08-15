@@ -3633,4 +3633,540 @@ with st.expander("[85] 퀵런(생성→헬스→REPAIR→프리뷰)", expanded=F
     if st.button("원클릭 실행", key="qr_go"):
         st.json(quickrun(qr_goal, qr_lvl))
         
-        
+        # ================================================================
+# 86. 라이트 체인해시 뷰어 — 최근 산출물 해시/무결성 점검
+#    - HISTORY/CE_GRAPH/LTM 파일들의 SHA-256 요약을 한눈에
+# ================================================================
+def _sha256_hex(s: bytes) -> str:
+    return hashlib.sha256(s).hexdigest()
+
+def chainhash_view() -> dict:
+    out = {}
+    # 최근 응답 3개
+    hist = st.session_state.get("HISTORY", [])[-3:]
+    out["answers"] = [
+        {"ts": h.get("ts"), "len": len(str(h.get("a",""))), "sha12": _sha256_hex(str(h.get("a","")).encode())[:12]}
+        for h in hist
+    ]
+    # CE 그래프
+    ce = st.session_state.get("CE_GRAPH")
+    if ce:
+        ce_bytes = json.dumps(ce, ensure_ascii=False, sort_keys=True).encode("utf-8","ignore")
+        out["ce_graph"] = {"nodes": len(ce.get("nodes",[])), "edges": len(ce.get("edges",[])),
+                           "sha12": _sha256_hex(ce_bytes)[:12]}
+    # LTM 최신 3개 파일
+    ltm_files = sorted(glob.glob(os.path.join(LTM_DIR,"*.json*")), reverse=True)[:3]
+    out["ltm"] = []
+    for p in ltm_files:
+        try:
+            b = open(p,"rb").read()
+            out["ltm"].append({"file": os.path.basename(p), "size": len(b), "sha12": _sha256_hex(b)[:12]})
+        except Exception:
+            pass
+    return out
+
+with st.expander("[86] 라이트 체인해시 뷰어", expanded=False):
+    st.json(chainhash_view())
+
+# ================================================================
+# 87. 증거 겹침 분석 — 중복/유사 링크 탐지(도메인/경로 유사도)
+#    - 간단 도메인 매칭 + 경로 토큰 Jaccard로 유사도 평가
+# ================================================================
+from urllib.parse import urlparse
+
+def _url_tokens(u: str) -> tuple:
+    try:
+        p = urlparse(u)
+        dom = p.netloc.lower()
+        toks = [t for t in re.split(r"[\/\-\._\?\&=#]+", p.path.lower()) if t and t.isascii()]
+        return dom, set(toks)
+    except Exception:
+        return "", set()
+
+def evidence_overlap_report(ce: dict, sim_th: float = 0.5) -> dict:
+    ev = [n for n in (ce or {}).get("nodes",[]) if n.get("kind")=="evidence"]
+    rows = []
+    for i in range(len(ev)):
+        ui = (ev[i].get("payload",{}) or {}).get("source","")
+        di, ti = _url_tokens(ui)
+        for j in range(i+1, len(ev)):
+            uj = (ev[j].get("payload",{}) or {}).get("source","")
+            dj, tj = _url_tokens(uj)
+            if not di or not dj: continue
+            dom_same = (di==dj)
+            inter = len(ti & tj); union = len(ti | tj) if (ti|tj) else 1
+            jac = inter/union
+            if dom_same and jac >= sim_th:
+                rows.append({
+                    "a": ev[i].get("id"), "b": ev[j].get("id"),
+                    "domain": di, "jaccard": round(jac,3),
+                    "src_a": ui, "src_b": uj
+                })
+    return {"pairs": rows, "count": len(rows)}
+
+with st.expander("[87] 증거 겹침 분석(중복/유사)", expanded=False):
+    ce = st.session_state.get("CE_GRAPH")
+    if ce:
+        th = st.slider("유사도 임계(Jaccard)", 0.1, 1.0, 0.5, 0.05, key="ov_th")
+        st.json(evidence_overlap_report(ce, th))
+    else:
+        st.info("CE evidence가 없습니다. [63]으로 보강하세요.")
+
+# ================================================================
+# 88. 장문 목차 자동 생성기(L50+) — 섹션/하위섹션 스켈레톤
+#    - 주제 입력→목차(번호/제목/설명) 생성 → HISTORY에 삽입
+# ================================================================
+def make_longform_toc(topic: str, depth: int = 2, sections: int = 8) -> str:
+    lines = [f"# {topic} — 자동 목차", ""]
+    for i in range(1, sections+1):
+        lines.append(f"{i}. 섹션 {i}: {topic}의 핵심 축 #{i}")
+        if depth >= 2:
+            for j in range(1, 5):
+                lines.append(f"   {i}.{j} 하위 {j}: 근거/절차/리스크/완화")
+        if depth >= 3:
+            for j in range(1, 3):
+                lines.append(f"      {i}.{j}.1 세부: 지표/검증/데이터")
+    return "\n".join(lines)
+
+with st.expander("[88] 장문 목차 자동 생성기(L50+)", expanded=False):
+    tp = st.text_input("주제", value="우주정보장 연동 및 초검증 아키텍처", key="toc_topic")
+    dp = st.slider("깊이", 1, 3, 2, key="toc_depth")
+    sc = st.slider("섹션 수", 3, 20, 8, key="toc_secs")
+    if st.button("목차 생성→히스토리 삽입", key="toc_make"):
+        toc = make_longform_toc(tp, dp, sc)
+        st.session_state.setdefault("HISTORY", []).append({
+            "q":"[자동 목차]", "a": toc, "ts": int(time.time()), "lvl": 50
+        })
+        st.success("히스토리에 목차가 추가되었습니다.")
+        st.code(toc, language="markdown")
+
+# ================================================================
+# 89. 간단 플로우차트 마크다운 — 단계/분기 표기(텍스트 기반)
+#    - Mermaid까지는 아니고, ASCII 스타일 흐름도 문자열 생성
+# ================================================================
+def flowchart_ascii(steps: list, branches: dict=None) -> str:
+    branches = branches or {}
+    out = []
+    for i, s in enumerate(steps, 1):
+        out.append(f"[{i}] {s}")
+        if i < len(steps): out.append("  │")
+        b = branches.get(i, [])
+        for br in b:
+            out.append(f"  ├─▶ {br}")
+    return "\n".join(out)
+
+with st.expander("[89] 플로우차트(ASCII) 생성", expanded=False):
+    default_steps = ["입력 파싱", "CE-그래프 구축", "게이트 헬스체크", "REPAIR 루프", "결과 산출/체인해시"]
+    txt = st.text_area("단계(줄바꿈으로 분리)", value="\n".join(default_steps), height=120, key="fc_steps")
+    if st.button("플로우차트 생성", key="fc_go"):
+        steps = [x.strip() for x in txt.splitlines() if x.strip()]
+        chart = flowchart_ascii(steps, branches={3:["임계 상향","임계 하향"]})
+        st.code(chart, language="text")
+
+# ================================================================
+# 90. 임계치 히스토리 트래커 — HC_MIN/게이트 지표 타임라인
+#    - 세션 내 변경 누적 기록 → JSON 로깅
+# ================================================================
+THLOG_PATH = os.path.join(LOG_DIR, "threshold_history.jsonl")
+
+def thlog_append(event: dict):
+    event = dict(event)
+    event["ts"] = int(time.time())
+    with open(THLOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+# 훅: 66의 gate_autotune_update/74의 설정 저장 후 기록
+_prev_autotune = gate_autotune_update
+def gate_autotune_update_logged(mode: str = "auto"):
+    res = _prev_autotune(mode)
+    try: thlog_append({"type":"autotune", "mode": mode, "HC_MIN": res.get("HC_MIN")})
+    except Exception: pass
+    return res
+gate_autotune_update = gate_autotune_update_logged
+
+def thlog_tail(n: int = 30) -> list:
+    try:
+        lines = open(THLOG_PATH,"r",encoding="utf-8").read().strip().splitlines()
+        return [json.loads(x) for x in lines[-n:]]
+    except Exception:
+        return []
+
+with st.expander("[90] 임계치 히스토리 트래커", expanded=False):
+    st.json(thlog_tail(30))
+    
+    # ================================================================
+# 91. 실험 리포트 자동 생성기 — 요약/메트릭/증거표를 MD+JSON 저장
+#    - HISTORY 최신 항목 + health_check + CE evidence 요약
+# ================================================================
+REPORT_DIR = os.path.join(LOG_DIR, "reports")
+os.makedirs(REPORT_DIR, exist_ok=True)
+
+def _rows_from_ce(ce: dict, k: int = 20) -> list:
+    if not ce: return []
+    ev = [n for n in ce.get("nodes",[]) if n.get("kind")=="evidence"]
+    out=[]
+    for n in ev[:k]:
+        p = n.get("payload") or {}
+        out.append({
+            "id": n.get("id"), "source": p.get("source",""),
+            "score": p.get("score",None), "span": p.get("span",[0,0])
+        })
+    return out
+
+def make_report_md(title: str, last: dict, hc: dict, ce_rows: list) -> str:
+    lines=[]
+    lines.append(f"# {title}")
+    lines.append("")
+    lines.append("## 1) 요약")
+    lines.append(f"- 질문: {last.get('q','')[:300]}")
+    lines.append(f"- 응답 길이: {len(str(last.get('a','')))} chars")
+    lines.append("")
+    lines.append("## 2) 헬스체크")
+    for k,v in (hc.get("verdicts",{}) or {}).items():
+        lines.append(f"- {k}: {v}")
+    if hc.get("link_cov") is not None:
+        lines.append(f"- 링크 커버리지: {hc.get('link_cov'):.3f}")
+    lines.append("")
+    lines.append("## 3) 증거 표 (상위)")
+    lines.append("| id | score | source |")
+    lines.append("|---|---:|---|")
+    for r in ce_rows[:30]:
+        lines.append(f"| {r['id']} | {r.get('score','')} | {r.get('source','')[:120]} |")
+    lines.append("")
+    lines.append("## 4) 텍스트 하이라이트(키워드)")
+    lines.append(highlight_keywords(str(last.get("a","")))[:2000])
+    return "\n".join(lines)
+
+def save_report(title: str) -> dict:
+    hist = st.session_state.get("HISTORY",[])
+    if not hist: return {"ok":False,"error":"no-history"}
+    last = hist[-1]
+    hc   = health_check()
+    ce   = st.session_state.get("CE_GRAPH")
+    rows = _rows_from_ce(ce, 64)
+    md   = make_report_md(title, last, hc, rows)
+    js   = {"title":title,"last":last,"health":hc,"evidence":rows}
+    ts   = int(time.time()); base = f"report_{ts}_{hashlib.sha256(md.encode()).hexdigest()[:8]}"
+    mdp  = os.path.join(REPORT_DIR, base+".md")
+    jsp  = os.path.join(REPORT_DIR, base+".json")
+    open(mdp,"w",encoding="utf-8").write(md)
+    json.dump(js, open(jsp,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+    return {"ok":True,"md":mdp,"json":jsp,"chars":len(md)}
+
+with st.expander("[91] 실험 리포트 자동 생성기", expanded=False):
+    rp_title = st.text_input("리포트 제목", value="GEA 실험 리포트", key="rp_ttl")
+    if st.button("리포트 생성/저장", key="rp_go"):
+        res = save_report(rp_title)
+        st.json(res)
+        if res.get("ok"):
+            st.download_button("MD 다운로드", data=open(res["md"],"rb").read(),
+                               file_name=os.path.basename(res["md"]), mime="text/markdown")
+            st.download_button("JSON 다운로드", data=open(res["json"],"rb").read(),
+                               file_name=os.path.basename(res["json"]), mime="application/json")
+
+# ================================================================
+# 92. 증거 캡처 메모리팩(export) — HISTORY/CE/임계/체인해시를 단일 gzip로
+# ================================================================
+EXPORT_DIR = os.path.join(LOG_DIR, "exports")
+os.makedirs(EXPORT_DIR, exist_ok=True)
+
+def export_memory_pack(name: str="memory_pack") -> str:
+    pkg = {
+        "ts": int(time.time()),
+        "history_tail": st.session_state.get("HISTORY", [])[-10:],
+        "ce_graph": st.session_state.get("CE_GRAPH"),
+        "thresholds": st.session_state.get("HC_MIN", dict()),
+        "real_guard": st.session_state.get("REAL_GUARD_MODE", "soft"),
+    }
+    body = json.dumps(pkg, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    digest = hashlib.sha256(body).hexdigest()[:12]
+    fn = os.path.join(EXPORT_DIR, f"{name}_{digest}.json.gz")
+    import gzip
+    with gzip.open(fn,"wb") as f: f.write(body)
+    return fn
+
+with st.expander("[92] 증거 캡처 메모리팩(export)", expanded=False):
+    nm = st.text_input("팩 이름", value="gea_capture", key="xp_name")
+    if st.button("팩 생성", key="xp_go"):
+        path = export_memory_pack(nm)
+        st.success(f"생성됨: {path}")
+        st.download_button("다운로드", data=open(path,"rb").read(),
+                           file_name=os.path.basename(path), mime="application/gzip")
+
+# ================================================================
+# 93. REPAIR 배치러너 — N회 실행하여 커버리지 향상 추적
+#    - CE_GRAPH에 누적 반영(주의), 향상 곡선 JSON으로 반환
+# ================================================================
+def repair_batch(query: str, rounds: int = 5, k: int = 3) -> dict:
+    covs=[]; logs=[]
+    for i in range(rounds):
+        r = repair_once(query=query, k=k)
+        covs.append(r.get("coverage"))
+        logs.append(r)
+    return {"rounds": rounds, "coverage_series": covs, "logs": logs}
+
+with st.expander("[93] REPAIR 배치러너", expanded=False):
+    rq = st.text_input("보강 쿼리", value="gravitational wave interferometer", key="rb_q")
+    rn = st.slider("라운드 수", 1, 30, 5, key="rb_n")
+    kk = st.slider("라운드당 추가 evidence", 1, 10, 3, key="rb_k")
+    if st.button("배치 실행", key="rb_go"):
+        st.json(repair_batch(rq, rn, kk))
+
+# ================================================================
+# 94. 토픽-포커스 LTM 인덱스 — 검색결과를 인덱스로 저장/불러오기
+# ================================================================
+LTM_IDX_DIR = os.path.join(LOG_DIR, "ltm_index")
+os.makedirs(LTM_IDX_DIR, exist_ok=True)
+
+def ltm_build_index(topic: str, limit: int = 120) -> str:
+    hits = ltm_search(topic, limit=limit)
+    data = {"topic": topic, "count": len(hits), "items": hits}
+    fn = os.path.join(LTM_IDX_DIR, f"idx_{re.sub(r'[^0-9A-Za-z_-]+','_',topic)}.json")
+    json.dump(data, open(fn,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+    return fn
+
+with st.expander("[94] LTM 토픽 인덱스", expanded=False):
+    tp = st.text_input("토픽", value="증거", key="ix_topic")
+    if st.button("인덱스 생성/저장", key="ix_make"):
+        p = ltm_build_index(tp, 200)
+        st.success(f"저장됨: {p}")
+        st.json(json.load(open(p,"r",encoding="utf-8")))
+
+# ================================================================
+# 95. 세이프티 드라이런(REAL 사전탐지) — 금칙어/패턴 스캔 + 가드 동작
+#    - 위험 텍스트 탐지/마스킹 옵션, 세션 가드 모드와 연동(soft/hard/off)
+# ================================================================
+_FORBIDDEN_PATTERNS = [
+    r"초광속|warp|워프",
+    r"(?:5|11|13)\s*차원",
+    r"초자연|예언|영매",
+    r"영겁\s*파동|무영\s*에너지"
+]
+_FORBIDDEN = [re.compile(p, re.I) for p in _FORBIDDEN_PATTERNS]
+
+def real_guard_scan(text: str) -> dict:
+    finds=[]
+    for rx in _FORBIDDEN:
+        for m in rx.finditer(text or ""):
+            finds.append({"span": [m.start(), m.end()], "hit": m.group(0)})
+    return {"hits": finds, "count": len(finds)}
+
+def real_guard_sanitize(text: str) -> str:
+    out = str(text)
+    for rx in _FORBIDDEN:
+        out = rx.sub("〈금칙어〉", out)
+    return out
+
+with st.expander("[95] 세이프티 드라이런(REAL 위반 사전탐지)", expanded=False):
+    raw = st.text_area("검사할 텍스트", value="초광속 워프 드라이브… (예: 금칙어 테스트)", height=90, key="rg_txt")
+    md  = st.selectbox("가드 모드", ["soft","hard","off"], index=["soft","hard","off"].index(st.session_state.get("REAL_GUARD_MODE","soft")), key="rg_mode")
+    if st.button("스캔", key="rg_go"):
+        res = real_guard_scan(raw)
+        st.json(res)
+        if md != "off" and res["count"]>0:
+            if md == "hard":
+                st.error("REAL 위반 탐지됨 → 차단(하드 가드).")
+            else:
+                st.warning("REAL 위반 탐지됨 → 마스킹(소프트 가드).")
+                st.code(real_guard_sanitize(raw))
+                
+                # ================================================================
+# 96. 증거 릴레이션 편집기 — CE 노드 연결/제거( supports / contradicts )
+#    - 세션 CE_GRAPH에 즉시 반영, digest 재계산
+# ================================================================
+_REL_TYPES = ["supports","contradicts","derived_from","measured_by"]
+
+def ce_nodes_by_kind(ce: dict, kind: str) -> list:
+    if not ce: return []
+    return [n for n in ce.get("nodes",[]) if n.get("kind")==kind]
+
+def ce_edge_add(ce: dict, src_id: str, dst_id: str, rel: str="supports") -> bool:
+    if not ce: return False
+    ce.setdefault("edges", [])
+    ce["edges"].append({"src":src_id, "dst":dst_id, "rel":rel})
+    ce["digest"] = hashlib.sha256(json.dumps(ce, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+    return True
+
+def ce_edge_remove(ce: dict, idx: int) -> bool:
+    try:
+        del ce["edges"][idx]
+        ce["digest"] = hashlib.sha256(json.dumps(ce, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+        return True
+    except Exception:
+        return False
+
+with st.expander("[96] 증거 릴레이션 편집기", expanded=False):
+    ce = st.session_state.get("CE_GRAPH")
+    if not ce:
+        st.info("CE-Graph가 없습니다. [63] REPAIR 또는 생성 후 사용하세요.")
+    else:
+        claims = ce_nodes_by_kind(ce, "claim")
+        evids  = ce_nodes_by_kind(ce, "evidence")
+        cids   = [n["id"] for n in claims] or [""]
+        eids   = [n["id"] for n in evids]  or [""]
+
+        st.caption("새 연결 추가")
+        colA,colB,colC = st.columns(3)
+        with colA:
+            src = st.selectbox("SRC(evidence/claim)", eids + cids, key="ed_src")
+        with colB:
+            dst = st.selectbox("DST(claim/evidence)", cids + eids, key="ed_dst")
+        with colC:
+            rel = st.selectbox("관계", _REL_TYPES, index=0, key="ed_rel")
+        if st.button("엣지 추가", key="ed_add"):
+            ok = ce_edge_add(ce, src, dst, rel)
+            st.session_state["CE_GRAPH"] = ce
+            st.success("추가됨" if ok else "실패")
+
+        st.markdown("---")
+        st.caption("기존 연결 제거")
+        edges = ce.get("edges", [])
+        if edges:
+            idx = st.number_input("삭제할 엣지 index", 0, max(0, len(edges)-1), 0, key="ed_idx")
+            st.code(json.dumps(edges[idx], ensure_ascii=False, indent=2))
+            if st.button("엣지 제거", key="ed_del"):
+                ok = ce_edge_remove(ce, int(idx))
+                st.session_state["CE_GRAPH"] = ce
+                st.warning("제거됨" if ok else "실패")
+        else:
+            st.info("엣지가 없습니다.")
+
+# ================================================================
+# 97. LTM 집약 요약기 — LTM 다수 파일에서 핵심 문장 샘플링 요약
+#    - 간단 키프레이즈 스코어로 상위 문장 집계(가벼운 로컬 요약)
+# ================================================================
+def _extract_sentences(txt: str) -> list:
+    txt = re.sub(r"\s+", " ", txt)
+    # 아주 단순 문장 분리
+    return [s.strip() for s in re.split(r"(?<=[\.!?])\s+", txt) if len(s.strip())>0]
+
+def _score_sentence(s: str, keys: list) -> float:
+    s_low = s.lower()
+    return sum(1.0 for k in keys if k in s_low) + min(len(s)/280, 1.0)
+
+def ltm_compact_summary(topic: str, topk_files: int = 8, topk_sents: int = 12) -> dict:
+    files = sorted(glob.glob(os.path.join(LTM_DIR, "*.json*")), reverse=True)[:40]
+    hits=[]
+    patt = topic.lower()
+    for p in files:
+        try:
+            if p.endswith(".gz"):
+                import gzip
+                with gzip.open(p, "rt", encoding="utf-8", errors="ignore") as f:
+                    txt = f.read()
+            else:
+                txt = open(p,"r",encoding="utf-8",errors="ignore").read()
+            if patt in txt.lower():
+                hits.append((p, txt))
+        except Exception:
+            continue
+    hits = hits[:topk_files]
+    keys = list(set([w for w in re.split(r"[^0-9a-zA-Z가-힣]+", topic.lower()) if len(w)>=2]))
+    scored=[]
+    for p,txt in hits:
+        for s in _extract_sentences(txt)[:400]:
+            scored.append((p, s, _score_sentence(s, keys)))
+    scored.sort(key=lambda x: -x[2])
+    best = scored[:topk_sents]
+    return {"topic": topic, "files_considered": len(files), "files_matched": len(hits),
+            "summary": [dict(file=os.path.basename(p), sentence=s, score=round(sc,3)) for p,s,sc in best]}
+
+with st.expander("[97] LTM 집약 요약기", expanded=False):
+    tp = st.text_input("주제/키프레이즈", value="증거 검증", key="lc_topic")
+    if st.button("요약 생성", key="lc_go"):
+        st.json(ltm_compact_summary(tp))
+
+# ================================================================
+# 98. 카드형 답변 컴포저 — 제목/요약/근거/다음액션 카드로 재구성
+#    - 최신 HISTORY를 읽어 구조화 카드 출력 + 저장
+# ================================================================
+def compose_answer_cards(q: str, a: str, ce: dict=None) -> dict:
+    title = (q[:40]+"…") if len(q)>44 else q
+    summary = highlight_keywords(a)[:900]
+    ev = []
+    if ce:
+        for n in ce.get("nodes",[]):
+            if n.get("kind")=="evidence":
+                src = (n.get("payload",{}).get("source","") or "")
+                if src:
+                    ev.append(src)
+    ev = list(dict.fromkeys(ev))[:6]
+    actions = ["증거 커버리지 보강(REPAIR 1회)", "임계치 재평가(66 튜닝)", "리포트 저장(91)", "메모리팩 Export(92)"]
+    return {"title": title, "summary": summary, "evidence": ev, "next_actions": actions}
+
+CARDS_DIR = os.path.join(LOG_DIR, "cards")
+os.makedirs(CARDS_DIR, exist_ok=True)
+
+with st.expander("[98] 카드형 답변 컴포저", expanded=False):
+    hist = st.session_state.get("HISTORY", [])
+    if not hist:
+        st.info("HISTORY가 없습니다. 먼저 응답을 생성하세요.")
+    else:
+        last = hist[-1]
+        cards = compose_answer_cards(last.get("q",""), str(last.get("a","")), st.session_state.get("CE_GRAPH"))
+        st.subheader(cards["title"])
+        st.markdown(cards["summary"])
+        st.markdown("**근거 후보**")
+        for s in cards["evidence"]:
+            st.write("• ", s)
+        st.markdown("**다음 액션**")
+        for s in cards["next_actions"]:
+            st.write("→ ", s)
+        if st.button("카드 저장", key="cd_save"):
+            fp = os.path.join(CARDS_DIR, f"card_{int(time.time())}.json")
+            json.dump(cards, open(fp,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+            st.success(f"저장됨: {fp}")
+
+# ================================================================
+# 99. 프롬프트 프로파일러 — 질문 난이도/길이/키워드/금칙 위험도 측정
+#    - 단순 휴리스틱 + REAL 금칙 스캐너 재사용
+# ================================================================
+def prompt_profile(text: str) -> dict:
+    toks = re.findall(r"[0-9A-Za-z가-힣]+", text or "")
+    uniq = len(set(toks))
+    length = len(text or "")
+    # 난이도: 길이/고유토큰/질문표/전문어(영문 대문자 시퀀스) 가중
+    qmarks = text.count("?")
+    caps   = len(re.findall(r"[A-Z]{2,}", text))
+    dif    = min(1.0, (length/400) * 0.4 + (uniq/80)*0.4 + (qmarks+caps)*0.2)
+    risk   = real_guard_scan(text)
+    return {"chars": length, "unique_tokens": uniq, "qmarks": qmarks, "caps_seq": caps,
+            "difficulty_est": round(dif,3), "real_risk_hits": risk["count"]}
+
+with st.expander("[99] 프롬프트 프로파일러", expanded=False):
+    tx = st.text_area("프롬프트", value="우주정보장 연동의 신뢰성을 높이는 절차를 단계별로 설명해줘.", height=90, key="ppp_txt")
+    if st.button("프로파일", key="ppp_go"):
+        st.json(prompt_profile(tx))
+
+# ================================================================
+# 100. 하루치 종합 리포트 — 오늘의 HISTORY/헬스/REPAIR/임계 로그 집계 저장
+#    - 날짜 기반 파일 1개로 기록, 다운로드 제공
+# ================================================================
+DAILY_DIR = os.path.join(LOG_DIR, "daily")
+os.makedirs(DAILY_DIR, exist_ok=True)
+
+def make_daily_report() -> dict:
+    today = time.strftime("%Y-%m-%d")
+    hist = [h for h in st.session_state.get("HISTORY", []) if time.strftime("%Y-%m-%d", time.localtime(h.get("ts",0))) == today]
+    hc   = health_check()
+    thl  = thlog_tail(200)
+    data = {
+        "date": today,
+        "count_history": len(hist),
+        "health": hc,
+        "threshold_log_tail": thl,
+        "last_answer_len": len(str(hist[-1].get("a",""))) if hist else 0,
+    }
+    fp = os.path.join(DAILY_DIR, f"daily_{today}.json")
+    json.dump(data, open(fp,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+    return {"file": fp, "items": data["count_history"]}
+
+with st.expander("[100] 하루치 종합 리포트", expanded=False):
+    if st.button("오늘 리포트 생성/저장", key="dy_make"):
+        res = make_daily_report()
+        st.success(f"저장됨: {res['file']} (항목 {res['items']}개)")
+        st.download_button("다운로드", data=open(res["file"],"rb").read(),
+                           file_name=os.path.basename(res["file"]), mime="application/json")
+                           
+                           
+                           
