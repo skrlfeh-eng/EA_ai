@@ -2903,4 +2903,396 @@ with st.expander("㊺ 배포 스냅샷 메이커", expanded=False):
         except Exception:
             st.info("환경상 다운로드 버튼이 제한될 수 있습니다. 파일만 생성해 두었습니다.")
             
+            # ================================================================
+# 66. 컨텍스트-게이트 연성 — 임계치 자동 상향/하향 + 헬스체크 오버라이드
+#    - 최근 메트릭/히스토리 기반으로 임계치 미세 조정(±0.005 단위, 안전 범위)
+# ================================================================
+if "HC_MIN" not in st.session_state:
+    st.session_state["HC_MIN"] = dict(_HEALTH_MIN)  # 기본값 복제
+
+def _clamp(x, lo, hi): return max(lo, min(hi, x))
+
+def gate_autotune_update(mode: str = "auto"):
+    """mode: raise | lower | auto"""
+    base = st.session_state.get("HC_MIN", dict(_HEALTH_MIN))
+    last = st.session_state.get("LAST_GATE") or {}
+    hist = st.session_state.get("HISTORY", [])
+    # 단순 휴리스틱: 응답 평균 길이/최근 재현성으로 방향 결정
+    avg_len = (sum(len(str(h.get("a",""))) for h in hist)/len(hist)) if hist else 0
+    repro = last.get("reproducibility", None)
+    direction = 0
+    if mode == "raise": direction = +1
+    elif mode == "lower": direction = -1
+    else:  # auto
+        if repro is not None and repro > 0.965 and avg_len > 800:
+            direction = +1
+        elif repro is not None and repro < 0.92:
+            direction = -1
+        else:
+            direction = 0
+    step = 0.005 * direction
+    new_base = dict(base)
+    for k in ("ce_coverage","citation_coverage","reproducibility","subset_robustness"):
+        new_base[k] = round(_clamp(base.get(k, _HEALTH_MIN[k]) + step, 0.80, 0.995), 3)
+    st.session_state["HC_MIN"] = new_base
+    return {"avg_answer_len": avg_len, "last_repro": repro, "direction": direction, "HC_MIN": new_base}
+
+# 기존 health_check를 오버라이드(세션 임계치 사용)
+_prev_health_check = health_check
+def health_check_dynamic() -> dict:
+    gate = st.session_state.get("LAST_GATE") or {}
+    ce   = st.session_state.get("CE_GRAPH")
+    cov  = None
+    if ce:
+        v = verify_ce_links(ce)
+        cov = v.get("coverage",0)
+    base = st.session_state.get("HC_MIN", dict(_HEALTH_MIN))
+    verdicts = {}
+    for k,th in base.items():
+        val = gate.get(k)
+        if val is None: verdicts[k] = "unknown"
+        else: verdicts[k] = "OK" if (val >= th) else "LOW"
+    if cov is not None:
+        verdicts["ce_link_coverage"] = "OK" if cov >= 0.5 else "LOW"
+    # 메모리 코어 확인
+    mem_ok = True
+    try: _ = mem_load_core("EA_PURPOSE")
+    except Exception: mem_ok=False
+    verdicts["memory_core"] = "OK" if mem_ok else "WARN"
+    return {"gate": gate, "verdicts": verdicts, "link_cov": cov, "thresholds": base}
+health_check = health_check_dynamic
+
+with st.expander("[66] 게이트 자동 튜닝", expanded=False):
+    mode = st.radio("튜닝 모드", ["auto","raise","lower"], horizontal=True, key="gt_mode")
+    if st.button("임계치 조정 실행", key="gt_apply"):
+        st.json(gate_autotune_update(mode))
+    if st.button("헬스 체크(동적)", key="gt_hc"):
+        st.json(health_check())
+
+# ================================================================
+# 67. 장문 스트리밍 L∞ — 세그먼트 스트림 출력(중지/재개 버튼형)
+#    - 백그라운드 쓰레드 없이, 버튼 루프 기반(모바일/웹 안전)
+# ================================================================
+if "LINF_STOP" not in st.session_state:
+    st.session_state["LINF_STOP"] = False
+
+def run_linf_stream(topic: str, segs: int = 8, lvl: int = 25):
+    out = []
+    area = st.empty()
+    for i in range(segs):
+        if st.session_state.get("LINF_STOP"): break
+        prompt = f"{topic}\n\n[세그먼트 {i+1}/{segs}] 핵심 근거와 절차를 단계별로 써줘."
+        ans = generate_with_memory(prompt, level=lvl)
+        out.append(str(ans))
+        area.markdown("**스트리밍 진행 중…**\n\n" + "\n\n---\n\n".join(out))
+    return "\n\n---\n\n".join(out)
+
+with st.expander("[67] L∞ 스트리밍", expanded=False):
+    tpc = st.text_input("주제", value="우주정보장 연결 설계의 근거·절차·리스크", key="linf_tpc")
+    seg = st.slider("세그먼트 수", 1, 50, 8, key="linf_segs")
+    lvl = st.slider("레벨", 1, 999, 25, key="linf_lvl")
+    c1,c2 = st.columns(2)
+    with c1:
+        if st.button("스트리밍 시작", key="linf_go"):
+            st.session_state["LINF_STOP"] = False
+            text = run_linf_stream(tpc, seg, lvl)
+            st.session_state["LINF_LAST"] = text
+    with c2:
+        if st.button("중지", key="linf_stop"):
+            st.session_state["LINF_STOP"] = True
+            st.info("스트림 중지 요청됨.")
+    if st.session_state.get("LINF_LAST"):
+        st.download_button("최근 스트림 저장", data=st.session_state["LINF_LAST"].encode("utf-8"),
+                           file_name="linf_stream.txt", mime="text/plain")
+
+# ================================================================
+# 68. 응답 카드용 CE 미리보기 — 최근 CE evidence 요약
+#    - HISTORY와 CE_GRAPH를 나란히 프리뷰(증거 커버리지 보조 확인)
+# ================================================================
+def ce_preview_snippets(ce: dict, k: int = 5) -> list:
+    if not ce: return []
+    ev = [n for n in ce.get("nodes",[]) if n.get("kind")=="evidence"]
+    rows=[]
+    for n in ev[:k]:
+        src=(n.get("payload") or {}).get("source","")
+        rows.append({"source": src, "id": n.get("id"), "score": (n.get("payload") or {}).get("score")})
+    return rows
+
+with st.expander("[68] 최근 응답 + CE 미리보기", expanded=False):
+    if st.session_state.get("HISTORY"):
+        last = st.session_state["HISTORY"][-1]
+        st.write("**최근 질문**:", last.get("q","")[:200])
+        st.write("**최근 응답(요약)**:", str(last.get("a",""))[:600])
+    else:
+        st.info("히스토리가 아직 없습니다.")
+    ce = st.session_state.get("CE_GRAPH")
+    st.write("**CE Evidence 미리보기**")
+    st.json(ce_preview_snippets(ce, k=6))
+    if ce:
+        st.write("**링크 커버리지(재평가)**")
+        st.json(verify_ce_links(ce))
+
+# ================================================================
+# 69. 사용자 프롬프트 사전셋 저장/불러오기 — 로컬 JSON(영속)
+#    - streamlit 세션 종료 후에도 유지됨(LOG_DIR/presets.json)
+# ================================================================
+PRESET_PATH = os.path.join(LOG_DIR, "presets.json")
+
+def presets_load() -> list:
+    try:
+        return json.load(open(PRESET_PATH, "r", encoding="utf-8"))
+    except Exception:
+        return []
+
+def presets_save(items: list):
+    try:
+        json.dump(items, open(PRESET_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+if "PRESETS_USER" not in st.session_state:
+    st.session_state["PRESETS_USER"] = presets_load()
+
+with st.expander("[69] 사용자 사전셋 관리", expanded=False):
+    st.markdown("기존 사전셋 + 사용자 사전셋을 통합해서 사용할 수 있습니다.")
+    new_name = st.text_input("이름", value="내 체크리스트", key="ps_name")
+    new_body = st.text_area("프롬프트", value="에아, 오늘 해야 할 일 7가지를 근거와 함께 단계별로 제안해줘.", height=80, key="ps_body")
+    if st.button("추가/갱신", key="ps_add"):
+        # 동일 이름 있으면 교체
+        lst = [p for p in st.session_state["PRESETS_USER"] if p.get("name")!=new_name]
+        lst.append({"name": new_name, "body": new_body})
+        st.session_state["PRESETS_USER"] = lst
+        presets_save(lst)
+        st.success("사전셋 저장 완료")
+    if st.button("불러오기", key="ps_load"):
+        st.session_state["PRESETS_USER"] = presets_load()
+        st.info(f"불러온 항목: {len(st.session_state['PRESETS_USER'])}")
+    st.json(st.session_state["PRESETS_USER"][:10])
+
+# (보너스) 56의 _PRESETS에 사용자셋을 합쳐 쓰고 싶다면, 아래를 참고:
+try:
+    # 런타임 통합뷰 (오류 무시)
+    _PRESETS = list(_PRESETS) + [(p["name"], p["body"]) for p in st.session_state.get("PRESETS_USER", [])]
+except Exception:
+    pass
+
+# ================================================================
+# 70. 로컬 키-값 저장소 — 간단 K/V(파일 영속) + 인터페이스
+#    - 작은 설정/토큰/임시 데이터 저장 용
+# ================================================================
+KV_PATH = os.path.join(LOG_DIR, "kv_store.json")
+def kv_init():
+    if not os.path.exists(KV_PATH):
+        json.dump({}, open(KV_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+
+def kv_get(k: str, default=None):
+    kv_init()
+    d=json.load(open(KV_PATH,"r",encoding="utf-8"))
+    return d.get(k, default)
+
+def kv_put(k: str, v):
+    kv_init()
+    d=json.load(open(KV_PATH,"r",encoding="utf-8"))
+    d[k]=v
+    json.dump(d, open(KV_PATH,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+
+def kv_delete(k: str):
+    kv_init()
+    d=json.load(open(KV_PATH,"r","utf-8"))
+    if k in d: del d[k]
+    json.dump(d, open(KV_PATH,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+
+with st.expander("[70] 로컬 K/V 저장소", expanded=False):
+    k = st.text_input("키", value="sample_key", key="kv_k")
+    v = st.text_area("값(JSON 가능)", value="sample_value", key="kv_v")
+    c1,c2,c3,c4=st.columns(4)
+    with c1:
+        if st.button("GET", key="kv_get"):
+            st.write(kv_get(k))
+    with c2:
+        if st.button("PUT", key="kv_put"):
+            try:
+                val = json.loads(v)
+            except Exception:
+                val = v
+            kv_put(k, val); st.success("저장됨")
+    with c3:
+        if st.button("DEL", key="kv_del"):
+            kv_delete(k); st.info("삭제됨")
+    with c4:
+        if st.button("전체 보기", key="kv_all"):
+            kv_init(); st.json(json.load(open(KV_PATH,"r",encoding="utf-8")))
             
+            # ================================================================
+# 71. 장문 응답 하이라이트/인용 스팬 — 키워드 하이라이트 + 인용 블록
+#    - HISTORY 최신 응답에서 핵심 키워드 하이라이트, 인용 스팬 생성
+# ================================================================
+_HL_KEYS = ["증거", "단위", "재현", "절차", "데이터", "위험", "완화", "링크", "근거", "검증"]
+
+def highlight_keywords(text: str, keys=_HL_KEYS):
+    import re
+    def repl(m): return f"**{m.group(0)}**"
+    out = text
+    for k in keys:
+        try:
+            out = re.sub(rf"({re.escape(k)})", repl, out, flags=re.I)
+        except re.error:
+            pass
+    return out
+
+def make_quote_spans(text: str, max_blocks=4, block_len=280):
+    blocks=[]
+    t = str(text).splitlines()
+    buf=""
+    for line in t:
+        if len(buf)+len(line)+1 <= block_len:
+            buf += (("\n" if buf else "") + line)
+        else:
+            blocks.append(buf); buf=line
+        if len(blocks)>=max_blocks: break
+    if buf and len(blocks)<max_blocks: blocks.append(buf)
+    return [b.strip() for b in blocks if b.strip()]
+
+with st.expander("[71] 응답 하이라이트/인용", expanded=False):
+    if st.session_state.get("HISTORY"):
+        last = st.session_state["HISTORY"][-1]
+        ans  = str(last.get("a",""))
+        st.markdown("**하이라이트 미리보기**")
+        st.markdown(highlight_keywords(ans)[:1600])
+        st.markdown("---")
+        st.markdown("**인용 스팬**")
+        for i, q in enumerate(make_quote_spans(ans), 1):
+            st.markdown(f"> [인용 {i}] {q}")
+    else:
+        st.info("히스토리가 아직 없습니다.")
+
+# ================================================================
+# 72. 증거 테이블 뷰 — CE evidence 표/정렬/요약(세션 내)
+#    - nodes(kind=evidence)만 추출 → 간단 표로 가시화
+# ================================================================
+def ce_evidence_rows(ce: dict) -> list:
+    if not ce: return []
+    out=[]
+    for n in ce.get("nodes", []):
+        if n.get("kind") == "evidence":
+            p = n.get("payload") or {}
+            out.append({
+                "id": n.get("id"),
+                "source": p.get("source",""),
+                "score": p.get("score", None),
+                "span":  str(p.get("span", ""))[:60]
+            })
+    return out
+
+with st.expander("[72] 증거 테이블", expanded=False):
+    ce = st.session_state.get("CE_GRAPH")
+    rows = ce_evidence_rows(ce)
+    if rows:
+        sort_key = st.selectbox("정렬", ["score","id","source"], index=0, key="ce_sort")
+        rev = st.checkbox("내림차순", value=True, key="ce_rev")
+        rows = sorted(rows, key=lambda x: (x.get(sort_key) is None, x.get(sort_key)), reverse=rev)
+        st.dataframe(rows, use_container_width=True)
+        st.markdown("**커버리지 재평가**")
+        st.json(verify_ce_links(ce))
+    else:
+        st.info("CE evidence가 아직 부족합니다. [63] REPAIR로 보강하세요.")
+
+# ================================================================
+# 73. 사용자 액션 단축키(라이트) — 주요 버튼 단축 실행
+#    - Streamlit은 네이티브 핫키가 없어, selectbox + 실행 버튼으로 유사 제공
+# ================================================================
+_ACTIONS = {
+    "응답 생성(카드) 실행": ("xl_go",),
+    "액티브 N회 실행": ("am_run",),
+    "헬스 체크": ("hc_go","gt_hc"),
+    "REPAIR 1회": ("rp_go",),
+    "LTM 스냅샷 저장": ("ltm_save",),
+    "최근 이벤트 보기": ("ev_list",),
+}
+
+with st.expander("[73] 액션 단축키", expanded=False):
+    act = st.selectbox("액션 선택", list(_ACTIONS.keys()), key="ak_sel")
+    st.caption("선택 후 아래 실행을 누르면 해당 영역으로 스크롤됩니다.")
+    if st.button("실행", key="ak_do"):
+        st.write(f"선택된 액션: {act} → 해당 섹션으로 이동해 실행 버튼을 눌러주세요.")
+        st.info("※ 보안상 직접 버튼 트리거는 제한됩니다. (Streamlit 표준 동작)")
+
+# ================================================================
+# 74. 프로젝트 설정 패널 — 임계치/가드/경로/로그 보존일수 등
+#    - KV 저장소 연동하여 지속화
+# ================================================================
+def _get_default_cfg():
+    return {
+        "thresholds": st.session_state.get("HC_MIN", dict(_HEALTH_MIN)),
+        "real_guard": st.session_state.get("REAL_GUARD_MODE", "soft"),
+        "log_dir": LOG_DIR,
+        "ltm_keep_days": kv_get("ltm_keep_days", 30),
+    }
+
+with st.expander("[74] 프로젝트 설정", expanded=False):
+    cfg = _get_default_cfg()
+    st.markdown("**임계치(HC_MIN)**")
+    colA,colB = st.columns(2)
+    with colA:
+        ce_min = st.number_input("ce_coverage ≥", value=float(cfg["thresholds"]["ce_coverage"]), min_value=0.80, max_value=0.995, step=0.005, key="cfg_ce")
+        ct_min = st.number_input("citation_coverage ≥", value=float(cfg["thresholds"]["citation_coverage"]), min_value=0.80, max_value=0.995, step=0.005, key="cfg_ct")
+    with colB:
+        rp_min = st.number_input("reproducibility ≥", value=float(cfg["thresholds"]["reproducibility"]), min_value=0.80, max_value=0.995, step=0.005, key="cfg_rp")
+        sr_min = st.number_input("subset_robustness ≥", value=float(cfg["thresholds"]["subset_robustness"]), min_value=0.80, max_value=0.995, step=0.005, key="cfg_sr")
+    guard = st.radio("REAL 가드 모드", ["soft","hard","off"], index=["soft","hard","off"].index(cfg["real_guard"]), key="cfg_guard")
+    keep = st.number_input("LTM 보존일(권장 30)", min_value=1, max_value=3650, value=int(cfg["ltm_keep_days"]), step=1, key="cfg_keep")
+    if st.button("설정 저장", key="cfg_save"):
+        st.session_state["HC_MIN"] = {
+            "ce_coverage": ce_min, "citation_coverage": ct_min,
+            "reproducibility": rp_min, "subset_robustness": sr_min
+        }
+        st.session_state["REAL_GUARD_MODE"] = guard
+        kv_put("ltm_keep_days", int(keep))
+        st.success("설정 저장 완료")
+
+# ================================================================
+# 75. 안전 백업·복구 마법사 — ZIP 백업/복원 + LTM 정리(보존일)
+#    - 65의 번들 ZIP과 연계, 보존일 초과 LTM 자동 정리 옵션
+# ================================================================
+def cleanup_ltm_retention(days: int):
+    import time
+    keep_s = int(days) * 86400
+    now = int(time.time())
+    removed = []
+    for p in glob.glob(os.path.join(LTM_DIR, "*.json.gz")):
+        try:
+            ts = int(os.path.basename(p).split("_",1)[0])
+            if now - ts > keep_s:
+                os.remove(p); removed.append(os.path.basename(p))
+        except Exception:
+            pass
+    return removed
+
+with st.expander("[75] 백업·복구 마법사", expanded=False):
+    st.markdown("**백업**")
+    inc_logs = st.checkbox("로그 포함", value=True, key="bk_inc")
+    if st.button("ZIP 백업 생성", key="bk_zip"):
+        z = make_deploy_zip(include_logs=inc_logs)
+        st.success(f"백업 ZIP 생성: {z}")
+        try:
+            st.download_button("ZIP 다운로드", data=open(z,"rb").read(), file_name=z, mime="application/zip")
+        except Exception:
+            st.info("환경상 직접 다운로드가 제한될 수 있습니다.")
+    st.markdown("---")
+    st.markdown("**복구**")
+    upz = st.file_uploader("ZIP 업로드(복구)", type=["zip"], key="bk_upl")
+    if st.button("ZIP 내용 목록 보기", key="bk_list") and upz is not None:
+        from zipfile import ZipFile
+        import io
+        zf = ZipFile(io.BytesIO(upz.getvalue()))
+        st.json(zf.namelist()[:50])
+    st.markdown("---")
+    st.markdown("**LTM 보존일 정리**")
+    keep_days = kv_get("ltm_keep_days", 30)
+    st.caption(f"현재 보존일: {keep_days}일")
+    if st.button("오래된 LTM 정리 실행", key="bk_prune"):
+        rm = cleanup_ltm_retention(int(keep_days))
+        st.success(f"정리됨: {len(rm)}개")
+        if rm: st.json(rm[:20])
+        
+        
