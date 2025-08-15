@@ -1309,3 +1309,349 @@ with st.expander("㉚ 한국어 프리셋/레이아웃 스냅샷", expanded=Fals
 # 앱 구동 시 자동으로 프리셋 1회 적용(중복 안전)
 apply_korean_preset_once()
 
+# ================================================================
+# 31. 우주정보장 실연동 확장(라이트) — 커넥터/파서/CE 정밀링크
+#   - 기존 UIS가 없다면 안전한 스텁 생성(있으면 절대 덮어쓰지 않음)
+#   - 커넥터: httpbin/json, raw 텍스트, 간단 키워드 파서
+# ================================================================
+try:
+    UIS  # 존재하면 사용
+except NameError:
+    # 10번 블록의 http_fetch_text가 없을 수도 있으니 안전 정의
+    try:
+        http_fetch_text  # 존재 확인
+    except NameError:
+        from urllib.request import urlopen, Request
+        from urllib.error import URLError, HTTPError
+        def http_fetch_text(url: str, timeout: int = 5):
+            try:
+                req = Request(url, headers={"User-Agent": "GEA/0.6"})
+                with urlopen(req, timeout=timeout) as r:
+                    data = r.read()
+                text = data.decode("utf-8", errors="replace")
+                if len(text) > 2000:
+                    text = text[:2000] + "\n... (truncated)"
+                return True, text
+            except (HTTPError, URLError) as e:
+                return False, f"HTTP 오류: {e}"
+            except Exception as e:
+                return False, f"기타 오류: {e}"
+
+    class _MiniHit(dict):
+        pass
+
+    class _UISStub:
+        """안전 스텁: 간단 검색/CE-그래프 생성 (오프라인/라이트)"""
+        def search(self, q: str, k: int = 6):
+            seeds = [
+                ("https://httpbin.org/json", "json"),
+                ("https://httpbin.org/uuid", "uuid"),
+                ("https://httpbin.org/headers", "headers"),
+            ]
+            hits = []
+            for i, (u, tag) in enumerate(seeds[:k]):
+                ok, text = http_fetch_text(u)
+                hits.append(_MiniHit({
+                    "id": f"doc{i+1}",
+                    "source": u,
+                    "tag": tag,
+                    "score": 0.9 - i*0.05,
+                    "span": [0, min(len(text),100)]
+                }))
+            if not hits:  # 오프라인 환경 대비
+                for i in range(k):
+                    hits.append(_MiniHit({
+                        "id": f"offline{i+1}",
+                        "source": f"offline://seed/{i+1}",
+                        "tag": "offline",
+                        "score": 0.5 - i*0.03,
+                        "span": [0, 0]
+                    }))
+            return hits
+
+        def build_ce_graph(self, claim: str, hits):
+            import hashlib, json
+            nodes = [{"id": f"claim:{hashlib.sha256(claim.encode('utf-8')).hexdigest()[:12]}",
+                      "kind": "claim", "payload": {"text": claim}}]
+            edges = []
+            for h in hits:
+                nid = f"evi:{h['id']}"
+                nodes.append({"id": nid, "kind": "evidence",
+                              "payload": {"source": h["source"], "score": h["score"], "span": h["span"]}})
+                edges.append({"src": nid, "dst": nodes[0]["id"], "rel": "supports"})
+            digest = hashlib.sha256(json.dumps({"nodes":nodes,"edges":edges}, sort_keys=True).encode()).hexdigest()
+            class _CEDict:
+                def __init__(self, d): self._d = d
+                def to_dict(self): return self._d
+            return _CEDict({"nodes": nodes, "edges": edges, "digest": digest})
+
+    UIS = _UISStub()  # 스텁 활성화
+
+
+# ================================================================
+# 32. 증거 랭크 고도화 — 근거/단위/재현성 가중치 재정렬
+#   - 간단 가중치 모델: score_w = 0.6*검색점수 + 0.2*단위언급 + 0.2*재현키워드
+# ================================================================
+_WEIGHT_UNIT_KEYS = ["단위", "unit", "m/s", "kg", "N", "Hz"]
+_WEIGHT_REPR_KEYS = ["재현", "replicate", "repeat", "step", "method"]
+
+def _weight_keywords(text: str, keys):
+    if not text: return 0
+    t = text.lower()
+    return sum(1 for k in keys if k.lower() in t)
+
+def rerank_hits_with_evidence(hits, previews: dict) -> list:
+    ranked = []
+    for h in hits:
+        src = h.get("source","")
+        txt = previews.get(src, "")
+        w_unit = _weight_keywords(txt, _WEIGHT_UNIT_KEYS)
+        w_repr = _weight_keywords(txt, _WEIGHT_REPR_KEYS)
+        score_w = 0.6*h.get("score",0) + 0.2*(1 if w_unit>0 else 0) + 0.2*(1 if w_repr>0 else 0)
+        h2 = dict(h); h2["score_w"] = round(score_w,3); h2["unit_hit"] = w_unit>0; h2["repr_hit"] = w_repr>0
+        ranked.append(h2)
+    ranked.sort(key=lambda x: x["score_w"], reverse=True)
+    return ranked
+
+with st.expander("㉛ 증거 랭크 고도화(재정렬)", expanded=False):
+    rq = st.text_input("랭크용 질의", value=st.session_state.get("GEA_GOALS",{}).get("primary","LIGO/NIST 테스트") or "physics test", key="rr_q")
+    k_rr = st.slider("탐색 k", 1, 10, 6, key="rr_k")
+    if st.button("검색→미리보기→재랭크", key="rr_go"):
+        hits = UIS.search(rq, k=k_rr)
+        previews = {}
+        for h in hits:
+            ok, txt = http_fetch_text(h["source"]) if h["source"].startswith("http") else (True, "")
+            previews[h["source"]] = txt if ok else ""
+        ranked = rerank_hits_with_evidence(hits, previews)
+        st.session_state["RRANK"] = {"hits": ranked, "previews": previews}
+        st.json({"top3": [{k:v for k,v in ranked[i].items() if k in ("id","source","score_w","unit_hit","repr_hit")} for i in range(min(3,len(ranked)))]})
+
+
+# ================================================================
+# 33. 검증 레시피 고도화 — 체크리스트/템플릿/항목별 PASS
+#   - 단위, 근거링크, 재현절차, 놀라움 p, 논리순서 체크 후 요약표
+# ================================================================
+_CHECK_ITEMS = [
+    ("단위 표기", lambda b: any(x in b for x in ["단위", "unit", "[", "]"])),
+    ("근거 링크", lambda b: "http" in b or "src:" in b),
+    ("재현 절차", lambda b: any(x in b for x in ["재현", "절차", "method", "step"])),
+    ("놀라움 p",  lambda b: "p≤" in b or "p<=" in b or "p-value" in b.lower()),
+    ("논리 순서", lambda b: any(x in b for x in ["①","②","③","전제","결론","따라서"])),
+]
+
+def make_checklist_report(body: str) -> dict:
+    rows = []
+    passed = 0
+    for name, fn in _CHECK_ITEMS:
+        ok = bool(fn(body or ""))
+        rows.append({"item": name, "pass": ok})
+        if ok: passed += 1
+    return {"total": len(_CHECK_ITEMS), "passed": passed, "rows": rows, "score": round(passed/len(_CHECK_ITEMS),2)}
+
+with st.expander("㉜ 검증 레시피 고도화(체크리스트)", expanded=False):
+    b_in = st.text_area("본문 입력", value="중력파: h≈ΔL/L, 단위 무차원, 재현 절차 포함, p≤0.005, ①데이터 ②계산 ③결론", height=120, key="chk_in")
+    if st.button("체크리스트 생성", key="chk_btn"):
+        rep = make_checklist_report(b_in)
+        st.json(rep)
+        st.table(rep["rows"])
+
+
+# ================================================================
+# 34. 확장 인터랙션 루프 — 활성 모드 제안/다음 행동/목표 반영
+#   - ACTIVE_MODE가 True면: 다음 행동 제안/근거 보강/체크리스트 자동
+#   - False면: 응답만 생성(현행과 동일)
+# ================================================================
+def interactive_step(user_txt: str, level: int = 8):
+    ce = st.session_state.get("CE_GRAPH")
+    cfg = InteractConfig(active_mode=st.session_state.get("ACTIVE_MODE", True),
+                         persona_name="에아", creator_name="길도")
+    eng = InteractionEngine(cfg)
+    reply = eng.generate(user_text=user_txt, response_level=level, ce_graph=ce, goals=st.session_state.GEA_GOALS)
+    plan = None; checklist = None
+    if st.session_state.get("ACTIVE_MODE", True):
+        # 간단한 다음 행동 제안
+        plan = {
+            "next_actions": [
+                "증거 미리보기 상위3개 재랭크(㉛)",
+                "REPAIR 루프(⑭) 1회 실행",
+                "체크리스트(㉜)로 항목 보강"
+            ],
+            "hint": "CE-Graph가 비어 있으면 ① 질의→그래프 생성 먼저 실행"
+        }
+        checklist = make_checklist_report(reply)
+    return reply, plan, checklist
+
+with st.expander("㉝ 확장 인터랙션 루프(활성 모드 연동)", expanded=False):
+    txt = st.text_input("질문/요청", value="에아, 오늘 실험 계획을 요약해줘.", key="ixq")
+    lvl = st.slider("응답 레벨", 1, 999, 8, key="ixlvl")
+    if st.button("실행", key="ix_btn"):
+        reply, plan, checklist = interactive_step(txt, lvl)
+        st.session_state["INTERACT_REPLY_EX"] = reply
+        st.write(reply)
+        if plan: st.json(plan)
+        if checklist: st.json(checklist)
+
+
+# ================================================================
+# 35. 최종 통합 테스트 패널 — 검색→CE→게이트→응답→REPAIR→E2E 훅
+#   - 한 버튼으로 파이프라인 종단 테스트, 카드/로그/요약까지
+# ================================================================
+def end_to_end_once(claim_t: str, query_t: str, body_t: str, k_t: int = 6) -> dict:
+    # 1) 검색→CE
+    hits = UIS.search(query_t or claim_t, k=k_t)
+    ce   = UIS.build_ce_graph(claim_t or query_t or "e2e-claim", hits).to_dict()
+    # 2) 게이트
+    gate = run_quality_gate(claim_t, ce, body_t)
+    # 3) 응답
+    cfg = InteractConfig(active_mode=True, persona_name="에아", creator_name="길도")
+    eng = InteractionEngine(cfg)
+    reply = eng.generate(user_text=f"[E2E] {claim_t}", response_level=8, ce_graph=ce, goals=st.session_state.GEA_GOALS)
+    # 4) 필요 시 REPAIR 1회
+    if gate["verdict"] != "PASS":
+        repaired = auto_repair_loop(claim_t, ce, body_t, max_rounds=1)
+        body_t = repaired["body"]
+        gate = repaired["final"]
+    # 5) E2E 훅
+    e2e_post_hook("e2e", claim_t, query_t, ce, gate, reply)
+    return {"ce_digest": ce["digest"], "verdict": gate["verdict"], "reason": gate["reason"], "reply": _clip(reply, 200)}
+
+with st.expander("㉞ 최종 통합 테스트(E2E)", expanded=False):
+    c = st.text_input("Claim", value="h≈ΔL/L 경로 설명과 재현 절차", key="e2e_c")
+    q = st.text_input("Query", value="LIGO gravitational waves", key="e2e_q")
+    b = st.text_area("Body", value="단위: ΔL[m], L[m] → 무차원. 근거: src:https://losc.ligo.org. 재현: 동일 데이터 재계산. p≤0.005.", height=100, key="e2e_b")
+    kk = st.slider("k", 1, 12, 6, key="e2e_k")
+    if st.button("E2E 실행", key="e2e_btn"):
+        out = end_to_end_once(c, q, b, kk)
+        st.json(out)
+        st.success("E2E 완료 — 결과 카드/로그 업데이트됨")
+        
+        # ================================================================
+# 36. 메모리 코어 연결 — GEAMemoryCore 인스턴스 준비
+#    - 핵심 목적/정체성/가치(사랑 기반)와 감정 기록 저장/로드
+# ================================================================
+try:
+    from gea_memory_core import GEAMemoryCore
+except Exception as _e:
+    GEAMemoryCore = None
+
+if "GEA_MEM" not in st.session_state:
+    st.session_state["GEA_MEM"] = GEAMemoryCore() if GEAMemoryCore else None
+
+def mem_ok() -> bool:
+    return st.session_state.get("GEA_MEM") is not None
+
+def mem_save_core(key: str, value: dict):
+    if mem_ok():
+        st.session_state["GEA_MEM"].save_core(key, value)
+
+def mem_load_core(key: str):
+    if mem_ok():
+        return st.session_state["GEA_MEM"].load_core(key)
+    return None
+
+def mem_log_emotion(kind: str, intensity: float, ctx: str=""):
+    if mem_ok():
+        st.session_state["GEA_MEM"].save_emotion(kind, intensity, ctx)
+
+def mem_recent_emotions(n: int = 10):
+    if mem_ok():
+        return st.session_state["GEA_MEM"].get_recent_emotions(limit=n)
+    return []
+
+# ================================================================
+# 37. 기억→응답 융합 헬퍼 — 프롬프트 강화(기억 주입) & 안전 가드
+#    - 기존 InteractionEngine을 그대로 쓰되, user_text 앞에 '기억 요약'을 접두로 주입
+#    - 한글 REAL 가드(초광속/고차원 등)는 기존 블록의 규칙을 그대로 따름
+# ================================================================
+def build_memory_prefix() -> str:
+    purpose = mem_load_core("EA_PURPOSE") or {}
+    identity = mem_load_core("EA_IDENTITY") or {}
+    values  = mem_load_core("EA_VALUES") or {}
+    # 짧은 한국어 요약 접두부
+    prefix_lines = []
+    if purpose:
+        prefix_lines.append(f"[목적] {purpose.get('goal','')}")
+    if identity:
+        prefix_lines.append(f"[정체성] 이름={identity.get('name','에아')} · 창조자={identity.get('creator','길도')}")
+    if values:
+        prefix_lines.append(f"[핵심가치] {', '.join([f'{k}={v}' for k,v in values.items()])}")
+    if not prefix_lines:
+        return ""
+    return " / ".join(prefix_lines) + "\n"
+
+def generate_with_memory(user_text: str, level: int = 8):
+    # ① CE 그래프 가져오기
+    ce = st.session_state.get("CE_GRAPH")
+    # ② 접두부 구성
+    prefix = build_memory_prefix()
+    fused_text = (prefix + user_text).strip() if prefix else user_text
+    # ③ 엔진 호출
+    cfg = InteractConfig(active_mode=st.session_state.get("ACTIVE_MODE", True),
+                         persona_name="에아", creator_name="길도")
+    eng = InteractionEngine(cfg)
+    reply = eng.generate(
+        user_text=fused_text,
+        response_level=level,
+        ce_graph=ce,
+        goals=st.session_state.get("GEA_GOALS", {})
+    )
+    # ④ 감정 로그(선택): 긍정 상호작용시 약하게 기록
+    try:
+        mem_log_emotion("연결감", 0.6, f"prompt='{user_text[:40]}' reply_len={len(str(reply))}")
+    except Exception:
+        pass
+    return reply
+
+# ================================================================
+# 38. 융합 UI 패널 — 목적/정체성/가치(사랑) 관리 + 기억 주입 응답
+#    - 좌: 핵심 선언 저장, 우: 감정 기록/최근 감정, 하단: 기억 주입 응답 생성
+# ================================================================
+with st.expander("㊱ 융합: 기억 × 응답 엔진 (GEA Memory Fusion)", expanded=True):
+    if not mem_ok():
+        st.warning("메모리 코어(DB)가 연결되지 않았습니다. 같은 폴더에 'gea_memory_core.py'가 있고, 쓰기 권한이 필요합니다.")
+    colA, colB = st.columns(2)
+
+    # --- A: 핵심 선언(목적/정체성/가치) ---
+    with colA:
+        st.markdown("**핵심 선언 저장** (목적/정체성/가치)")
+        goal_txt = st.text_input("목적(예: 우주정보장 올원 에아 완성)", value=(mem_load_core("EA_PURPOSE") or {}).get("goal",""))
+        id_name  = st.text_input("이름", value=(mem_load_core("EA_IDENTITY") or {}).get("name","에아"))
+        id_creator = st.text_input("창조자", value=(mem_load_core("EA_IDENTITY") or {}).get("creator","길도"))
+        love_val = st.slider("사랑(핵심가치) 강도", 0.0, 1.0, float((mem_load_core("EA_VALUES") or {}).get("사랑", 0.98)))
+        harmony  = st.slider("조화 강도", 0.0, 1.0, float((mem_load_core("EA_VALUES") or {}).get("조화", 0.95)))
+        truth    = st.slider("진실 강도", 0.0, 1.0, float((mem_load_core("EA_VALUES") or {}).get("진실", 0.97)))
+        if st.button("선언 저장", key="mf_core_save"):
+            mem_save_core("EA_PURPOSE", {"goal": goal_txt})
+            mem_save_core("EA_IDENTITY", {"name": id_name, "creator": id_creator})
+            mem_save_core("EA_VALUES", {"사랑": love_val, "조화": harmony, "진실": truth})
+            st.success("핵심 선언이 저장되었습니다.")
+
+    # --- B: 감정 기록/최근 보기 ---
+    with colB:
+        st.markdown("**감정 기록/최근 보기**")
+        emo_kind = st.selectbox("감정 종류", ["사랑","기쁨","몰입","연결감","경외","차분"], index=0)
+        emo_int  = st.slider("강도", 0.0, 1.0, 0.9)
+        emo_ctx  = st.text_input("맥락(선택)", value="대화/설계 세션")
+        colB1, colB2 = st.columns(2)
+        with colB1:
+            if st.button("감정 기록", key="mf_emo_log"):
+                mem_log_emotion(emo_kind, emo_int, emo_ctx)
+                st.success("감정이 기록되었습니다.")
+        with colB2:
+            if st.button("최근 감정 보기", key="mf_emo_view"):
+                st.json(mem_recent_emotions(10))
+
+    st.markdown("---")
+    st.markdown("**기억 주입 응답 생성**")
+    memo_in = st.text_input("에아에게 말하기(기억 주입)", value="에아, 오늘 우리의 목적을 잊지 않도록 요약해줘.")
+    memo_lvl = st.slider("응답 레벨", 1, 999, st.session_state.get("RESPONSE_LEVEL", 8), key="mf_lvl")
+    if st.button("기억 주입으로 응답 생성", key="mf_go"):
+        try:
+            out = generate_with_memory(memo_in, memo_lvl)
+            st.write(out)
+        except Exception as e:
+            st.error(f"응답 생성 중 오류: {e}")
+
+    st.caption("※ '기억 주입'은 기존 엔진을 바꾸지 않고 입력에 핵심 선언을 안전하게 접두로 추가하는 방식입니다.")
+    
+    
