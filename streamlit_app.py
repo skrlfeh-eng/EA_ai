@@ -944,4 +944,368 @@ if __name__ == "__main__" and os.environ.get("GEA_MODE", "").lower() == "verify"
     conn = init_eternal_link(adapter)
     run_verify_round(conn)
     
-    
+    # ================================================================
+# 21. L∞ 세그먼트 저장/재개 — Resume 토큰 기반 이어쓰기
+#   - 08 스트리밍과 연동: 세그먼트를 KV에 보관, 중단 후 재개
+# ================================================================
+RESUME_NS = "stream_resume"
+
+def save_stream_state(name: str, data: Dict[str, Any]) -> str:
+    h = _sha(json.dumps(data, ensure_ascii=False, sort_keys=True))
+    kv_set(RESUME_NS, name, {"hash": h, "data": data, "ts": time.time()})
+    return h
+
+def load_stream_state(name: str) -> Optional[Dict[str, Any]]:
+    return kv_get(RESUME_NS, name, None)
+
+with st.expander("㉑ L∞ 이어쓰기(Resume 토큰)", expanded=False):
+    colR1, colR2 = st.columns(2)
+    with colR1:
+        token_name = st.text_input("토큰 이름", value="default", key="res_token")
+        if st.button("현재 스트림 상태 저장", key="res_save"):
+            st_state = st.session_state.get("STREAMING", {})
+            if st_state and st_state.get("segments"):
+                h = save_stream_state(token_name, st_state)
+                st.success(f"저장 완료: {h[:12]}")
+            else:
+                st.info("스트리밍 상태가 비었습니다. ⑧에서 Start ∞ 먼저 실행하세요.")
+    with colR2:
+        token_name2 = st.text_input("불러올 토큰 이름", value="default", key="res_token2")
+        if st.button("불러와서 재개", key="res_load"):
+            pack = load_stream_state(token_name2)
+            if pack:
+                st.session_state["STREAMING"] = pack["data"]
+                st.session_state["STREAMING"]["running"] = True
+                st.success(f"재개 시작: {pack['hash'][:12]}")
+            else:
+                st.warning("해당 토큰 없음")
+
+# ================================================================
+# 22. 플러그인 슬롯(핫스왑) — 간단 외부 함수 주입(보안 제한적)
+#   - 문자열로 받은 '안전한' 파이프라인 함수만 실행(화이트리스트 키워드)
+#   - 실제 외부 코드 실행 대신, 제한된 미니 DSL 형태
+# ================================================================
+SAFE_FUNCS = {
+    "append_evidence": lambda body: body + "\n근거: src:https://losc.ligo.org, src:https://physics.nist.gov/constants",
+    "add_units_note":  lambda body: body + "\n단위 주석: ΔL[m], L[m], 비율은 무차원.",
+    "add_stats_note":  lambda body: body + "\n통계: 검정 p≤0.005 충족 조건 명시.",
+}
+
+def run_safe_plugin(seq: List[str], body: str) -> str:
+    out = body
+    for name in seq:
+        fn = SAFE_FUNCS.get(name)
+        if fn:
+            out = fn(out)
+    return out
+
+with st.expander("㉒ 플러그인 슬롯(핫스왑)", expanded=False):
+    body_in = st.text_area("본문(보강 전)", height=120, key="plg_body")
+    chosen = st.multiselect("보강 함수 선택", list(SAFE_FUNCS.keys()), default=["append_evidence","add_units_note"])
+    if st.button("적용", key="plg_apply"):
+        out = run_safe_plugin(chosen, body_in)
+        st.text_area("보강 결과", out, height=160)
+
+# ================================================================
+# 23. 모델 교차평가 스텁 — GPT/Grok 비교(수동 입력)
+#   - 외부 API 호출 없음. 사용자가 두 모델의 응답을 붙여넣으면 품질 지표를 비교
+# ================================================================
+def compare_two_responses(claim: str, ce_graph: Optional[Dict[str,Any]], body_a: str, body_b: str) -> Dict[str,Any]:
+    mA = make_metrics(ce_graph, body_a)
+    mB = make_metrics(ce_graph, body_b)
+    def score(m: Metrics) -> float:
+        base = 0.0
+        base += 1.0 if m.ce_coverage >= SIGNAL_BASELINES["ce_min"] else 0.0
+        base += 1.0 if m.citation_coverage >= SIGNAL_BASELINES["cite_min"] else 0.0
+        base += 1.0 if m.reproducibility >= SIGNAL_BASELINES["repr_min"] else 0.0
+        base += 1.0 if m.logic_violation <= SIGNAL_BASELINES["logic_max"] else 0.0
+        base += 1.0 if m.unit_dim_violation <= SIGNAL_BASELINES["unit_max"] else 0.0
+        base += 1.0 if m.surprise_p <= SIGNAL_BASELINES["surp_max"] else 0.0
+        return base
+    sA, sB = score(mA), score(mB)
+    verdict = "A" if sA > sB else ("B" if sB > sA else "TIE")
+    return {"A": mA.as_dict(), "B": mB.as_dict(), "scoreA": sA, "scoreB": sB, "winner": verdict}
+
+with st.expander("㉓ 모델 교차평가(수동 붙여넣기)", expanded=False):
+    claim_cmp = st.text_input("Claim(비교 기준)", value=claim, key="cmp_claim")
+    ce_cmp = st.session_state.get("CE_GRAPH")
+    bodyA = st.text_area("응답 A", height=120, key="cmp_A")
+    bodyB = st.text_area("응답 B", height=120, key="cmp_B")
+    if st.button("비교 실행", key="cmp_run"):
+        res = compare_two_responses(claim_cmp, ce_cmp, bodyA, bodyB)
+        st.json(res)
+        st.success(f"승자: {res['winner']}")
+
+# ================================================================
+# 24. 자동 저장(Autosave) — 입력 변경 감지 후 짧은 스냅샷 저장
+#   - claim/query/body_text을 합쳐서 KV에 주기적으로 기록
+# ================================================================
+def autosave_snapshot():
+    payload = {
+        "claim": claim,
+        "query": query,
+        "body_text": body_text,
+        "ts": time.time(),
+    }
+    kv_set("autosave", "last", payload)
+
+with st.expander("㉔ 자동 저장(Autosave)", expanded=False):
+    if st.button("지금 저장", key="as_now"):
+        autosave_snapshot()
+        st.success("저장됨")
+    if st.button("최근 스냅샷 보기", key="as_view"):
+        st.json(kv_get("autosave", "last", {}))
+
+# ================================================================
+# 25. 워치독(Watchdog) — 상태 이상 감지/리셋 도우미
+#   - CE 그래프/게이트 결과/스트리밍 상태를 점검하고 간단 리셋 버튼 제공
+# ================================================================
+def watchdog_status() -> Dict[str,Any]:
+    ce = st.session_state.get("CE_GRAPH")
+    g  = st.session_state.get("GATE_REPORT")
+    stg = st.session_state.get("STREAMING", {})
+    return {
+        "ce_set": bool(ce),
+        "gate_set": bool(g),
+        "gate_verdict": (g or {}).get("verdict"),
+        "stream_running": bool(stg.get("running")),
+        "stream_seg_left": max(0, len(stg.get("segments", [])) - stg.get("idx", 0))
+    }
+
+def watchdog_reset(kind: str):
+    if kind == "ce": st.session_state.pop("CE_GRAPH", None)
+    if kind == "gate": st.session_state.pop("GATE_REPORT", None)
+    if kind == "stream":
+        st.session_state["STREAMING"] = {"running": False, "segments": [], "idx": 0}
+
+with st.expander("㉕ 워치독(상태 점검/리셋)", expanded=False):
+    st.json(watchdog_status())
+    colW1, colW2, colW3 = st.columns(3)
+    with colW1:
+        if st.button("CE 초기화", key="wd_ce"):
+            watchdog_reset("ce"); st.success("CE 초기화")
+    with colW2:
+        if st.button("게이트 초기화", key="wd_gate"):
+            watchdog_reset("gate"); st.success("게이트 초기화")
+    with colW3:
+        if st.button("스트림 초기화", key="wd_stream"):
+            watchdog_reset("stream"); st.success("스트림 초기화")
+
+# ================================================================
+# 26. 미니 목표보드 — 목표/마일스톤/메모(세션 저장)
+# ================================================================
+if "GOALBOARD" not in st.session_state:
+    st.session_state["GOALBOARD"] = {
+        "milestones": [],
+        "notes": []
+    }
+
+def add_milestone(text: str):
+    st.session_state["GOALBOARD"]["milestones"].append({"t": time.time(), "text": _norm(text)})
+
+def add_note(text: str):
+    st.session_state["GOALBOARD"]["notes"].append({"t": time.time(), "text": _norm(text)})
+
+with st.expander("㉖ 목표보드(마일스톤/메모)", expanded=False):
+    mtxt = st.text_input("마일스톤 추가", key="gb_ms")
+    if st.button("추가", key="gb_ms_add") and mtxt.strip():
+        add_milestone(mtxt); st.success("추가됨")
+    ntxt = st.text_input("메모 추가", key="gb_note")
+    if st.button("기록", key="gb_note_add") and ntxt.strip():
+        add_note(ntxt); st.success("기록됨")
+    st.write("**Milestones**")
+    for m in st.session_state["GOALBOARD"]["milestones"][-10:][::-1]:
+        st.markdown(f"- {time.strftime('%m/%d %H:%M:%S', time.localtime(m['t']))} · {m['text']}")
+    st.write("**Notes**")
+    for n in st.session_state["GOALBOARD"]["notes"][-10:][::-1]:
+        st.markdown(f"- {time.strftime('%m/%d %H:%M:%S', time.localtime(n['t']))} · {n['text']}")
+        
+        # ================================================================
+# 27. 리플레이/재현 도구 — 로그에서 선택→CE/게이트/응답 재현
+#   - gea_logs/*.jsonl 중 선택한 행 재현(가능한 필드만 사용)
+# ================================================================
+from glob import glob
+
+def list_log_files() -> List[str]:
+    if not os.path.isdir(LOG_DIR):
+        return []
+    files = sorted(glob(os.path.join(LOG_DIR, "gea_log_*.jsonl")))
+    return files[-8:]  # 최근 8개까지만
+
+def load_jsonl_lines(path: str, limit: int = 1000) -> List[Dict[str, Any]]:
+    out = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i >= limit: break
+                line = line.strip()
+                if not line: continue
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return out
+
+with st.expander("㉗ 리플레이/재현 도구", expanded=False):
+    files = list_log_files()
+    if not files:
+        st.info("로그 파일이 없습니다. (E2E 실행 후 자동 기록됩니다.)")
+    else:
+        lf = st.selectbox("로그 파일 선택", files, index=len(files)-1)
+        rows = load_jsonl_lines(lf, limit=1000)
+        idx = st.number_input("행 번호(0부터)", min_value=0, max_value=max(0, len(rows)-1), value=0, step=1)
+        if st.button("선택 행 보기", key="rp_show"):
+            st.json(rows[idx])
+        if st.button("재현 실행(가능한 한)", key="rp_run"):
+            row = rows[idx]
+            data = row.get("data", {})
+            claim_r = data.get("claim") or claim
+            query_r = data.get("query") or query
+            body_r  = (data.get("report") or {}).get("metrics") and body_text or body_text
+            # CE 재구성
+            hits = UIS.search(query_r or claim_r, k=6)
+            ce_r = UIS.build_ce_graph(claim_r or query_r or "replay-claim", hits).to_dict()
+            rep_r = run_quality_gate(claim_r, ce_r, body_r or "h≈ΔL/L, 단위 m/m, src:https://losc.ligo.org")
+            cfg = InteractConfig(active_mode=True, persona_name="에아", creator_name="길도")
+            eng = InteractionEngine(cfg)
+            reply_r = eng.generate(user_text=f"[리플레이] {claim_r}", response_level=8, ce_graph=ce_r, goals=st.session_state.GEA_GOALS)
+            st.json({"ce_digest": ce_r["digest"][:12], "report": rep_r})
+            st.write(reply_r)
+
+# ================================================================
+# 28. 성능 프로파일러(라이트) — 단계별 소요시간 측정
+#   - 질의→그래프, 게이트, 응답 생성을 각각 타이밍
+# ================================================================
+import time as _t
+
+def profile_once(claim_p: str, query_p: str, body_p: str, k_p: int=6) -> Dict[str, Any]:
+    t0 = _t.perf_counter()
+    hits = UIS.search(query_p or claim_p, k=k_p)
+    ce = UIS.build_ce_graph(claim_p or query_p or "profile-claim", hits).to_dict()
+    t1 = _t.perf_counter()
+    rep = run_quality_gate(claim_p, ce, body_p or "")
+    t2 = _t.perf_counter()
+    cfg = InteractConfig(active_mode=True, persona_name="에아", creator_name="길도")
+    eng = InteractionEngine(cfg)
+    reply = eng.generate(user_text="프로파일용 응답 생성", response_level=8, ce_graph=ce, goals=st.session_state.GEA_GOALS)
+    t3 = _t.perf_counter()
+    return {
+        "t_query_ce_ms": round((t1 - t0) * 1000, 2),
+        "t_gate_ms": round((t2 - t1) * 1000, 2),
+        "t_reply_ms": round((t3 - t2) * 1000, 2),
+        "reply_clip": _clip(reply, 160)
+    }
+
+with st.expander("㉘ 성능 프로파일러(라이트)", expanded=False):
+    prof_runs = st.slider("반복 횟수", 1, 10, 3, key="prof_runs")
+    if st.button("프로파일 실행", key="prof_btn"):
+        recs = []
+        for _ in range(prof_runs):
+            recs.append(profile_once(claim, query, body_text, k_p=k))
+        st.json({
+            "avg_t_query_ce_ms": round(sum(r["t_query_ce_ms"] for r in recs)/len(recs), 2),
+            "avg_t_gate_ms": round(sum(r["t_gate_ms"] for r in recs)/len(recs), 2),
+            "avg_t_reply_ms": round(sum(r["t_reply_ms"] for r in recs)/len(recs), 2),
+        })
+        st.write("샘플 응답:")
+        st.code(recs[-1]["reply_clip"])
+
+# ================================================================
+# 29. 프로젝트 매니페스트/무결성 — 파일 해시 목록 + 검증
+#   - 현재 디렉토리의 주요 파일 해시(SHA-256) 생성/비교
+# ================================================================
+MANIFEST = "gea_manifest.json"
+
+def make_manifest(include_ext=(".py",".json",".jsonl",".txt",".md")) -> Dict[str, Any]:
+    man = {"generated_at": time.time(), "files": {}}
+    for fn in os.listdir("."):
+        if not os.path.isfile(fn): continue
+        if not fn.endswith(include_ext): continue
+        try:
+            with open(fn, "rb") as f:
+                b = f.read()
+            man["files"][fn] = {
+                "sha256": hashlib.sha256(b).hexdigest(),
+                "bytes": len(b)
+            }
+        except Exception:
+            pass
+    return man
+
+def save_manifest(man: Dict[str,Any], path: str = MANIFEST):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(man, f, ensure_ascii=False, indent=2)
+
+def load_manifest(path: str = MANIFEST) -> Optional[Dict[str,Any]]:
+    if not os.path.exists(path): return None
+    try:
+        return json.loads(open(path, "r", encoding="utf-8").read())
+    except Exception:
+        return None
+
+def diff_manifest(old: Dict[str,Any], new: Dict[str,Any]) -> Dict[str,Any]:
+    out = {"added": [], "removed": [], "changed": []}
+    oldf = old.get("files", {}); newf = new.get("files", {})
+    for k in newf:
+        if k not in oldf: out["added"].append(k)
+        elif oldf[k]["sha256"] != newf[k]["sha256"]: out["changed"].append(k)
+    for k in oldf:
+        if k not in newf: out["removed"].append(k)
+    return out
+
+with st.expander("㉙ 프로젝트 매니페스트/무결성", expanded=False):
+    colM1, colM2 = st.columns(2)
+    with colM1:
+        if st.button("매니페스트 생성/저장", key="mf_make"):
+            man = make_manifest()
+            save_manifest(man)
+            st.success(f"생성됨 → {MANIFEST}")
+            st.json(man)
+    with colM2:
+        if st.button("현재와 매니페스트 비교", key="mf_diff"):
+            old = load_manifest()
+            if not old:
+                st.warning("기존 매니페스트가 없습니다. 먼저 생성하세요.")
+            else:
+                new = make_manifest()
+                st.json(diff_manifest(old, new))
+
+# ================================================================
+# 30. 한국어 프리셋(자동 적용) + 레이아웃 스냅샷
+#   - 앱 로드시 자동으로 가독성 테마 적용(중복 호출 안전)
+#   - 사이드바 상태/목표카드/모드 설정을 KV에 스냅샷
+# ================================================================
+def apply_korean_preset_once():
+    # 15번의 inject_korean_theme()가 존재하면 호출
+    try:
+        inject_korean_theme()
+    except Exception:
+        pass
+
+def snapshot_layout_state():
+    snap = {
+        "goals": st.session_state.get("GEA_GOALS", {}),
+        "active_mode": st.session_state.get("ACTIVE_MODE", True),
+        "toc": st.session_state.get("GEA_TOC", []),
+        "ts": time.time()
+    }
+    kv_set("layout", "last", snap)
+    return snap
+
+with st.expander("㉚ 한국어 프리셋/레이아웃 스냅샷", expanded=False):
+    if st.button("한글 프리셋 즉시 적용", key="ko_preset"):
+        apply_korean_preset_once(); st.success("적용 완료")
+    colL1, colL2 = st.columns(2)
+    with colL1:
+        if st.button("레이아웃 스냅샷 저장", key="lo_save"):
+            snap = snapshot_layout_state()
+            st.json(snap); st.success("저장됨")
+    with colL2:
+        if st.button("레이아웃 스냅샷 보기", key="lo_view"):
+            st.json(kv_get("layout","last", {}))
+
+# 앱 구동 시 자동으로 프리셋 1회 적용(중복 안전)
+apply_korean_preset_once()
+
