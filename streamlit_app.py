@@ -3914,3 +3914,122 @@ with st.expander("🧰 092. 키 팩토리 / 위젯 래퍼 (중복 key 예방)", 
             _m092_get_factory().reset()
             st.info("KeyFactory reset 완료 (이후 생성 키부터 초기화).")
         st.code(m092_self_check())
+        
+        # ================================
+# 093. [회색] 이벤트 로그 & 리포트 저장기 (세션 기반, JSON/CSV 내보내기)
+# 목적: 각 모듈에서 손쉽게 log(level, module, message) 남기고,
+#       화면에서 필터/조회 후 JSON/CSV로 저장/다운로드
+# 의존: (선택) 092 KeyFactory. 없을 경우 자동 shim 사용.
+# ================================
+import streamlit as st
+import json, csv, io
+from datetime import datetime
+
+# ---- 092 키 래퍼가 없더라도 문제없이 동작하도록 shim 제공 ----
+try:
+    m092_button  # type: ignore
+    m092_text    # type: ignore
+    m092_select  # type: ignore
+    m092_checkbox# type: ignore
+except NameError:
+    import uuid
+    def _auto_key(prefix="k"): return f"{prefix}_{uuid.uuid4().hex[:8]}"
+    def m092_button(label: str, group: str = "m093_btn"):
+        return st.button(label, key=_auto_key(group))
+    def m092_text(label: str, group: str = "m093_txt", value: str = ""):
+        return st.text_input(label, value=value, key=_auto_key(group))
+    def m092_select(label: str, options, group: str = "m093_sel"):
+        return st.selectbox(label, options, key=_auto_key(group))
+    def m092_checkbox(label: str, group: str = "m093_chk", value: bool = False):
+        return st.checkbox(label, value=value, key=_auto_key(group))
+
+# ---- 세션 초기화 ----
+if "m093_logs" not in st.session_state:
+    st.session_state["m093_logs"] = []  # [{ts, level, module, message, extra}...]
+
+_M093_LEVELS = ["DEBUG", "INFO", "WARN", "ERROR"]
+
+def m093_log(level: str, module: str, message: str, extra: dict | None = None):
+    """다른 모듈에서 호출: m093_log('INFO','모듈명','메시지', {'k':'v'})"""
+    level = (level or "INFO").upper()
+    if level not in _M093_LEVELS: level = "INFO"
+    st.session_state["m093_logs"].append({
+        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "level": level,
+        "module": module,
+        "message": message,
+        "extra": extra or {}
+    })
+
+def m093_get_logs():
+    return st.session_state.get("m093_logs", [])
+
+def m093_clear():
+    st.session_state["m093_logs"] = []
+
+def _m093_to_json_bytes(rows):
+    buf = io.StringIO()
+    json.dump(rows, buf, ensure_ascii=False, indent=2)
+    return buf.getvalue().encode("utf-8")
+
+def _m093_to_csv_bytes(rows):
+    fieldnames = ["ts", "level", "module", "message", "extra"]
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames)
+    writer.writeheader()
+    for r in rows:
+        row = r.copy()
+        row["extra"] = json.dumps(row.get("extra", {}), ensure_ascii=False)
+        writer.writerow(row)
+    return buf.getvalue().encode("utf-8")
+
+# ---- UI 패널 ----
+with st.expander("🧾 093. 이벤트 로그 & 리포트 저장기", expanded=False):
+    colA, colB = st.columns([2,1])
+
+    with colA:
+        # 빠른 수동 기록
+        mod = m092_text("모듈 이름", value="adhoc")
+        msg = m092_text("메시지", value="기록 테스트")
+        lev = m092_select("레벨", _M093_LEVELS)
+        if m092_button("로그 남기기"):
+            m093_log(lev, mod, msg)
+            st.success("로그 기록 완료")
+
+    with colB:
+        # 관리
+        st.caption("관리")
+        if m092_button("로그 초기화"):
+            m093_clear()
+            st.info("모든 로그를 비움")
+
+    # 필터 & 미리보기
+    fcol1, fcol2, fcol3 = st.columns([1,1,2])
+    with fcol1:
+        flv = m092_select("레벨 필터", ["ALL"] + _M093_LEVELS)
+    with fcol2:
+        fsz = m092_select("표시 개수", [10, 20, 50, 100])
+    with fcol3:
+        fmd = m092_text("모듈 포함 필터(부분일치)", value="")
+
+    rows = m093_get_logs()
+    if flv != "ALL":
+        rows = [r for r in rows if r["level"] == flv]
+    if fmd:
+        rows = [r for r in rows if fmd.lower() in (r["module"] or "").lower()]
+    preview = rows[-int(fsz):] if rows else []
+
+    st.write(f"총 {len(rows)}건 / 미리보기 {len(preview)}건")
+    st.dataframe(preview, use_container_width=True)
+
+    # 내보내기
+    jbytes = _m093_to_json_bytes(rows)
+    cbytes = _m093_to_csv_bytes(rows)
+    st.download_button("⬇️ JSON 다운로드", data=jbytes, file_name="gea_logs.json", mime="application/json")
+    st.download_button("⬇️ CSV 다운로드", data=cbytes, file_name="gea_logs.csv", mime="text/csv")
+
+# ---- 자기진단(선택) : 다른 모듈에서 바로 사용 예시 ----
+def m093_self_test():
+    m093_log("DEBUG", "m093", "self test start")
+    m093_log("INFO",  "m093", "ok")
+    return {"ok": True, "count": len(m093_get_logs())}
