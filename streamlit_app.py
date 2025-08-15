@@ -3845,3 +3845,72 @@ with st.expander("추가 옵션", expanded=False):
     active = st.checkbox("고급옵션", value=False, key=_ukey("opt_adv"))
     st.caption(f"레벨={lvl}, 고급옵션={'ON' if active else 'OFF'}")
 # ==== [91] 끝 ====
+
+# ================================
+# 092. [회색] 키/세션 충돌 제로화 유틸 (KeyFactory) + 위젯 래퍼
+# 목적: Streamlit DuplicateElementKey 에러 예방. 모든 새 위젯에 고유 key 자동 부여.
+# ================================
+import streamlit as st
+from typing import Dict, Optional
+
+class _GEAKeyFactory:
+    """위젯 key 자동생성기: 같은 그룹명 내에서 0001, 0002… 증가"""
+    def __init__(self):
+        self.counts: Dict[str, int] = {}
+
+    def k(self, name: str) -> str:
+        n = self.counts.get(name, 0) + 1
+        self.counts[name] = n
+        return f"{name}__{n:04d}"
+
+    def reset(self, prefix: Optional[str] = None) -> None:
+        if prefix is None:
+            self.counts.clear()
+        else:
+            self.counts = {k: v for k, v in self.counts.items() if not k.startswith(prefix)}
+
+def _m092_get_factory() -> _GEAKeyFactory:
+    if "_m092_kf" not in st.session_state:
+        st.session_state["_m092_kf"] = _GEAKeyFactory()
+    return st.session_state["_m092_kf"]
+
+# ---- 편의 래퍼들 (필요할 때만 사용, 평소엔 명시적 key 사용도 OK) ----
+def m092_button(label: str, group: str = "m092_btn"):
+    kf = _m092_get_factory()
+    return st.button(label, key=kf.k(group))
+
+def m092_text(label: str, group: str = "m092_txt", value: str = ""):
+    kf = _m092_get_factory()
+    return st.text_input(label, value=value, key=kf.k(group))
+
+def m092_checkbox(label: str, group: str = "m092_chk", value: bool = False):
+    kf = _m092_get_factory()
+    return st.checkbox(label, value=value, key=kf.k(group))
+
+def m092_select(label: str, options, group: str = "m092_sel"):
+    kf = _m092_get_factory()
+    return st.selectbox(label, options, key=kf.k(group))
+
+def m092_self_check():
+    kf = _m092_get_factory()
+    keys = [kf.k("selfcheck") for _ in range(3)]
+    ok = len(keys) == len(set(keys))
+    return {"status": "PASS" if ok else "FAIL", "generated": keys, "groups": len(kf.counts)}
+
+# ---- UI: 키 충돌 방지 툴킷 (테스트용) ----
+with st.expander("🧰 092. 키 팩토리 / 위젯 래퍼 (중복 key 예방)", expanded=False):
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if m092_button("테스트 버튼"):
+            st.success("버튼 클릭!")
+        name = m092_text("텍스트 입력")
+        agree = m092_checkbox("체크해요")
+        choice = m092_select("선택", ["A", "B", "C"])
+        st.write({"name": name, "agree": agree, "choice": choice})
+
+    with col2:
+        if m092_button("팩토리 초기화"):
+            _m092_get_factory().reset()
+            st.info("KeyFactory reset 완료 (이후 생성 키부터 초기화).")
+        st.code(m092_self_check())
