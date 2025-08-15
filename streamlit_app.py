@@ -1654,4 +1654,383 @@ with st.expander("㊱ 융합: 기억 × 응답 엔진 (GEA Memory Fusion)", expa
 
     st.caption("※ '기억 주입'은 기존 엔진을 바꾸지 않고 입력에 핵심 선언을 안전하게 접두로 추가하는 방식입니다.")
     
+    # ================================================================
+# 39. 데이터팩 인제스터(JSONL) — 오프라인 안전 증거 소스 등록
+#   - 형식: 줄당 JSON (id/title/url/domain/year/text 등 임의 필드)
+#   - 업로드 → 내부 레지스트리에 저장 → 검색 시 후보로 사용
+# ================================================================
+if "DATAPACKS" not in st.session_state:
+    st.session_state["DATAPACKS"] = []   # [{id, source, text, meta}, ...]
+
+def _dp_norm_row(j: dict) -> dict:
+    rid  = j.get("id") or f"dp:{_sha(json.dumps(j, ensure_ascii=False))[:12]}"
+    text = j.get("text") or j.get("abstract") or j.get("content") or ""
+    src  = j.get("url") or j.get("source") or j.get("domain") or "offline://datapack"
+    score= 0.88
+    return {"id": rid, "source": src, "text": text, "meta": j, "score": score, "span": [0, min(100, len(text))]}
+
+with st.expander("㊷ 데이터팩 인제스터(JSONL)", expanded=False):
+    up = st.file_uploader("JSONL 업로드(줄당 JSON 1개)", type=["jsonl"], key="dp_upl")
+    if st.button("인제스트", key="dp_ingest") and up is not None:
+        rows = []
+        for raw in up.getvalue().decode("utf-8", errors="replace").splitlines():
+            raw = raw.strip()
+            if not raw: continue
+            try:
+                j = json.loads(raw)
+                rows.append(_dp_norm_row(j))
+            except Exception:
+                pass
+        st.session_state["DATAPACKS"].extend(rows)
+        st.success(f"인제스트 완료: {len(rows)}개 항목")
+    if st.button("최근 5개 보기", key="dp_show"):
+        st.json(st.session_state["DATAPACKS"][-5:])
+
+# ================================================================
+# 40. 실커넥터 확장(라이트) — 하이브리드 UIS(원본+등록소스 결합)
+#   - 기존 UIS.search() 결과에 데이터팩/커스텀 URL 프리뷰를 합성
+#   - 전역 UIS를 안전히 감싸는 HybridUIS로 1회 래핑(인터페이스 동일)
+#   - 오프라인에서도 데이터팩만으로 동작 가능
+# ================================================================
+if "CUSTOM_SOURCES" not in st.session_state:
+    st.session_state["CUSTOM_SOURCES"] = []  # [{"url":..., "tag":...}]
+
+def register_custom_source(url: str, tag: str="custom"):
+    st.session_state["CUSTOM_SOURCES"].append({"url": url, "tag": tag})
+
+# 간단 HTTP 캐시(42에서 구현) — 미리 참조
+def _cached_fetch(url: str) -> tuple:
+    return http_cache_get(url)
+
+class HybridUIS:
+    def __init__(self, base_uis):
+        self.base = base_uis
+
+    def search(self, q: str, k: int = 6):
+        hits = []
+        # ① 원본 UIS
+        try:
+            hits = list(self.base.search(q, k=max(1, int(k*0.6))))
+        except Exception:
+            hits = []
+        # ② 데이터팩 후보(간단 키워드 매칭)
+        ql = q.lower()
+        dp_hits = []
+        for i, row in enumerate(st.session_state.get("DATAPACKS", [])):
+            txt = (row.get("text") or "").lower()
+            if any(tok for tok in ql.split() if tok and tok in txt):
+                h = dict(row); h["id"] = f"dp{i+1}"; h["score"] = 0.77
+                dp_hits.append(h)
+        # ③ 커스텀 URL 시드(프리뷰 성공 시만)
+        cs_hits = []
+        for j, cs in enumerate(st.session_state.get("CUSTOM_SOURCES", [])[:max(1,int(k/2))]):
+            ok, txt = _cached_fetch(cs["url"])
+            if ok:
+                cs_hits.append({"id": f"cs{j+1}", "source": cs["url"], "tag": cs.get("tag","custom"),
+                                "score": 0.8, "span": [0, min(100, len(txt))]})
+        # 합성 후 상위 k개
+        pool = hits + dp_hits + cs_hits
+        pool.sort(key=lambda x: x.get("score",0), reverse=True)
+        return pool[:k]
+
+    def build_ce_graph(self, claim: str, hits):
+        return self.base.build_ce_graph(claim, hits)
+
+# 전역 UIS에 1회 래핑(중복 방지)
+try:
+    if not isinstance(UIS, HybridUIS):
+        UIS = HybridUIS(UIS)
+except NameError:
+    pass
+
+with st.expander("㊸ 커넥터 매니저(라이트)", expanded=False):
+    st.write("데이터 소스 등록/검색 하이브리드 확인")
+    c_url = st.text_input("커스텀 URL", value="https://httpbin.org/json", key="cm_url")
+    c_tag = st.text_input("태그", value="doc", key="cm_tag")
+    if st.button("소스 등록", key="cm_reg") and c_url.strip():
+        register_custom_source(c_url.strip(), c_tag.strip() or "custom")
+        st.success("등록 완료")
+    if st.button("하이브리드 검색 테스트", key="cm_test"):
+        qs = st.text_input if False else None  # placeholder
+        res = UIS.search("physics data", k=6)
+        st.json({"hits": [{k: v for k, v in h.items() if k in ("id","source","score","span")} for h in res]})
+
+# ================================================================
+# 41. CE 미니 뷰어 — 노드/엣지 개수·상위 근거 미리보기
+#   - 현재 세션의 CE_GRAPH를 요약 표시(없으면 안내)
+# ================================================================
+def view_ce_mini(ce: dict) -> dict:
+    nodes = ce.get("nodes", []); edges = ce.get("edges", [])
+    evid = [n for n in nodes if n.get("kind") == "evidence"]
+    tops = []
+    for ev in evid[:5]:
+        src = (ev.get("payload") or {}).get("source","")
+        ok, txt = (True, "")
+        if src.startswith("http"):
+            ok, txt = _cached_fetch(src)
+        tops.append({"source": src, "ok": ok, "preview": txt[:160] if ok else ""})
+    return {"nodes": len(nodes), "edges": len(edges), "top_preview": tops}
+
+with st.expander("㊹ CE 미니 뷰어", expanded=False):
+    ce = st.session_state.get("CE_GRAPH")
+    if not ce:
+        st.info("CE-Graph가 없습니다. 상단 ①에서 먼저 생성하세요.")
+    else:
+        st.json(view_ce_mini(ce))
+
+# ================================================================
+# 42. HTTP 캐시(라이트) — 중복 요청 방지/오프라인 활용
+#   - 메모리+임시 파일(세션당). 동일 URL 5분 TTL.
+# ================================================================
+_HTTP_CACHE = {}
+_HTTP_CACHE_TTL = 300.0  # seconds
+_HTTP_CACHE_DIR = ".gea_http_cache"
+os.makedirs(_HTTP_CACHE_DIR, exist_ok=True)
+
+def http_cache_get(url: str, timeout: int = 5) -> tuple:
+    now = time.time()
+    rec = _HTTP_CACHE.get(url)
+    if rec and now - rec["ts"] <= _HTTP_CACHE_TTL:
+        return True, rec["text"]
+    # 파일 캐시 확인
+    fkey = _sha(url.encode("utf-8"))
+    fpath = os.path.join(_HTTP_CACHE_DIR, fkey + ".txt")
+    if os.path.exists(fpath):
+        try:
+            if now - os.path.getmtime(fpath) <= _HTTP_CACHE_TTL:
+                txt = open(fpath, "r", encoding="utf-8", errors="replace").read()
+                _HTTP_CACHE[url] = {"ts": now, "text": txt}
+                return True, txt
+        except Exception:
+            pass
+    # 실제 요청(오프라인 환경에서는 실패 가능)
+    if "http_fetch_text" in globals():
+        ok, txt = http_fetch_text(url, timeout=timeout)
+    else:
+        ok, txt = (False, "fetch unavailable")
+    if ok:
+        _HTTP_CACHE[url] = {"ts": now, "text": txt}
+        try:
+            with open(fpath, "w", encoding="utf-8") as f:
+                f.write(txt)
+        except Exception:
+            pass
+    return ok, txt
     
+    # ================================================================
+# 43. 단위/차원 계산기 — SI 기반 차원 정합성 체크(라이트)
+#    - 변수별 단위 맵 + 수식(expr) → 결과 차원/정합성 판단
+# ================================================================
+import re
+
+# SI 기저 차원: m, kg, s, A, K, mol, cd
+_BASE = ["m","kg","s","A","K","mol","cd"]
+
+# 단위 → 기저 차원 지수 벡터(dict) 맵
+_DIM = {
+    # 기본
+    "": {}, "1": {}, "dimensionless": {},
+    "m": {"m":1}, "kg": {"kg":1}, "s": {"s":1}, "A":{"A":1},"K":{"K":1},"mol":{"mol":1},"cd":{"cd":1},
+    # 파생(일부)
+    "Hz": {"s":-1},
+    "N": {"kg":1,"m":1,"s":-2},
+    "Pa": {"kg":1,"m":-1,"s":-2},
+    "J": {"kg":1,"m":2,"s":-2},
+    "W": {"kg":1,"m":2,"s":-3},
+    "C": {"A":1,"s":1},
+    "V": {"kg":1,"m":2,"s":-3,"A":-1},
+    "ohm": {"kg":1,"m":2,"s":-3,"A":-2},
+    "Ω": {"kg":1,"m":2,"s":-3,"A":-2},
+    "F": {"kg":-1,"m":-2,"s":4,"A":2},
+    "T": {"kg":1,"s":-2,"A":-1},
+    "H": {"kg":1,"m":2,"s":-2,"A":-2},
+    # 편의
+    "rad": {}, "sr": {},
+}
+
+def _dim_mul(a:dict,b:dict)->dict:
+    out=dict(a)
+    for k,v in b.items(): out[k]=out.get(k,0)+v
+    return {k:v for k,v in out.items() if v!=0}
+
+def _dim_pow(a:dict,n:int)->dict:
+    return {k:v*n for k,v in a.items()}
+
+def _unit_to_dim(u:str)->dict:
+    u=u.strip()
+    if u in _DIM: return dict(_DIM[u])
+    # 조합 파서: m^2·kg/s^3 형태
+    # 토큰: unit(^exp)? 분자/분모(/) 구분, 구분자 [·* /]
+    if not u: return {}
+    num,den = u, ""
+    if "/" in u:
+        parts=u.split("/")
+        num = parts[0]
+        den = "/".join(parts[1:])
+    def parse_side(s, sign=1):
+        res={}
+        for tok in re.split(r"[·\*\s]+", s.strip()):
+            if not tok: continue
+            m=re.match(r"([a-zA-ZΩμ]+)(?:\^(-?\d+))?$", tok)
+            if not m: continue
+            name=m.group(1)
+            exp=int(m.group(2) or "1")
+            # μ(마이크로) 접두어는 차원엔 영향 없음(스칼라) → 무시
+            name = "ohm" if name in ("Ohm","Ω") else name
+            base=_DIM.get(name, {name:1} if name in _BASE else {})
+            res=_dim_mul(res, _dim_pow(base, exp*sign))
+        return res
+    out=_dim_mul(parse_side(num,+1), parse_side(den,-1))
+    return {k:v for k,v in out.items() if v!=0}
+
+def _expr_dim(expr:str, var_units:dict)->dict:
+    # 허용: 변수명, *, /, ^정수, 괄호, 공백
+    # 전략: 항목을 재귀 파싱 → 곱/나눗셈 차원 연산
+    tokens=re.findall(r"[A-Za-z_][A-Za-z0-9_]*|\^|-?\d+|[*/()]", expr.replace("·","*").replace(" ",""))
+    pos=0
+    def parse_factor():
+        nonlocal pos
+        if pos>=len(tokens): return {}
+        t=tokens[pos]
+        if t=="(":
+            pos+=1
+            d=parse_term()
+            if pos<len(tokens) and tokens[pos]==")": pos+=1
+            # 지수
+            if pos<len(tokens) and tokens[pos]=="^":
+                pos+=1
+                n=int(tokens[pos]); pos+=1
+                d=_dim_pow(d,n)
+            return d
+        elif re.match(r"[A-Za-z_]", t):
+            pos+=1
+            unit = var_units.get(t,"")
+            d=_unit_to_dim(unit)
+            if pos<len(tokens) and tokens[pos]=="^":
+                pos+=1
+                n=int(tokens[pos]); pos+=1
+                d=_dim_pow(d,n)
+            return d
+        elif re.match(r"-?\d+", t):
+            pos+=1
+            # 스칼라 숫자 → 무차원
+            return {}
+        return {}
+    def parse_term():
+        nonlocal pos
+        d = parse_factor()
+        while pos<len(tokens) and tokens[pos] in ("*","/"):
+            op=tokens[pos]; pos+=1
+            d2=parse_factor()
+            d = _dim_mul(d, d2 if op=="*" else _dim_pow(d2,-1))
+        return d
+    return parse_term()
+
+def _dim_equal(d1:dict,d2:dict)->bool:
+    # 동일 차원 여부
+    return _dim_mul(d1, _dim_pow(d2,-1))=={}
+
+with st.expander("㊺ 단위/차원 계산기(정합성 체크)", expanded=False):
+    st.markdown("**예시**: ΔL/L → 무차원, E=h·ν → J = (J·s)·s^-1")
+    in_expr = st.text_input("표현식", value="ΔL/L", key="ud_expr")
+    in_map  = st.text_area("변수→단위 JSON", value='{"ΔL":"m","L":"m"}', height=80, key="ud_map")
+    lhs_u   = st.text_input("좌변(선택: 차원 비교용 단위)", value="", key="ud_lhs")
+    if st.button("계산/검증", key="ud_go"):
+        try:
+            var_units=json.loads(in_map)
+            d_rhs=_expr_dim(in_expr, var_units)
+            show_rhs = "·".join([f"{k}^{v}" for k,v in sorted(d_rhs.items())]) or "dimensionless"
+            if lhs_u.strip():
+                d_lhs=_unit_to_dim(lhs_u.strip())
+                ok=_dim_equal(d_lhs,d_rhs)
+                st.json({"rhs_dim": d_rhs, "rhs_pretty": show_rhs, "lhs_dim": d_lhs, "match": ok})
+                st.success("정합성 OK" if ok else "정합성 불일치")
+            else:
+                st.json({"rhs_dim": d_rhs, "rhs_pretty": show_rhs})
+        except Exception as e:
+            st.error(f"오류: {e}")
+
+# ================================================================
+# 44. 미니 SMT(라이트) — CNF 부울 SAT 브루트포스(≤8변수)
+#    - 입력: CNF 문자열 (예: (x1 or ~x2) and (x2 or x3))
+#    - 출력: 만족 여부 + 만족 할당 예시
+# ================================================================
+def _parse_cnf(cnf:str):
+    # 매우 단순 파서: 변수명 [a-zA-Z0-9_], 부정 ~, 절/연결 and/or 괄호
+    cnf = cnf.replace("AND","and").replace("OR","or").replace("¬","~")
+    clauses=[]
+    vars_set=set()
+    for part in re.findall(r"\([^)]*\)", cnf):
+        lits=[]
+        for lit in re.split(r"\s+or\s+|,", part.strip("() ")):
+            lit=lit.strip()
+            if not lit: continue
+            neg = lit.startswith("~") or lit.lower().startswith("not ")
+            name = re.sub(r"^(~|not\s+)", "", lit, flags=re.I)
+            vars_set.add(name)
+            lits.append( (name, not neg) )
+        if lits: clauses.append(lits)
+    return clauses, sorted(vars_set)
+
+def _sat_check(clauses, vars_list, limit=1<<20):
+    n=len(vars_list)
+    if n>8: return False, {}
+    from itertools import product
+    tried=0
+    for bits in product([False,True], repeat=n):
+        tried+=1
+        assign={vars_list[i]: bits[i] for i in range(n)}
+        ok=True
+        for clause in clauses:
+            if not any( (assign[name] if sign else (not assign[name])) for (name,sign) in clause ):
+                ok=False; break
+        if ok:
+            return True, assign
+        if tried>=limit: break
+    return False, {}
+
+with st.expander("㊻ 미니 SMT(부울 SAT)", expanded=False):
+    sample="(x1 or ~x2) and (x2 or x3) and (~x1 or x3)"
+    cnf_in=st.text_area("CNF 입력", value=sample, height=90, key="smt_in")
+    if st.button("SAT 체크", key="smt_go"):
+        clauses, vars_list=_parse_cnf(cnf_in)
+        ok, assign=_sat_check(clauses, vars_list)
+        st.json({"vars": vars_list, "satisfiable": ok, "assignment": assign})
+
+# ================================================================
+# 45. 링크 검증 강화 — CE-Graph 증거 URL 가용성/미리보기/체크섬
+#    - 각 evidence.source에 대해 HTTP 캐시로 가져와 길이/키워드 검사
+# ================================================================
+def verify_ce_links(ce:dict, min_len:int=32, keys=None)->dict:
+    keys = keys or ["abstract","introduction","dataset","method","result"]
+    nodes=ce.get("nodes",[])
+    evid=[n for n in nodes if n.get("kind")=="evidence"]
+    out=[]
+    ok_count=0
+    for ev in evid:
+        src=(ev.get("payload") or {}).get("source","")
+        ok, txt = (False, "")
+        if str(src).startswith("http"):
+            ok, txt = http_cache_get(src)
+        else:
+            ok, txt = (True, f"(오프라인 소스) {src}")
+        length=len(txt)
+        hit = any(k in txt.lower() for k in keys) if txt else False
+        ch  = hashlib.sha256((txt or "").encode("utf-8")).hexdigest()[:12]
+        passed = ok and length>=min_len and hit
+        ok_count += 1 if passed else 0
+        out.append({"source":src, "ok":ok, "len":length, "hit":hit, "sha12":ch, "pass":passed})
+    cov = round(ok_count/max(1,len(evid)),2)
+    verdict = "PASS" if cov>=0.5 else "REPAIR"
+    return {"coverage": cov, "verdict": verdict, "rows": out}
+
+with st.expander("㊼ 링크 검증(증거 URL)", expanded=False):
+    ce = st.session_state.get("CE_GRAPH")
+    if not ce:
+        st.warning("CE-Graph가 없습니다. 상단 ①에서 먼저 생성하세요.")
+    else:
+        res=verify_ce_links(ce)
+        st.json(res)
+        st.success("링크 커버리지 OK" if res["verdict"]=="PASS" else "REPAIR 필요")
+        
+        
