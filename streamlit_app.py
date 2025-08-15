@@ -3295,4 +3295,342 @@ with st.expander("[75] 백업·복구 마법사", expanded=False):
         st.success(f"정리됨: {len(rm)}개")
         if rm: st.json(rm[:20])
         
+        # ================================================================
+# 76. 증거 라벨러(수동/반자동) — CE evidence에 신뢰/유형/메모 태깅
+#    - 세션 CE_GRAPH를 직접 편집(세션 내 반영)
+# ================================================================
+_EVID_TYPES = ["논문","표준/규격","데이터셋","특허","코드/레포","기사/블로그","기타"]
+
+def ce_list_evidence_ids(ce: dict) -> list:
+    if not ce: return []
+    return [n["id"] for n in ce.get("nodes",[]) if n.get("kind")=="evidence"]
+
+def ce_tag_update(ce: dict, evid_id: str, **tags):
+    if not ce: return False
+    for n in ce.get("nodes",[]):
+        if n.get("id")==evid_id and n.get("kind")=="evidence":
+            p = n.get("payload") or {}
+            p.update({"tags": {**p.get("tags",{}), **tags}})
+            n["payload"]=p
+            ce["digest"]=hashlib.sha256("".join(k.get("id","") for k in ce["nodes"]).encode()).hexdigest()[:12]
+            return True
+    return False
+
+with st.expander("[76] 증거 라벨러(수동/반자동)", expanded=False):
+    ce = st.session_state.get("CE_GRAPH")
+    if not ce:
+        st.info("CE evidence가 없습니다. [63] 자동 REPAIR로 먼저 보강하세요.")
+    else:
+        evids = ce_list_evidence_ids(ce)
+        eid = st.selectbox("Evidence 선택", evids, key="ev_sel")
+        ety = st.selectbox("유형", _EVID_TYPES, index=0, key="ev_type")
+        trs = st.slider("신뢰도(0.0~1.0)", 0.0, 1.0, 0.85, 0.01, key="ev_trust")
+        note= st.text_area("메모", value="", height=80, key="ev_note")
+        if st.button("라벨 저장", key="ev_save"):
+            ok = ce_tag_update(ce, eid, type=ety, trust=round(float(trs),3), note=note)
+            st.session_state["CE_GRAPH"]=ce
+            st.success("저장 완료" if ok else "실패")
+        st.markdown("**미리보기**")
+        try:
+            prev = [n for n in ce["nodes"] if n["id"]==eid][0]
+            st.json(prev)
+        except Exception:
+            st.write("선택된 evidence 미리보기에 실패했습니다.")
+
+# ================================================================
+# 77. 대화 콘솔(미니 터미널 뷰) — 한 줄 입력/즉시 응답 + 로그
+#    - HISTORY와 별도 독립 라인형 콘솔, 짧은 명령 실험용
+# ================================================================
+if "CONSOLE_LOG" not in st.session_state:
+    st.session_state["CONSOLE_LOG"] = []  # [{ts, cmd, out_len}]
+
+with st.expander("[77] 대화 콘솔(미니 터미널)", expanded=False):
+    cmd = st.text_input("➜ 명령/질문", value="상태요약 5줄", key="sh_cmd")
+    lvl = st.slider("레벨", 1, 999, 5, key="sh_lvl")
+    if st.button("Run", key="sh_go"):
+        out = generate_with_memory(cmd, level=lvl)
+        st.write(out if isinstance(out,str) else json.dumps(out, ensure_ascii=False))
+        st.session_state["CONSOLE_LOG"].append({"ts": int(time.time()), "cmd": cmd, "out_len": len(str(out))})
+    st.caption("최근 로그")
+    st.json(st.session_state["CONSOLE_LOG"][-10:])
+
+# ================================================================
+# 78. 장문 서식 도우미 — 머리글/표/코드블록 자동 생성기(템플릿)
+#    - 보고서/노트 작성을 빠르게 돕는 템플릿 인서터
+# ================================================================
+_MD_TEMPLATES = {
+"보고서-기본": """# 제목(yyyy-mm-dd)
+## 1. 배경
+## 2. 목표
+## 3. 방법
+- 데이터:
+- 절차:
+## 4. 결과
+## 5. 논의/한계
+## 6. 다음 액션
+""",
+"표-근거정리": """| 구분 | 출처 | 신뢰 | 메모 |
+|---|---|---:|---|
+| 증거1 | https:// | 0.95 | |
+| 증거2 | https:// | 0.90 | |
+""",
+"코드-의사결정표": """```pseudo
+IF ce_coverage >= 0.97 AND reproducibility >= 0.93 THEN
+    VERDICT = PASS
+ELSE
+    VERDICT = REPAIR
+END
+```"""
+}
+
+with st.expander("[78] 장문 서식 도우미", expanded=False):
+    pick = st.selectbox("템플릿", list(_MD_TEMPLATES.keys()), key="md_pick")
+    st.code(_MD_TEMPLATES[pick], language="markdown")
+    if st.button("응답으로 붙여넣기", key="md_into"):
+        txt = _MD_TEMPLATES[pick]
+        st.session_state.setdefault("HISTORY", []).append({"q":"[템플릿 삽입]", "a":txt, "ts":int(time.time()), "lvl":0})
+        st.success("히스토리에 템플릿이 추가되었습니다.")
+
+# ================================================================
+# 79. 실험 프로토콜 템플릿 — 가설0(REAL) 체크리스트 + 절차/평가지표
+#    - 출력: JSON(프로토콜) 생성 → specs/ 저장
+# ================================================================
+def make_protocol(title: str, steps: list, metrics: dict, guards: dict) -> dict:
+    return {
+        "title": title, "created_at": int(time.time()),
+        "guards": guards,  # {"hypothesis":"0", "real_guard":"soft|hard", ...}
+        "steps": steps,    # [{"name":"", "detail":"", "expect":""}, ...]
+        "metrics": metrics # {"ce_coverage":0.97, "reproducibility":0.93, ...}
+    }
+
+PROTO_DIR = os.path.join(LOG_DIR, "protocols")
+os.makedirs(PROTO_DIR, exist_ok=True)
+
+def save_protocol(proto: dict) -> str:
+    fn = os.path.join(PROTO_DIR, f"proto_{proto['created_at']}_{_sha(json.dumps(proto,ensure_ascii=False).encode())[:8]}.json")
+    json.dump(proto, open(fn,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+    return fn
+
+with st.expander("[79] 실험 프로토콜 템플릿", expanded=False):
+    ttl = st.text_input("프로토콜 제목", value="REAL/L30 초검증 루프", key="pp_title")
+    stp_default = [
+        {"name":"데이터 불러오기","detail":"링크/캐시 데이터 확보","expect":"오류0, 결측<1%"},
+        {"name":"단위/차원 검증","detail":"UNITS 체크","expect":"위반율≤0.0001"},
+        {"name":"증거 그래프 구축","detail":"CE-Graph 생성","expect":"커버리지≥0.5"},
+        {"name":"게이트 판정","detail":"메트릭 계산/판정","expect":"PASS 또는 REPAIR 사유 기록"}
+    ]
+    met_default = {"ce_coverage":0.97,"citation_coverage":0.90,"reproducibility":0.93,"subset_robustness":0.99}
+    grd_default = {"hypothesis":"0","real_guard":st.session_state.get("REAL_GUARD_MODE","soft")}
+    if st.button("프로토콜 생성/저장", key="pp_make"):
+        proto = make_protocol(ttl, stp_default, met_default, grd_default)
+        path  = save_protocol(proto)
+        st.success(f"저장됨: {path}")
+        st.json(proto)
+
+# ================================================================
+# 80. 미니 벤치마크 대시보드 — 케이스 성능 요약(길이/헬스/통과율)
+#    - HISTORY/헬스/테스트 매트릭스 결과를 간단 집계
+# ================================================================
+if "BENCH_LOG" not in st.session_state:
+    st.session_state["BENCH_LOG"] = []  # [{ts, name, pass_rate, avg_len}]
+
+def bench_log_add(name: str, pass_rate: float, avg_len: float):
+    st.session_state["BENCH_LOG"].append({"ts": int(time.time()), "name": name, "pass_rate": round(pass_rate,2), "avg_len": round(avg_len,1)})
+
+with st.expander("[80] 미니 벤치마크 대시보드", expanded=False):
+    # 샘플: 52번 매트릭스 실행 결과를 넘겨 수동 기록하는 흐름
+    bench_name = st.text_input("벤치 이름", value="L30 샘플 매트릭스", key="bn_name")
+    pr = st.number_input("통과율(0~1)", 0.0, 1.0, 0.88, 0.01, key="bn_pr")
+    if st.button("기록 추가", key="bn_add"):
+        hist = st.session_state.get("HISTORY", [])
+        avg_len = (sum(len(str(h.get("a",""))) for h in hist)/len(hist)) if hist else 0
+        bench_log_add(bench_name, pr, avg_len)
+        st.success("기록됨")
+    st.markdown("**최근 벤치 기록**")
+    st.json(st.session_state["BENCH_LOG"][-10:])
+    
+    # ================================================================
+# 81. 증거 그래프 텍스트 시각화 — 노드/엣지 요약(ASCII)
+#    - 그래프 라이브러리 없이 가볍게 구조를 확인
+# ================================================================
+def ce_text_view(ce: dict, k_nodes: int = 40) -> str:
+    if not ce: return "(CE-Graph 없음)"
+    nodes = ce.get("nodes", [])[:k_nodes]
+    edges = ce.get("edges", [])
+    lines = []
+    lines.append(f"# CE-Graph 프리뷰  (nodes={len(ce.get('nodes',[]))}, edges={len(edges)})")
+    # 클레임
+    claims = [n for n in nodes if n.get("kind")=="claim"]
+    for c in claims:
+        txt = (c.get("payload",{}).get("text","") or "")[:180]
+        lines.append(f"CLAIM {c['id']}: {txt}")
+    # 에비던스
+    evs = [n for n in nodes if n.get("kind")=="evidence"]
+    for i, e in enumerate(evs, 1):
+        p = e.get("payload",{})
+        src = (p.get("source","") or "")[:120]
+        sc  = p.get("score", None)
+        lines.append(f"  EV[{i:02d}] {e['id']}  score={sc}  src={src}")
+    # 엣지
+    show_edges = edges[: min(len(edges), k_nodes*2)]
+    for ed in show_edges:
+        lines.append(f"    └─ {ed.get('src','?')}  -[{ed.get('rel','')}]->  {ed.get('dst','?')}")
+    digest = ce.get("digest","")
+    if digest: lines.append(f"(digest={digest})")
+    if len(nodes) < len(ce.get("nodes",[])):
+        lines.append(f"... (노드 {len(ce.get('nodes',[]))-len(nodes)}개 생략)")
+    return "\n".join(lines)
+
+with st.expander("[81] 증거 그래프 텍스트 뷰", expanded=False):
+    st.code(ce_text_view(st.session_state.get("CE_GRAPH")), language="text")
+
+# ================================================================
+# 82. 역인과 플래너 + 점수표 — 목표→원인 가설 후보(증거연계 스코어)
+#    - 라이트 스코어: evidence 연결 수/평균 score/링크 커버리지 기반
+# ================================================================
+def invert_causality_plan(goal: str, ce: dict, topk: int = 3) -> dict:
+    # 매우 라이트: evidence 제목/출처 토큰을 후보 키워드로 삼아 원인 가설 제시
+    ev = [n for n in (ce or {}).get("nodes",[]) if n.get("kind")=="evidence"]
+    # 키워드 추출
+    keys = []
+    for n in ev:
+        src = (n.get("payload",{}).get("source","") or "")
+        for token in re.split(r"[/\-\._:#\?\&=\s]+", src):
+            if 3 <= len(token) <= 18 and token.isascii():
+                keys.append(token.lower())
+    # 단순 가중 빈도
+    from collections import Counter
+    cand = [k for k in keys if not any(t in k for t in ["http","www","html","pdf","img","css","js"])]
+    freq = Counter(cand).most_common(30)
+    # 후보 가설 구성
+    hypotheses=[]
+    for w,cnt in freq[:max(1, topk*3)]:
+        linked = [n for n in ev if w in ((n.get("payload",{}).get("source","") or "").lower())]
+        if not linked: continue
+        avg_score = sum((n.get("payload",{}).get("score",0.7) or 0) for n in linked)/len(linked)
+        hypotheses.append({
+            "hyp": f"원인/핵심 요소: {w}",
+            "evidence_count": len(linked),
+            "avg_evidence_score": round(avg_score,3)
+        })
+    # 정렬: evidence_count, avg_score
+    hypotheses.sort(key=lambda x:(-x["evidence_count"], -x["avg_evidence_score"]))
+    # 커버리지
+    cov = verify_ce_links(ce) if ce else {"coverage":0, "verdict":"N/A"}
+    return {
+        "goal": goal,
+        "coverage": cov.get("coverage"),
+        "verdict":  cov.get("verdict"),
+        "hypotheses": hypotheses[:topk],
+        "note": "라이트 휴리스틱(정식 추론 아님). 정식판은 SMT/ProofKernel 연동 후 교체."
+    }
+
+with st.expander("[82] 역인과 플래너 + 스코어", expanded=False):
+    goal = st.text_input("목표(Goal)", value="우주정보장 연결의 신뢰성 향상", key="ic_goal")
+    k    = st.slider("가설 수", 1, 10, 3, key="ic_k")
+    if st.button("계획/점수 산출", key="ic_run"):
+        st.json(invert_causality_plan(goal, st.session_state.get("CE_GRAPH"), k))
+
+# ================================================================
+# 83. LTM 검색 뷰 — 장기기억 JSON(.gz) 키워드 검색/미리보기
+#    - 오프라인 파일 스캔, 간단 포함검색(대소문자 무시)
+# ================================================================
+def ltm_search(term: str, limit: int = 30) -> list:
+    res=[]
+    if not os.path.isdir(LTM_DIR): return res
+    patt = term.lower()
+    files = sorted(glob.glob(os.path.join(LTM_DIR, "*.json*")), reverse=True)
+    for p in files:
+        if len(res)>=limit: break
+        try:
+            if p.endswith(".gz"):
+                import gzip
+                with gzip.open(p, "rt", encoding="utf-8", errors="ignore") as f:
+                    txt = f.read()
+            else:
+                txt = open(p,"r",encoding="utf-8",errors="ignore").read()
+            if patt in txt.lower():
+                res.append({"file": os.path.basename(p), "chars": len(txt), "preview": txt[:400]})
+        except Exception:
+            continue
+    return res
+
+with st.expander("[83] LTM 검색", expanded=False):
+    q = st.text_input("검색어", value="증거", key="ltm_q")
+    if st.button("검색", key="ltm_q_go"):
+        hits = ltm_search(q, limit=20)
+        st.write(f"결과 {len(hits)}개")
+        st.json(hits)
+
+# ================================================================
+# 84. 세션 스냅샷/복원 — session_state 화이트리스트 저장·불러오기
+#    - HISTORY/CE_GRAPH/PRESETS_USER/TASKS/HC_MIN/REAL_GUARD_MODE 등
+# ================================================================
+SNAP_DIR = os.path.join(LOG_DIR, "snapshots")
+os.makedirs(SNAP_DIR, exist_ok=True)
+
+_SNAP_KEYS = [
+    "HISTORY","CE_GRAPH","PRESETS_USER","TASKS",
+    "HC_MIN","REAL_GUARD_MODE","CTX_STACK","BENCH_LOG",
+]
+
+def snapshot_save(name: str) -> str:
+    data = {k: st.session_state.get(k) for k in _S_NAP_KEYS if k in st.session_state}
+    ts = int(time.time())
+    fn = os.path.join(SNAP_DIR, f"{ts}_{re.sub(r'[^0-9A-Za-z_-]+','_',name)}.json")
+    json.dump(data, open(fn,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+    return fn
+
+def snapshot_load(path: str) -> dict:
+    d = json.load(open(path,"r",encoding="utf-8"))
+    for k,v in d.items():
+        st.session_state[k] = v
+    return {"restored_keys": list(d.keys()), "file": os.path.basename(path)}
+
+with st.expander("[84] 세션 스냅샷/복원", expanded=False):
+    nm = st.text_input("스냅샷 이름", value="checkpoint", key="sn_name")
+    if st.button("저장", key="sn_save"):
+        try:
+            p = snapshot_save(nm); st.success(f"저장됨: {p}")
+        except Exception as e:
+            st.error(f"실패: {e}")
+    up = st.file_uploader("스냅샷 JSON 업로드(복원)", type=["json"], key="sn_upl")
+    if st.button("복원", key="sn_load") and up is not None:
+        import io
+        try:
+            d = json.load(io.StringIO(up.getvalue().decode("utf-8","ignore")))
+            for k,v in d.items(): st.session_state[k]=v
+            st.success(f"복원 완료: {list(d.keys())}")
+        except Exception as e:
+            st.error(f"복원 실패: {e}")
+
+# ================================================================
+# 85. 퀵런(일괄) — 목표 입력→생성→헬스체크→REPAIR 1회→CE/하이라이트 출력
+#    - 원클릭 파이프라인(모바일/웹 안전), 중간 결과 로그
+# ================================================================
+def quickrun(goal: str, lvl: int = 8) -> dict:
+    log = {}
+    # 1) 생성
+    ans = generate_with_memory(goal, level=lvl)
+    st.session_state.setdefault("HISTORY", []).append({"q": goal, "a": ans, "ts": int(time.time()), "lvl": lvl})
+    log["gen_len"] = len(str(ans))
+    # 2) 헬스
+    h = health_check()
+    log["health"] = h.get("verdicts",{})
+    # 3) 부족 시 간단 REPAIR
+    if any(v=="LOW" for v in log["health"].values() if v in ("OK","LOW")):
+        rr = repair_once(query=goal, k=3)
+        log["repair"] = rr
+    # 4) CE 프리뷰 + 하이라이트
+    ce = st.session_state.get("CE_GRAPH")
+    log["ce_snippets"] = ce_preview_snippets(ce, k=5)
+    log["highlight"] = highlight_keywords(str(ans))[:800]
+    return log
+
+with st.expander("[85] 퀵런(생성→헬스→REPAIR→프리뷰)", expanded=False):
+    qr_goal = st.text_area("목표/질문", value="우주정보장-연동 설계 핵심 요약과 리스크/완화책 제시", height=90, key="qr_goal")
+    qr_lvl  = st.slider("레벨", 1, 999, 8, key="qr_lvl")
+    if st.button("원클릭 실행", key="qr_go"):
+        st.json(quickrun(qr_goal, qr_lvl))
+        
         
