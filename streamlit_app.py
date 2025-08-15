@@ -4169,4 +4169,160 @@ with st.expander("[100] 하루치 종합 리포트", expanded=False):
                            file_name=os.path.basename(res["file"]), mime="application/json")
                            
                            
-                           
+                           # ================================================================
+# 101. 증거 스냅숏 비교(diff) — CE_GRAPH 현재 vs 저장본 비교
+#    - 노드/엣지/다이제스트 차이, 추가/삭제 목록 출력
+# ================================================================
+CE_SNAP_DIR = os.path.join(LOG_DIR, "ce_snapshots")
+os.makedirs(CE_SNAP_DIR, exist_ok=True)
+
+def ce_snapshot_save(name: str="ce_now") -> str:
+    ce = st.session_state.get("CE_GRAPH") or {}
+    ts = int(time.time())
+    fn = os.path.join(CE_SNAP_DIR, f"{ts}_{re.sub(r'[^0-9A-Za-z_-]+','_',name)}.json")
+    json.dump(ce, open(fn,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+    return fn
+
+def ce_snapshot_diff(path: str) -> dict:
+    import hashlib
+    cur = st.session_state.get("CE_GRAPH") or {}
+    old = json.load(open(path,"r",encoding="utf-8"))
+    def _ids(d, kind):
+        return {n["id"] for n in d.get("nodes",[]) if n.get("kind")==kind}
+    out = {
+        "digest_cur": hashlib.sha256(json.dumps(cur, sort_keys=True).encode()).hexdigest()[:12],
+        "digest_old": hashlib.sha256(json.dumps(old, sort_keys=True).encode()).hexdigest()[:12],
+        "claims_added": sorted(list(_ids(cur,"claim")-_ids(old,"claim"))),
+        "claims_removed": sorted(list(_ids(old,"claim")-_ids(cur,"claim"))),
+        "evid_added": sorted(list(_ids(cur,"evidence")-_ids(old,"evidence"))),
+        "evid_removed": sorted(list(_ids(old,"evidence")-_ids(cur,"evidence"))),
+        "edges_cur": len(cur.get("edges",[])),
+        "edges_old": len(old.get("edges",[])),
+    }
+    return out
+
+with st.expander("[101] 증거 스냅숏 비교(diff)", expanded=False):
+    col1,col2 = st.columns(2)
+    with col1:
+        nm = st.text_input("스냅숏 이름", value="baseline", key="ce_sn_name")
+        if st.button("현재 스냅숏 저장", key="ce_sn_save"):
+            p = ce_snapshot_save(nm); st.success(f"저장됨: {p}")
+    with col2:
+        up = st.file_uploader("비교할 CE 스냅숏 업로드(.json)", type=["json"], key="ce_sn_up")
+        if st.button("현재와 비교", key="ce_sn_diff") and up is not None:
+            import io
+            path = os.path.join(CE_SNAP_DIR, f"_tmp_{int(time.time())}.json")
+            open(path,"wb").write(up.getvalue())
+            st.json(ce_snapshot_diff(path))
+
+# ================================================================
+# 102. 히스토리 검색 쿼리 — 질문/응답 본문/길이/레벨 필터
+#    - 간단 부분일치 검색 + 정렬(길이/시간)
+# ================================================================
+def history_search(q: str="", min_len: int=0, level_min: int=1, level_max: int=999, limit: int=50, order: str="new") -> list:
+    hist = st.session_state.get("HISTORY", [])
+    res=[]
+    for h in hist:
+        a = str(h.get("a",""))
+        lv = int(h.get("lvl",0) or 0)
+        if q and (q.lower() not in (str(h.get("q","")).lower()+a.lower())): 
+            continue
+        if len(a) < min_len: 
+            continue
+        if not (level_min <= lv <= level_max):
+            continue
+        res.append(h)
+    res.sort(key=lambda x: x.get("ts",0), reverse=(order=="new"))
+    return res[:limit]
+
+with st.expander("[102] 히스토리 검색 쿼리", expanded=False):
+    q = st.text_input("검색어(질문+응답)", value="", key="hs_q")
+    ml= st.number_input("응답 최소 길이", 0, 1000000, 0, key="hs_min")
+    l1= st.number_input("레벨 최소", 1, 999, 1, key="hs_lmin")
+    l2= st.number_input("레벨 최대", 1, 999, 999, key="hs_lmax")
+    od= st.selectbox("정렬", ["new","old"], index=0, key="hs_od")
+    if st.button("검색", key="hs_go"):
+        st.json(history_search(q, ml, l1, l2, 100, od))
+
+# ================================================================
+# 103. 결과→원인 링크 추적 리포트 — CE에서 claim별 지원증거 요약
+#    - 각 claim에 연결된 supports/contradicts 집계 → 리포트(JSON)
+# ================================================================
+def trace_goal_supports(ce: dict) -> dict:
+    if not ce: return {"claims":[]}
+    nodes = {n["id"]:n for n in ce.get("nodes",[])}
+    claims = [n for n in ce.get("nodes",[]) if n.get("kind")=="claim"]
+    edges  = ce.get("edges",[])
+    rep=[]
+    for c in claims:
+        cid = c["id"]; txt = (c.get("payload",{}).get("text","") or "")[:180]
+        sup = [e for e in edges if e.get("dst")==cid and e.get("rel")=="supports"]
+        con = [e for e in edges if e.get("dst")==cid and e.get("rel")=="contradicts"]
+        rep.append({
+            "claim": {"id": cid, "text": txt},
+            "supports": [{"src": s["src"]} for s in sup],
+            "contradicts": [{"src": d["src"]} for d in con],
+            "score_hint": len(sup) - len(con)
+        })
+    return {"claims": rep, "total_claims": len(rep)}
+
+with st.expander("[103] 결과→원인 링크 추적 리포트", expanded=False):
+    ce = st.session_state.get("CE_GRAPH")
+    if st.button("리포트 생성", key="gl_make"):
+        st.json(trace_goal_supports(ce))
+
+# ================================================================
+# 104. A/B 프롬프트 테스트 — 2개 프롬프트 동시 실행/지표 비교
+#    - 길이/헬스/CE 커버리지/하이라이트 비교
+# ================================================================
+def run_once_collect(prompt: str, lvl: int=8) -> dict:
+    ans = generate_with_memory(prompt, level=lvl)
+    st.session_state.setdefault("HISTORY", []).append({"q": prompt, "a": ans, "ts": int(time.time()), "lvl": lvl})
+    hc  = health_check()
+    ce  = st.session_state.get("CE_GRAPH")
+    cov = verify_ce_links(ce).get("coverage") if ce else 0.0
+    return {
+        "prompt": prompt, "level": lvl,
+        "answer_len": len(str(ans)), "health": hc.get("verdicts",{}),
+        "coverage": cov, "highlight": highlight_keywords(str(ans))[:600]
+    }
+
+with st.expander("[104] A/B 프롬프트 테스트", expanded=False):
+    c1,c2 = st.columns(2)
+    with c1:
+        pA = st.text_area("프롬프트 A", value="우주정보장 연동의 핵심 리스크와 완화책", height=100, key="ab_a")
+        lA = st.slider("레벨 A", 1, 999, 8, key="ab_la")
+    with c2:
+        pB = st.text_area("프롬프트 B", value="우주정보장 연동의 단계별 절차와 지표", height=100, key="ab_b")
+        lB = st.slider("레벨 B", 1, 999, 8, key="ab_lb")
+    if st.button("A/B 실행", key="ab_go"):
+        resA = run_once_collect(pA, lA)
+        resB = run_once_collect(pB, lB)
+        st.markdown("### 결과 A")
+        st.json(resA)
+        st.markdown("### 결과 B")
+        st.json(resB)
+
+# ================================================================
+# 105. 소형 다크테마 토글 — 세션 기준 UI 톤 전환(간단 스타일 주입)
+#    - Streamlit 기본 테마 위에 경량 CSS 오버레이
+# ================================================================
+if "DARK_TOGGLE" not in st.session_state:
+    st.session_state["DARK_TOGGLE"] = False
+
+with st.expander("[105] 소형 다크테마 토글", expanded=False):
+    on = st.checkbox("다크 모드", value=st.session_state["DARK_TOGGLE"], key="dk_on")
+    st.session_state["DARK_TOGGLE"] = on
+    if on:
+        st.markdown("""
+        <style>
+        .stApp { background: #0e1117; color: #e6edf3; }
+        .stButton>button, .stDownloadButton>button { background:#30363d; color:#e6edf3; border:1px solid #484f58; }
+        .stTextInput>div>div>input, textarea { background:#161b22 !important; color:#e6edf3 !important; }
+        .stSelectbox>div>div>div>div { color:#e6edf3 !important; }
+        .stSlider>div[data-baseweb="slider"] div { background:#30363d !important; }
+        hr, .stExpander { border-color:#30363d !important; }
+        </style>
+        """, unsafe_allow_html=True)
+        
+        
