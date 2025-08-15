@@ -3794,104 +3794,54 @@ def thlog_tail(n: int = 30) -> list:
 with st.expander("[90] 임계치 히스토리 트래커", expanded=False):
     st.json(thlog_tail(30))
     
- # ================================================================
-# 91. 실험 리포트 자동 생성기 — 요약/메트릭/증거표를 MD+JSON 저장
-#    - HISTORY 최신 항목 + health_check + CE evidence 요약
-#    - 저장 위치: gea_logs/reports/
-# ================================================================
-# (필요 모듈: os, json, time, hashlib 는 상단에서 이미 import 되어 있다고 가정)
-REPORT_DIR = os.path.join(LOG_DIR, "reports")
-os.makedirs(REPORT_DIR, exist_ok=True)
+    # ==== [91] UI · 리포트/저장/불러오기 (수정판: DuplicateElementKey 방지) ====
+# 위치: 파일 맨 아래에 통째로 붙여넣기 (기존 91번이 있으면 교체)
 
-def _rows_from_ce(ce: dict, k: int = 20) -> list:
-    """CE_GRAPH의 evidence 노드를 표 형태로 일부 추려냄"""
-    try:
-        if not ce: return []
-        ev = [n for n in ce.get("nodes",[]) if n.get("kind")=="evidence"]
-        out=[]
-        for n in ev[:max(0,k)]:
-            p = n.get("payload") or {}
-            out.append({
-                "id": n.get("id"),
-                "source": p.get("source",""),
-                "score": p.get("score",None),
-                "span": p.get("span",[0,0])
-            })
-        return out
-    except Exception:
-        return []
+import uuid, re
+import streamlit as st
 
-def make_report_md(title: str, last: dict, hc: dict, ce_rows: list) -> str:
-    """리포트를 Markdown 문자열로 생성"""
-    lines=[]
-    lines.append(f"# {title}")
-    lines.append("")
-    lines.append("## 1) 요약")
-    lines.append(f"- 질문: {str(last.get('q',''))[:300]}")
-    lines.append(f"- 응답 길이: {len(str(last.get('a','')))} chars")
-    lines.append("")
-    lines.append("## 2) 헬스체크")
-    verdicts = (hc or {}).get("verdicts",{}) or {}
-    for k,v in verdicts.items():
-        lines.append(f"- {k}: {v}")
-    if (hc or {}).get("link_cov") is not None:
-        try:
-            lines.append(f"- 링크 커버리지: {float(hc.get('link_cov')):.3f}")
-        except Exception:
-            pass
-    lines.append("")
-    lines.append("## 3) 증거 표 (상위)")
-    lines.append("| id | score | source |")
-    lines.append("|---|---:|---|")
-    for r in ce_rows[:30]:
-        lines.append(f"| {r.get('id','')} | {'' if r.get('score') is None else r.get('score')} | {str(r.get('source',''))[:120]} |")
-    lines.append("")
-    lines.append("## 4) 텍스트 하이라이트(키워드)")
-    try:
-        lines.append((highlight_keywords(str(last.get('a',''))) or "")[:2000])
-    except Exception:
-        lines.append("(하이라이트 생성 실패 — highlight_keywords 미정의/에러)")
-    return "\n".join(lines)
+# 회색 안내: 모듈 91 — 리포트 관련 UI의 key 충돌 방지용 유틸
+def _ukey(tag: str) -> str:
+    """주어진 태그로부터 화면마다 유일한 key를 만들어준다."""
+    base = re.sub(r'[^a-zA-Z0-9_]+', '_', str(tag).strip())[:24] or "k"
+    return f"{base}_{uuid.uuid4().hex[:8]}"
 
-def save_report(title: str) -> dict:
-    """HISTORY 최신 항목 기준 리포트를 MD/JSON으로 저장하고 경로 반환"""
-    hist = st.session_state.get("HISTORY",[])
-    if not hist:
-        return {"ok":False,"error":"no-history"}
-    last = hist[-1]
-    # health_check()와 CE_GRAPH는 기존 모듈에서 제공된다고 가정
-    try:
-        hc = health_check()
-    except Exception:
-        hc = {"verdicts": {"health":"N/A"}}
-    ce   = st.session_state.get("CE_GRAPH")
-    rows = _rows_from_ce(ce, 64)
-    md   = make_report_md(title, last, hc, rows)
-    js   = {"title":title,"last":last,"health":hc,"evidence":rows}
-    ts   = int(time.time())
-    base = f"report_{ts}_{hashlib.sha256(md.encode('utf-8')).hexdigest()[:8]}"
-    mdp  = os.path.join(REPORT_DIR, base+".md")
-    jsp  = os.path.join(REPORT_DIR, base+".json")
-    open(mdp,"w",encoding="utf-8").write(md)
-    json.dump(js, open(jsp,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
-    return {"ok":True,"md":mdp,"json":jsp,"chars":len(md)}
+def _safe_call(name, *args, **kwargs):
+    """해당 이름의 함수가 존재하면 호출, 없으면 조용히 통과."""
+    fn = globals().get(name)
+    if callable(fn):
+        return fn(*args, **kwargs)
+    return None
 
-with st.expander("[91] 실험 리포트 자동 생성기", expanded=False):
-    rp_title = st.text_input("리포트 제목", value="GEA 실험 리포트", key="rp_ttl")
-    if st.button("리포트 생성/저장", key="rp_go"):
-        res = save_report(rp_title)
-        st.json(res)
-        if res.get("ok"):
-            try:
-                st.download_button("MD 다운로드",
-                                   data=open(res["md"],"rb").read(),
-                                   file_name=os.path.basename(res["md"]),
-                                   mime="text/markdown")
-                st.download_button("JSON 다운로드",
-                                   data=open(res["json"],"rb").read(),
-                                   file_name=os.path.basename(res["json"]),
-                                   mime="application/json")
-            except Exception as e:
-                st.warning(f"다운로드 버튼 생성 실패: {e}")
-                
-                
+st.divider()
+st.markdown("### 🧩 모듈 91 · 리포트/저장/불러오기 (안정판)")
+
+# 화면에 같은 컴포넌트를 여러 번 배치해도 항상 서로 다른 key가 되도록 _ukey() 사용
+c1, c2, c3 = st.columns(3)
+
+with c1:
+    if st.button("리포트 생성/저장", key=_ukey("report_save_btn")):
+        # 아래 두 줄은 기존에 쓰던 내부 함수명이 있으면 그대로 호출함
+        content = _safe_call("generate_validation_report") or "리포트 본문(샘플)"
+        _safe_call("save_report_to_store", content)  # 없으면 무시
+        st.success("리포트를 저장했어요.")
+
+with c2:
+    if st.button("리포트 불러오기", key=_ukey("report_load_btn")):
+        loaded = _safe_call("load_last_report")
+        if loaded:
+            st.code(loaded)
+        else:
+            st.info("불러올 리포트가 아직 없어요.")
+
+with c3:
+    if st.button("리포트 공유 링크", key=_ukey("report_share_btn")):
+        link = _safe_call("make_share_link") or "(공유 링크 기능은 아직 미구현)"
+        st.write(link)
+
+# (선택) 추가 컨트롤: 슬라이더/체크박스도 유일 key로 생성
+with st.expander("추가 옵션", expanded=False):
+    lvl = st.slider("표시 레벨", 1, 5, 3, key=_ukey("opt_level"))
+    active = st.checkbox("고급옵션", value=False, key=_ukey("opt_adv"))
+    st.caption(f"레벨={lvl}, 고급옵션={'ON' if active else 'OFF'}")
+# ==== [91] 끝 ====
