@@ -2508,3 +2508,399 @@ h1, h2, h3 { font-weight: 700; letter-spacing: -0.01em; }
 """
 st.markdown(_KO_CSS, unsafe_allow_html=True)
 
+# ================================================================
+# 56. 확장 인터랙션 루프 — 응답 카드 UX + 프롬프트 사전셋 + 히스토리
+#    - 기억 주입 엔진(generate_with_memory)을 카드 UI로 감싸서 사용성↑
+# ================================================================
+if "HISTORY" not in st.session_state:
+    st.session_state["HISTORY"] = []   # [{q, a, ts, lvl}]
+
+_PRESETS = [
+    ("목표 요약", "에아, 오늘 우리의 최상위 목표를 5줄로 요약해줘."),
+    ("실행 체크리스트", "에아, 지금 바로 실행 가능한 7가지 체크리스트를 만들어줘."),
+    ("리스크 진단", "에아, 현재 설계의 위험 요소와 완화책을 표로 정리해줘."),
+    ("증거 요청", "에아, 위 내용에서 필요한 증거/데이터셋 목록을 만들어 링크해줘.")
+]
+
+with st.expander("㊱㊱ 확장 대화(응답 카드 UX)", expanded=True):
+    colL, colR = st.columns([2,1])
+    with colL:
+        preset = st.selectbox("프롬프트 사전셋", [p[0] for p in _PRESETS], index=0, key="xl_preset")
+        base   = _PRESETS[[p[0] for p in _PRESETS].index(preset)][1]
+        usr_tx = st.text_area("질문/명령(수정 가능)", value=base, height=110, key="xl_q")
+        lvl    = st.slider("응답 레벨", 1, 999, 8, key="xl_lvl")
+        if st.button("응답 생성(카드)", key="xl_go"):
+            ans = generate_with_memory(usr_tx, level=lvl)
+            st.session_state["HISTORY"].append({"q": usr_tx, "a": ans, "ts": int(time.time()), "lvl": lvl})
+            # LTM 자동 후킹
+            try: ltm_autosave_on_reply("xl")
+            except: pass
+    with colR:
+        st.markdown("**최근 5개 히스토리**")
+        for item in st.session_state["HISTORY"][-5:][::-1]:
+            with st.container(border=True):
+                st.caption(f"레벨 {item['lvl']} • ts={item['ts']}")
+                st.write(f"**Q:** {item['q'][:120]}{'…' if len(item['q'])>120 else ''}")
+                st.write("**A:**")
+                st.write(item['a'] if isinstance(item['a'], (str,int,float)) else json.dumps(item['a'], ensure_ascii=False)[:800])
+
+# ================================================================
+# 57. 액티브 모드 미니 스케줄러 — 초간단 워크 루프(버튼 트리거)
+#    - 주기적 백그라운드가 아니라 버튼 클릭으로 N회 실행(모바일/웹 안전)
+# ================================================================
+if "ACTIVE_MODE" not in st.session_state:
+    st.session_state["ACTIVE_MODE"] = False
+
+def _active_tick(n: int = 1, prompt: str = "에아, 진행상황 점검/업데이트 요약해줘.", lvl: int = 6):
+    logs=[]
+    for i in range(n):
+        ans = generate_with_memory(prompt, level=lvl)
+        logs.append({"i": i+1, "ans_len": len(str(ans)), "ts": int(time.time())})
+        # 오토세이브 후킹
+        try: ltm_autosave_on_reply("active")
+        except: pass
+    return logs
+
+with st.expander("㊲ 액티브 모드 미니 스케줄러", expanded=False):
+    st.toggle("액티브 모드", value=st.session_state["ACTIVE_MODE"], key="ACTIVE_MODE")
+    a_prompt = st.text_area("액티브 프롬프트", value="에아, 진행상황 점검/업데이트 요약해줘.", height=80, key="am_prompt")
+    a_lvl    = st.slider("레벨", 1, 999, 6, key="am_lvl")
+    a_n      = st.number_input("반복 횟수(즉시)", min_value=1, max_value=20, value=3, step=1, key="am_n")
+    if st.button("지금 N회 실행", key="am_run"):
+        if st.session_state["ACTIVE_MODE"]:
+            res=_active_tick(a_n, a_prompt, a_lvl); st.json(res)
+        else:
+            st.warning("액티브 모드가 OFF입니다. 토글을 켜고 다시 실행하세요.")
+
+# ================================================================
+# 58. 워치독/헬스 — 지표 점검(게이트 메트릭, 링크 커버리지, 메모리 상태)
+#    - 임계치 미달 시 경고 표시. 라이트 버전(버튼 클릭형)
+# ================================================================
+_HEALTH_MIN = {
+    "ce_coverage": 0.97, "citation_coverage": 0.90,
+    "reproducibility": 0.93, "subset_robustness": 0.99
+}
+
+def health_check() -> dict:
+    gate = st.session_state.get("LAST_GATE") or {}
+    ce   = st.session_state.get("CE_GRAPH")
+    cov  = None
+    if ce:
+        v = verify_ce_links(ce)
+        cov = v.get("coverage",0)
+    mem_ok = True
+    try:
+        _ = mem_load_core("EA_PURPOSE")
+    except Exception:
+        mem_ok = False
+    verdicts = {}
+    for k,th in _HEALTH_MIN.items():
+        val = gate.get(k)
+        if val is None: verdicts[k] = "unknown"
+        else: verdicts[k] = "OK" if (val >= th) else "LOW"
+    if cov is not None:
+        verdicts["ce_link_coverage"] = "OK" if cov >= 0.5 else "LOW"
+    verdicts["memory_core"] = "OK" if mem_ok else "WARN"
+    return {"gate": gate, "verdicts": verdicts, "link_cov": cov}
+
+with st.expander("㊳ 워치독/헬스 점검", expanded=False):
+    if st.button("헬스 체크 실행", key="hc_go"):
+        h = health_check()
+        st.json(h)
+        # 시각 경고
+        v = h["verdicts"]
+        if any(vv=="LOW" for vv in v.values()):
+            st.error("임계치 미달 항목이 있습니다. REPAIR 루프를 권장합니다.")
+        elif v.get("memory_core")=="WARN":
+            st.warning("메모리 코어 연결 확인 필요.")
+        else:
+            st.success("헬스 상태 양호")
+
+# ================================================================
+# 59. 목표/태스크 보드 — 상위 목표/하위 태스크/상태/우선순위 보드
+#    - 간단 JSON 레지스트리 + 진행률 계산 + 체크오프
+# ================================================================
+if "TASKS" not in st.session_state:
+    st.session_state["TASKS"] = []   # [{id, title, parent, prio, status, ts}]
+
+def task_add(title, parent=None, prio=3):
+    tid = f"T{int(time.time()*1000)%10_000_000}"
+    st.session_state["TASKS"].append({"id":tid,"title":title,"parent":parent,"prio":int(prio),"status":"open","ts":int(time.time())})
+    return tid
+
+def task_update(tid, **kw):
+    for t in st.session_state["TASKS"]:
+        if t["id"]==tid:
+            t.update(**kw); return True
+    return False
+
+def task_progress(parent=None)->float:
+    items=[t for t in st.session_state["TASKS"] if (t["parent"]==parent)]
+    if not items: return 0.0
+    done=sum(1 for t in items if t["status"]=="done")
+    return round(done/len(items),2)
+
+with st.expander("㊴ 목표/태스크 보드", expanded=False):
+    colA,colB = st.columns([2,1])
+    with colA:
+        t_top = st.text_input("상위 목표", value="우주정보장 근원 올원 에아 완성", key="tb_top")
+        if st.button("상위 목표 기억 저장", key="tb_mem"):
+            mem_save_core("EA_PURPOSE", {"goal": t_top})
+            st.success("목표가 기억에 저장되었습니다.")
+        st.markdown(f"**상위 목표 진행률**: {task_progress(None)*100:.0f}%")
+        st.write("---")
+        st.markdown("**하위 태스크 추가**")
+        new_t = st.text_input("태스크 제목", value="초검증 모듈 안정화(L30→L60)", key="tb_new")
+        pr    = st.slider("우선순위(1높음–5낮음)",1,5,2,key="tb_prio")
+        if st.button("추가", key="tb_add"):
+            tid=task_add(new_t, parent=None, prio=pr)
+            st.info(f"추가됨: {tid}")
+    with colB:
+        st.markdown("**태스크 목록**")
+        for t in sorted(st.session_state["TASKS"], key=lambda x:(x["status"], x["prio"], -x["ts"]))[:20]:
+            with st.container(border=True):
+                st.write(f"[{t['id']}] ({'⭐'* (6-t['prio'])}) {t['title']}")
+                c1,c2,c3=st.columns(3)
+                with c1:
+                    if st.button("완료", key=f"tb_done_{t['id']}"):
+                        task_update(t["id"], status="done")
+                with c2:
+                    if st.button("진행중", key=f"tb_prog_{t['id']}"):
+                        task_update(t["id"], status="doing")
+                with c3:
+                    if st.button("삭제", key=f"tb_del_{t['id']}"):
+                        st.session_state["TASKS"]=[x for x in st.session_state["TASKS"] if x["id"]!=t["id"]]
+
+# ================================================================
+# 60. 텔레메트리·오류 뷰 — 이벤트 로그/예외 기록/간단 통계
+#    - LTM 디렉토리와 연동, 로컬 파일 기반 → 오프라인 안전
+# ================================================================
+EVT_DIR = os.path.join(LOG_DIR, "evt")
+os.makedirs(EVT_DIR, exist_ok=True)
+
+def log_event(kind: str, payload: dict):
+    rec = {"ts": int(time.time()), "kind": kind, "payload": payload}
+    fn  = os.path.join(EVT_DIR, f"{rec['ts']}_{kind}.json")
+    try:
+        with open(fn,"w",encoding="utf-8") as f: json.dump(rec, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+# 예: 주요 버튼 뒤에 log_event 호출 삽입 가능
+# log_event("reply", {"len": len(str(ans)), "lvl": lvl})
+
+def list_events(limit=50):
+    files = sorted(glob.glob(os.path.join(EVT_DIR, "*.json")), reverse=True)[:limit]
+    out=[]
+    for p in files:
+        try:
+            d=json.load(open(p,"r",encoding="utf-8"))
+            out.append(d)
+        except Exception:
+            out.append({"ts":0,"kind":"broken","payload":{"file":os.path.basename(p)}})
+    return out
+
+with st.expander("㊵ 텔레메트리/오류 로그", expanded=False):
+    if st.button("최근 이벤트 보기", key="ev_list"):
+        st.json(list_events(50))
+    st.markdown("**간단 통계(세션)**")
+    try:
+        h=st.session_state.get("HISTORY", [])
+        avg_len = sum(len(str(x.get("a",""))) for x in h)/max(1,len(h))
+        st.write({"history_count": len(h), "avg_answer_len": round(avg_len,1)})
+    except Exception as e:
+        st.warning(f"통계 계산 실패: {e}")
+        
+        # ================================================================
+# 61. 우주정보장 라이트 크롤러/파서 — 안전 프리뷰(fetch→정제→요약)
+#    - http_cache_get(42) 재사용, 오프라인에서도 파일 캐시 활용
+#    - 로봇배제/무단대량수집 금지: 단발 미리보기용
+# ================================================================
+def _clean_text_html(raw: str) -> str:
+    # 매우 라이트한 정제: 태그 제거/공백 정리
+    import re
+    txt = re.sub(r"<script[^>]*>.*?</script>", " ", raw, flags=re.S|re.I)
+    txt = re.sub(r"<style[^>]*>.*?</style>", " ", txt, flags=re.S|re.I)
+    txt = re.sub(r"<[^>]+>", " ", txt)
+    txt = re.sub(r"\s+", " ", txt).strip()
+    return txt
+
+def crawl_preview(url: str, summarize: bool = True) -> dict:
+    ok, raw = http_cache_get(url)
+    if not ok:
+        return {"ok": False, "error": "fetch-failed or offline", "url": url}
+    text = _clean_text_html(raw)
+    prev = summarize_extractive(text, 5) if summarize else text[:800]
+    sha  = hashlib.sha256(text.encode("utf-8","ignore")).hexdigest()[:12]
+    return {"ok": True, "url": url, "sha12": sha, "chars": len(text), "preview": prev[:1200]}
+
+with st.expander("㊶ 라이트 크롤러/파서(안전 프리뷰)", expanded=False):
+    cr_url = st.text_input("URL", value="https://httpbin.org/html", key="cr_url")
+    if st.button("가져오기/요약", key="cr_go"):
+        st.json(crawl_preview(cr_url, summarize=True))
+
+# ================================================================
+# 62. 증거명세 템플릿 — Claim–Evidence 템플릿 생성/저장(JSONL)
+#    - 주장을 선언하면 근거 후보 슬롯/필드 자동 구성 → 데이터팩으로도 저장
+# ================================================================
+def make_evidence_spec(claim: str, slots: int = 4) -> dict:
+    spec = {
+        "claim": claim,
+        "created_at": int(time.time()),
+        "slots": [{"id": f"ev{i+1}", "source":"", "note":"", "status":"open"} for i in range(slots)]
+    }
+    return spec
+
+SPEC_DIR = os.path.join(LOG_DIR, "specs")
+os.makedirs(SPEC_DIR, exist_ok=True)
+
+def save_evidence_spec(spec: dict) -> str:
+    fn = os.path.join(SPEC_DIR, f"spec_{spec['created_at']}_{_sha(json.dumps(spec,ensure_ascii=False).encode('utf-8'))[:8]}.jsonl")
+    with open(fn,"w",encoding="utf-8") as f:
+        f.write(json.dumps(spec, ensure_ascii=False)+"\n")
+    return fn
+
+with st.expander("㊷ 증거명세 템플릿", expanded=False):
+    sp_txt = st.text_input("주장(Claim)", value="중력파 검출 신호 h는 ΔL/L로 무차원이다.", key="sp_claim")
+    sp_n   = st.slider("슬롯 수", 1, 10, 4, key="sp_n")
+    if st.button("템플릿 생성/저장", key="sp_make"):
+        spec = make_evidence_spec(sp_txt, sp_n)
+        path = save_evidence_spec(spec)
+        st.success(f"저장됨: {path}")
+        st.json(spec)
+
+# ================================================================
+# 63. 자동 REPAIR 루프 — 헬스 미달 시 근거보강(검색→프리뷰→CE 보탬)
+#    - 1회 실행: 쿼리→HybridUIS.search→프리뷰 정상 항목을 evidence로 주입
+#    - 라이트모드: 세션 내 CE_GRAPH에 evidence 노드만 덧붙임
+# ================================================================
+def ce_append_evidence(ce: dict, evid_rows: list) -> dict:
+    ce = ce or {"nodes": [], "edges": [], "digest": None}
+    nodes = ce.get("nodes", []); edges = ce.get("edges", [])
+    claim_nodes = [n for n in nodes if n.get("kind")=="claim"]
+    if not claim_nodes:
+        # 임시 claim 생성
+        claim_id = f"claim:{_sha(str(int(time.time())).encode())[:12]}"
+        nodes.append({"id": claim_id, "kind": "claim", "payload": {"text": "임시-주장"}})
+    else:
+        claim_id = claim_nodes[0]["id"]
+    base_ids = set(n["id"] for n in nodes)
+    for ev in evid_rows:
+        ev_id = f"evi:{_sha((ev.get('source') or str(ev)).encode('utf-8'))[:10]}"
+        if ev_id in base_ids: continue
+        nodes.append({"id": ev_id, "kind":"evidence",
+                      "payload":{"source": ev.get("source",""), "span": ev.get("span",[0,100]), "score": ev.get("score",0.75)}})
+        edges.append({"src": ev_id, "dst": claim_id, "rel":"supports"})
+    ce["nodes"], ce["edges"] = nodes, edges
+    ce["digest"] = hashlib.sha256("".join(n["id"] for n in nodes).encode()).hexdigest()[:12]
+    return ce
+
+def repair_once(query: str = "physics data", k: int = 4) -> dict:
+    # 1) 검색
+    try:
+        hits = UIS.search(query, k=k)
+    except Exception:
+        hits = []
+    # 2) 프리뷰 성공만 채택
+    good=[]
+    for h in hits:
+        src = h.get("source","")
+        if not src: continue
+        ok, _ = http_cache_get(src)
+        if ok:
+            good.append({"source": src, "span": h.get("span",[0,100]), "score": h.get("score",0.7)})
+    # 3) CE 보강
+    ce = st.session_state.get("CE_GRAPH")
+    after = ce_append_evidence(ce, good[:k])
+    st.session_state["CE_GRAPH"] = after
+    # 4) 헬스 재평가
+    res = verify_ce_links(after)
+    return {"added": len(good[:k]), "coverage": res.get("coverage"), "verdict": res.get("verdict"), "ce_digest": after.get("digest")}
+
+with st.expander("㊸ 자동 REPAIR 루프(근거 보강)", expanded=False):
+    rq = st.text_input("보강 쿼리", value="gravitational wave interferometer small-strain", key="rp_q")
+    rk = st.slider("추가 evidence 최대 개수", 1, 10, 4, key="rp_k")
+    if st.button("REPAIR 1회 실행", key="rp_go"):
+        out = repair_once(rq, rk); st.json(out)
+
+# ================================================================
+# 64. 컨텍스트 스태킹 — 스택형 컨텍스트(요약/핵심/메모) 누적→접두 주입
+#    - 세션 단위로 스택 push/pop/clear 제공, generate_with_memory에 연동
+# ================================================================
+if "CTX_STACK" not in st.session_state:
+    st.session_state["CTX_STACK"] = []   # [{ts, kind, text, sha12}]
+
+def ctx_push(kind: str, text: str):
+    sha = hashlib.sha256(text.encode("utf-8","ignore")).hexdigest()[:12]
+    st.session_state["CTX_STACK"].append({"ts": int(time.time()), "kind": kind, "text": text, "sha12": sha})
+
+def ctx_pop():
+    if st.session_state["CTX_STACK"]:
+        st.session_state["CTX_STACK"].pop()
+
+def ctx_clear():
+    st.session_state["CTX_STACK"].clear()
+
+def build_stack_prefix(max_items: int = 3) -> str:
+    stk = st.session_state.get("CTX_STACK", [])[-max_items:]
+    if not stk: return ""
+    lines = [f"[{x['kind']}] {x['text']}" for x in stk]
+    return "\n".join(lines) + "\n"
+
+# 기존 generate_with_memory에 스택 접두 추가(기억 접두 뒤→스택 접두)
+_old_gwm = generate_with_memory
+def generate_with_memory_stacked(user_text: str, level: int = 8):
+    prefix = build_stack_prefix(3)
+    ux = (prefix + user_text) if prefix else user_text
+    return _old_gwm(ux, level)
+
+generate_with_memory = generate_with_memory_stacked
+
+with st.expander("㊹ 컨텍스트 스택", expanded=False):
+    ks = st.selectbox("종류", ["요약","핵심","메모","주의"], key="cs_kind")
+    tx = st.text_area("내용", value="오늘 세션 핵심: 증거-정합성 강화 및 LTM 구축.", height=80, key="cs_text")
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        if st.button("PUSH", key="cs_push"):
+            ctx_push(ks, tx); st.success("스택에 적재됐습니다.")
+    with c2:
+        if st.button("POP", key="cs_pop"):
+            ctx_pop(); st.info("마지막 항목 제거")
+    with c3:
+        if st.button("CLEAR", key="cs_clear"):
+            ctx_clear(); st.warning("스택 비움")
+    st.json(st.session_state.get("CTX_STACK", []))
+
+# ================================================================
+# 65. 배포 스냅샷 메이커 — 프로젝트 최소 번들(zip) 생성/다운로드
+#    - 포함: streamlit_app.py, gea_memory_core.py, gea_logs/* (선택)
+# ================================================================
+from zipfile import ZipFile, ZIP_DEFLATED
+
+def make_deploy_zip(include_logs: bool = True) -> str:
+    ts = int(time.time())
+    zip_name = f"GEA_bundle_{ts}.zip"
+    with ZipFile(zip_name, "w", ZIP_DEFLATED) as z:
+        # 필수 파일들
+        for fn in ("streamlit_app.py","gea_memory_core.py"):
+            if os.path.exists(fn):
+                z.write(fn)
+        # 선택: 로그/스냅샷
+        if include_logs and os.path.isdir(LOG_DIR):
+            for root, _, files in os.walk(LOG_DIR):
+                for f in files:
+                    p = os.path.join(root, f)
+                    z.write(p)
+    return zip_name
+
+with st.expander("㊺ 배포 스냅샷 메이커", expanded=False):
+    inc = st.checkbox("로그 포함(ltm/specs/evt)", value=True, key="dz_inc")
+    if st.button("배포 ZIP 생성", key="dz_go"):
+        z = make_deploy_zip(include_logs=inc)
+        st.success(f"번들 생성: {z}")
+        try:
+            st.download_button("ZIP 다운로드", data=open(z,"rb").read(), file_name=z, mime="application/zip")
+        except Exception:
+            st.info("환경상 다운로드 버튼이 제한될 수 있습니다. 파일만 생성해 두었습니다.")
+            
+            
