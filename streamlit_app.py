@@ -9566,3 +9566,568 @@ if st.button("정합성 검사 실행", key="ceg241_run"):
         ok, gate_msg = True, "게이트 확인 중 예외 → 코어로 진행"
     st.caption(f"Gate: {gate_msg}")
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [242] CE-Graph 가중치 보정기 v1 — 신뢰도(trust)·출처 가중(source)·시간감쇠(temporal decay)
+# 목적:
+#   - evidence→claim 간선(weight)을 신뢰도/출처/시간요소로 재보정
+#   - 입력: (A) CE-Graph(JSON)  (B) 소스 인덱스(JSON/JSONL; id, trust_score, domain, year 등)
+#   - 출력: 보정 weight 적용된 CE-Graph + 요약 리포트 + 다운로드
+#
+# 정책:
+#   - supports/contradicts만 가중치 보정 대상
+#   - weight' = base * Trust * SourceFactor * TimeDecay
+#   - TimeDecay = 0.5 ** (Δ년 / half_life_years)  (오래될수록 감쇠; half_life 조절)
+#
+# 설치/사용:
+#   - 외부 패키지 없음(표준 + Streamlit)
+import streamlit as st, json, math, time
+from typing import Dict, Any, List, Tuple
+from collections import defaultdict
+
+# ── 호환 헬퍼
+if "register_module" not in globals():
+    def register_module(num,name,desc): pass
+if "gray_line" not in globals():
+    def gray_line(num,title,subtitle):
+        st.markdown(f"**[{num}] {title}** — {subtitle}")
+
+register_module("242", "CE-Graph 가중치 보정기 v1", "trust/source/temporal 보정")
+gray_line("242", "CE-Graph 가중치 보정", "신뢰도·출처·시간감쇠 기반으로 evidence weight 재보정")
+
+st.subheader("⚙️ 보정 파라미터")
+c1, c2, c3 = st.columns(3)
+with c1:
+    half_life = st.number_input("시간 반감기(년, half-life)", min_value=1.0, max_value=50.0, value=8.0, step=1.0)
+with c2:
+    src_default = st.number_input("기본 SourceFactor(미상 소스)", min_value=0.1, max_value=2.0, value=1.0, step=0.1)
+with c3:
+    trust_floor = st.number_input("최소 Trust(미상/결측 대체)", min_value=0.1, max_value=1.0, value=0.7, step=0.05)
+
+st.caption("TimeDecay = 0.5 ** (Δ년 / half_life).  Δ년 = 현재연도 - 소스연도(또는 증거 payload.year).")
+
+st.subheader("📥 입력")
+colA, colB = st.columns(2)
+with colA:
+    up_graph = st.file_uploader("CE-Graph JSON 업로드", type=["json"], key="cwg242_graph")
+with colB:
+    up_sources = st.file_uploader("소스 인덱스(JSON 또는 JSONL)", type=["json","jsonl"], key="cwg242_src")
+
+txt_graph = st.text_area("또는 CE-Graph JSON 직접 붙여넣기", height=200, key="cwg242_graph_txt")
+txt_sources = st.text_area("또는 소스 인덱스(JSON/JSONL) 직접 붙여넣기", height=160, key="cwg242_src_txt")
+
+def load_json_maybe_lines(blob: str) -> List[Dict[str,Any]]:
+    blob = blob.strip()
+    if not blob:
+        return []
+    # JSONL인지 JSON 배열인지 판단
+    if "\n" in blob and not blob.lstrip().startswith("["):
+        out = []
+        for line in blob.splitlines():
+            line=line.strip()
+            if not line: continue
+            out.append(json.loads(line))
+        return out
+    data = json.loads(blob)
+    if isinstance(data, list): return data
+    return [data]
+
+def read_bytes_or_text(fileobj, fallback_txt):
+    if fileobj is not None:
+        try:
+            return fileobj.read().decode("utf-8")
+        except Exception:
+            return ""
+    return fallback_txt or ""
+
+# 입력 로딩
+graph_txt = read_bytes_or_text(up_graph, txt_graph)
+src_txt   = read_bytes_or_text(up_sources, txt_sources)
+
+def parse_graph(text: str) -> Tuple[List[Dict[str,Any]], List[Dict[str,Any]], List[str]]:
+    errs=[]
+    try:
+        data=json.loads(text) if text.strip() else {}
+        nodes=list(data.get("nodes") or [])
+        edges=list(data.get("edges") or [])
+        if not isinstance(nodes, list) or not isinstance(edges, list):
+            errs.append("nodes/edges는 리스트여야 합니다.")
+        return nodes, edges, errs
+    except Exception as e:
+        return [], [], [f"CE-Graph 파싱 실패: {e}"]
+
+def build_source_maps(items: List[Dict[str,Any]]) -> Tuple[Dict[str,Dict[str,Any]], Dict[str,float]]:
+    by_id, domain_factor = {}, defaultdict(lambda:1.0)
+    for it in items:
+        sid = it.get("id") or it.get("source_id")
+        if sid: by_id[sid]=it
+        # 도메인별 기본 가중(있으면 사용)
+        dom = it.get("domain")
+        if dom and "domain_weight" in it:
+            try:
+                domain_factor[dom] = float(it["domain_weight"])
+            except: pass
+    return by_id, domain_factor
+
+def infer_year(payload: Dict[str,Any], src_obj: Dict[str,Any]) -> int:
+    for key in ("year","published","pub_year"):
+        v = payload.get(key)
+        if isinstance(v,int) and 1900<=v<=2100:
+            return v
+    if src_obj:
+        v = src_obj.get("year")
+        if isinstance(v,int) and 1900<=v<=2100:
+            return v
+    return time.gmtime().tm_year  # 연도 미상 → 현재연도
+
+def source_factor(payload: Dict[str,Any], src_obj: Dict[str,Any], domain_map: Dict[str,float], default_val: float) -> float:
+    # payload.source 혹은 src_obj.domain 로 도메인 기반 팩터 추정
+    dom = None
+    for key in ("domain","source_domain","site"):
+        if key in payload:
+            dom = payload[key]; break
+    if not dom and src_obj: dom = src_obj.get("domain")
+    return float(domain_map.get(dom, default_val))
+
+def get_trust(src_obj: Dict[str,Any], floor: float) -> float:
+    if src_obj and "trust_score" in src_obj:
+        try:
+            return max(floor, min(1.0, float(src_obj["trust_score"])))
+        except:
+            return floor
+    return floor
+
+def temporal_decay(year_now: int, year_item: int, half_life_years: float) -> float:
+    dy = max(0.0, float(year_now - year_item))
+    return 0.5 ** (dy / max(0.1, half_life_years))
+
+# 실행
+if st.button("가중치 보정 실행", key="cwg242_run"):
+    nodes, edges, errs = parse_graph(graph_txt)
+    if errs:
+        st.error("; ".join(errs))
+        st.stop()
+
+    src_items = load_json_maybe_lines(src_txt)
+    src_by_id, dom_map = build_source_maps(src_items)
+
+    id2kind = {n.get("id"): n.get("kind") for n in nodes}
+    year_now = time.gmtime().tm_year
+
+    updated_edges = []
+    changed_cnt = 0
+    summary_rows = []
+    for e in edges:
+        rel = e.get("rel")
+        if rel not in ("supports","contradicts"):
+            updated_edges.append(e); continue
+        src_id, dst_id = e.get("src"), e.get("dst")
+        if id2kind.get(src_id)!="evidence" or id2kind.get(dst_id)!="claim":
+            updated_edges.append(e); continue
+
+        base = float(e.get("weight", 1.0))
+        payload = {}
+        # 얕은 병합: evidence payload는 노드 쪽에 있으므로 필요한 경우 참조
+        # (간단화를 위해 간선 payload에서 우선 찾고 없으면 기본값 사용)
+        src_obj = None
+        # evidence의 source_id/doi/url 등을 간선 payload에도 둘 수 있음
+        # 여기서는 간선에 'source_id' 있으면 src_by_id에 매칭
+        evid_src_id = e.get("source_id")
+        if evid_src_id and evid_src_id in src_by_id:
+            src_obj = src_by_id[evid_src_id]
+
+        # Trust
+        Trust = get_trust(src_obj, trust_floor)
+
+        # SourceFactor
+        Sfac = source_factor(e, src_obj, dom_map, src_default)
+
+        # TimeDecay
+        y_item = infer_year(e, src_obj)
+        Tdec = temporal_decay(year_now, y_item, half_life)
+
+        new_w = base * Trust * Sfac * Tdec
+        # 안정화: 0~2 범위 클리핑(과도치 방지), 소수 6자리
+        new_w = max(0.0, min(2.0, new_w))
+        changed = abs(new_w - base) > 1e-9
+        if changed: changed_cnt += 1
+
+        e2 = dict(e)
+        e2["weight_base"] = base
+        e2["weight_trust"] = round(Trust,6)
+        e2["weight_source"] = round(Sfac,6)
+        e2["weight_time"] = round(Tdec,6)
+        e2["weight"] = round(new_w,6)
+        updated_edges.append(e2)
+
+        summary_rows.append({
+            "edge": f"{src_id}→{dst_id} ({rel})",
+            "base": round(base,6),
+            "Trust": round(Trust,3),
+            "SrcFac": round(Sfac,3),
+            "Time": round(Tdec,3),
+            "new_w": round(new_w,6),
+        })
+
+    new_graph = {"nodes": nodes, "edges": updated_edges}
+    st.success(f"보정 완료: 대상 간선 {changed_cnt}개 가중치 갱신")
+    st.dataframe(summary_rows, use_container_width=True)
+
+    st.subheader("📤 보정된 CE-Graph 다운로드")
+    st.download_button("JSON 저장", data=json.dumps(new_graph, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="ce_graph_reweighted.json", mime="application/json", key="cwg242_dl")
+
+    # 게이트 통지
+    gate_msg = ""
+    try:
+        if "backbone_gate" in globals():
+            ok, gate_msg = backbone_gate("CE-Graph 가중치 보정", "현실연동 핵심")
+        elif "spx_backbone_gate" in globals():
+            ok, gate_msg = spx_backbone_gate("CE-Graph 가중치 보정", "현실연동 핵심")
+        else:
+            ok, gate_msg = True, "게이트 없음(코어 모듈로 간주)"
+    except Exception:
+        ok, gate_msg = True, "게이트 확인 중 예외 → 코어로 진행"
+    st.caption(f"Gate: {gate_msg}")
+# ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [243] 합의도/모순도 통합 스코어러 v1 — Claim별 Consensus Index 산출
+# 목적:
+#   - CE-Graph(nodes, edges)에서 claim 노드별로 supports/contradicts 가중치를 집계
+#   - 합의도(Consensus), 모순도(Contradiction), 신뢰지수(Confidence) 계산
+#   - 임계치로 PASS/REPAIR/REFUSE 간단 판정 + 다운로드
+#
+# 입력:
+#   - CE-Graph JSON (가능하면 [242] 가중치 보정 후 결과 사용 권장: weight 필드 포함)
+# 출력:
+#   - claim별 표, 요약 메트릭, JSON 저장
+#
+# 외부 패키지: 없음(표준 + Streamlit)
+import streamlit as st, json, math, time
+from typing import Dict, Any, List, Tuple, DefaultDict
+from collections import defaultdict
+
+if "register_module" not in globals():
+    def register_module(num,name,desc): pass
+if "gray_line" not in globals():
+    def gray_line(num,title,subtitle):
+        st.markdown(f"**[{num}] {title}** — {subtitle}")
+
+register_module("243", "합의도/모순도 스코어러 v1", "claim별 Consensus/Contradiction/Confidence")
+gray_line("243", "Consensus Index", "supports/contradicts 집계로 Claim 신뢰지수 산출")
+
+st.subheader("⚙️ 스코어링 파라미터")
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    use_reweighted = st.checkbox("보정 weight 우선(없으면 1.0)", value=True)
+with c2:
+    min_edges = st.number_input("최소 증거 수(필터)", min_value=0, max_value=100, value=0, step=1)
+with c3:
+    pass_cons = st.number_input("PASS 기준(Consensus ≥)", min_value=0.0, max_value=1.0, value=0.80, step=0.05)
+with c4:
+    max_contra = st.number_input("모순 허용 상한(Contradiction ≤)", min_value=0.0, max_value=1.0, value=0.20, step=0.05)
+
+st.caption("Consensus = S / (S + C) ,  Contradiction = C / (S + C) , Confidence = log(1 + S + C)")
+
+st.subheader("📥 입력")
+colA, colB = st.columns(2)
+with colA:
+    up_graph_243 = st.file_uploader("CE-Graph JSON 업로드", type=["json"], key="ci243_graph")
+with colB:
+    txt_graph_243 = st.text_area("또는 CE-Graph JSON 직접 붙여넣기", height=200, key="ci243_graph_txt")
+
+def _read_blob(fileobj, fallback_txt:str)->str:
+    if fileobj is not None:
+        try:
+            return fileobj.read().decode("utf-8")
+        except Exception:
+            return ""
+    return fallback_txt or ""
+
+def _parse_graph(text:str)->Tuple[List[Dict[str,Any]], List[Dict[str,Any]], List[str]]:
+    errs=[]
+    try:
+        data=json.loads(text) if text.strip() else {}
+        nodes=list(data.get("nodes") or [])
+        edges=list(data.get("edges") or [])
+        if not isinstance(nodes,list) or not isinstance(edges,list):
+            errs.append("nodes/edges는 리스트여야 합니다.")
+        return nodes, edges, errs
+    except Exception as e:
+        return [], [], [f"CE-Graph 파싱 실패: {e}"]
+
+def _score_claims(nodes, edges, prefer_weight=True, min_edges_filter=0):
+    kind = {n.get("id"): n.get("kind") for n in nodes}
+    claims = [n for n in nodes if n.get("kind")=="claim"]
+    accS: DefaultDict[str,float] = defaultdict(float)
+    accC: DefaultDict[str,float] = defaultdict(float)
+    cntS: DefaultDict[str,int] = defaultdict(int)
+    cntC: DefaultDict[str,int] = defaultdict(int)
+
+    for e in edges:
+        rel = e.get("rel")
+        src, dst = e.get("src"), e.get("dst")
+        if rel not in ("supports","contradicts"): 
+            continue
+        # evidence->claim만 집계
+        if kind.get(src)!="evidence" or kind.get(dst)!="claim":
+            continue
+        w = float(e.get("weight", 1.0)) if prefer_weight else float(e.get("weight_base", e.get("weight", 1.0)))
+        w = max(0.0, w)
+        if rel=="supports":
+            accS[dst]+=w; cntS[dst]+=1
+        else:
+            accC[dst]+=w; cntC[dst]+=1
+
+    rows=[]
+    for cl in claims:
+        cid = cl.get("id")
+        S, C = accS[cid], accC[cid]
+        Ns, Nc = cntS[cid], cntC[cid]
+        tot = S + C
+        if min_edges_filter>0 and (Ns+Nc) < min_edges_filter:
+            continue
+        if tot<=0:
+            consensus = 0.0; contra = 0.0; conf = 0.0
+        else:
+            consensus = S / tot
+            contra    = C / tot
+            conf      = math.log1p(tot)  # 증거량 로그 스케일
+        verdict = "PASS" if (consensus>=pass_cons and contra<=max_contra) else ("REPAIR" if tot>0 else "UNKNOWN")
+        rows.append({
+            "claim_id": cid,
+            "consensus": round(consensus,4),
+            "contradiction": round(contra,4),
+            "confidence": round(conf,4),
+            "supports_w": round(S,6),
+            "contradicts_w": round(C,6),
+            "supports_n": int(Ns),
+            "contradicts_n": int(Nc),
+            "verdict": verdict,
+            "text": (cl.get("payload") or {}).get("text",""),
+        })
+    return sorted(rows, key=lambda r:(r["verdict"]!="PASS", -r["consensus"], -r["confidence"]))
+
+# 실행 버튼
+if st.button("합의도 계산 실행", key="ci243_run"):
+    text = _read_blob(up_graph_243, txt_graph_243)
+    nodes, edges, errs = _parse_graph(text)
+    if errs:
+        st.error("; ".join(errs))
+        st.stop()
+
+    table = _score_claims(nodes, edges, prefer_weight=use_reweighted, min_edges_filter=min_edges)
+    if not table:
+        st.warning("집계 결과가 비었습니다. (증거 수 필터/그래프 구조 확인)")
+    else:
+        st.success(f"총 {len(table)}개 claim 스코어 산출 완료")
+        st.dataframe(table, use_container_width=True, hide_index=True)
+
+        # 요약
+        n_pass = sum(1 for r in table if r["verdict"]=="PASS")
+        n_rep  = sum(1 for r in table if r["verdict"]=="REPAIR")
+        n_unk  = sum(1 for r in table if r["verdict"]=="UNKNOWN")
+        st.markdown(f"**요약:** PASS {n_pass} · REPAIR {n_rep} · UNKNOWN {n_unk}")
+
+        # 다운로드
+        out = {"claims": table, "params": {
+            "use_reweighted": use_reweighted,
+            "min_edges": min_edges,
+            "pass_consensus": pass_cons,
+            "max_contradiction": max_contra,
+            "ts": int(time.time()),
+        }}
+        st.download_button("📤 JSON 저장", data=json.dumps(out, ensure_ascii=False, indent=2).encode("utf-8"),
+                           file_name="claim_consensus_report.json", mime="application/json", key="ci243_dl")
+
+        # 게이트 연동(있으면 사용)
+        try:
+            if "backbone_gate" in globals():
+                ok, msg = backbone_gate("Consensus Scorer v1", "현실연동·초검증 핵심")
+            elif "spx_backbone_gate" in globals():
+                ok, msg = spx_backbone_gate("Consensus Scorer v1", "현실연동·초검증 핵심")
+            else:
+                ok, msg = True, "게이트 없음(코어로 진행)"
+        except Exception:
+            ok, msg = True, "게이트 확인 중 예외 → 코어로 진행"
+        st.caption(f"Gate: {msg}")
+# ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [244] 반례사냥 루프 v1 — 고모순 Claim 타겟팅 & 교란 생성/재검증
+# 목적:
+#   - [243]의 Claim별 합의/모순 리포트를 받아 모순 높은 claim을 자동 선별
+#   - 간단한 "교란(perturbation) 생성기"로 반례 후보를 만들고, 재검증 훅을 호출
+#   - 재검증 결과를 요약(성공/실패/보류)하여 JSON으로 저장
+#
+# 입력:
+#   - claim_consensus_report.json (또는 텍스트 붙여넣기)
+#   - 재검증 훅(간이): CE-Graph + 규칙 기반 평가(스텁)
+#
+# 외부 패키지: 없음(표준 + Streamlit)
+import streamlit as st, json, random, time
+from typing import Dict, Any, List, Tuple
+
+if "register_module" not in globals():
+    def register_module(num,name,desc): pass
+if "gray_line" not in globals():
+    def gray_line(num,title,subtitle):
+        st.markdown(f"**[{num}] {title}** — {subtitle}")
+
+register_module("244","반례사냥 루프 v1","모순 높은 claim 타겟팅 → 교란 생성 → 재검증")
+gray_line("244","반례사냥 루프","고모순 claim 표면화 · 반례 후보 생성 · 재검증/요약")
+
+st.subheader("🎯 타깃팅 파라미터")
+c1, c2, c3 = st.columns(3)
+with c1:
+    contra_min = st.number_input("모순도 하한(≥)", 0.0, 1.0, 0.30, 0.05)
+with c2:
+    conf_min = st.number_input("Confidence 하한(≥)", 0.0, 10.0, 0.30, 0.10)
+with c3:
+    max_targets = st.number_input("최대 타깃 수", 1, 200, 10, 1)
+
+st.caption("모순도가 높은데 증거량(Confidence)도 어느 정도 있는 claim을 우선 타깃팅.")
+
+st.subheader("📥 입력(합의/모순 리포트)")
+colA, colB = st.columns(2)
+with colA:
+    up_rep = st.file_uploader("claim_consensus_report.json 업로드", type=["json"], key="adv244_up")
+with colB:
+    rep_txt = st.text_area("또는 JSON 직접 붙여넣기", height=200, key="adv244_txt")
+
+def _read_blob(fileobj, fallback_txt:str)->str:
+    if fileobj is not None:
+        try:
+            return fileobj.read().decode("utf-8")
+        except Exception:
+            return ""
+    return fallback_txt or ""
+
+def _load_report(blob:str)->List[Dict[str,Any]]:
+    if not blob.strip():
+        return []
+    data = json.loads(blob)
+    # 지원 포맷: {"claims":[...]} 또는 바로 배열
+    if isinstance(data, dict) and "claims" in data:
+        return list(data["claims"])
+    if isinstance(data, list):
+        return data
+    return []
+
+# ── 간단 교란 생성기(스텁) ─────────────────
+def gen_perturbations(claim_text:str, k:int=5)->List[str]:
+    """
+    간단 규칙/치환/경계값 기반 교란 후보 생성(스텁).
+    실제 구현에선 도메인별 변형(단위, 상수, 부호, 조건문 완화/강화 등)을 붙여 확장.
+    """
+    seeds = [
+        ("<부정_삽입>", lambda s: "NOT(" + s + ")"),
+        ("<조건_강화>", lambda s: s + " AND boundary↑"),
+        ("<조건_완화>", lambda s: s + " AND boundary↓"),
+        ("<단위_스케일>", lambda s: s.replace("m", "cm") if "m" in s else s+" *scale(cm→m)"),
+        ("<상수_치환>", lambda s: s.replace("1.0", "0.99") if "1.0" in s else s+" (const±1%)"),
+        ("<키워드_동의어>", lambda s: s.replace("증가", "상승") if "증가" in s else s.replace("decrease","drop")),
+        ("<경계_뒤집기>", lambda s: s.replace(">=", "<") if ">=" in s else s.replace("<=", ">")),
+    ]
+    random.shuffle(seeds)
+    out=[]
+    for tag,fn in seeds[:max(1,min(k,len(seeds)))]:
+        try:
+            out.append(f"{tag} :: {fn(claim_text)}")
+        except Exception:
+            out.append(f"{tag} :: {claim_text}")
+    return out
+
+# ── 재검증 훅(스텁) ─────────────────────────
+def revalidate(perturbed_text:str, policy:Dict[str,Any])->Dict[str,Any]:
+    """
+    간단 규칙 기반 재검증:
+      - 부정( NOT( ) )이 들어가면 기존 합의 가정을 깨는 반례 우선 후보로 점수↑
+      - boundary↑/↓는 증거 대비 일관성 점검(스텁 점수)
+      - 단위/스케일/상수 치환은 '주의'로 표기
+    반환: verdict ∈ {HIT(반례가능성), WEAK(애매), MISS(반례아님)}
+    """
+    s = perturbed_text
+    score = 0.0; flags=[]
+    if "NOT(" in s: score += 0.5; flags.append("negation")
+    if "boundary↑" in s: score += 0.2; flags.append("harder")
+    if "boundary↓" in s: score += 0.2; flags.append("softer")
+    if "scale(" in s or "cm→m" in s: flags.append("unit-scale")
+    if "const±" in s: flags.append("const-perturb")
+    # 간단 임계
+    if score >= 0.6: verdict="HIT"
+    elif score >= 0.3: verdict="WEAK"
+    else: verdict="MISS"
+    return {"score": round(score,3), "flags": flags, "verdict": verdict}
+
+# ── 실행 ────────────────────────────────────
+if st.button("반례사냥 실행", key="adv244_run"):
+    blob = _read_blob(up_rep, rep_txt)
+    claims = _load_report(blob)
+    if not claims:
+        st.error("리포트가 비었습니다. [243] 결과(JSON)를 입력하세요.")
+        st.stop()
+
+    # 타깃 선별: 모순도≥contra_min & confidence≥conf_min
+    targets = [c for c in claims if c.get("contradiction",0) >= contra_min and c.get("confidence",0) >= conf_min]
+    # 합의 높은 PASS라도 모순이 일정 이상이면 타깃에 포함될 수 있음
+    targets = sorted(targets, key=lambda r:(-r.get("contradiction",0), -r.get("confidence",0)))[:max_targets]
+
+    if not targets:
+        st.info("조건을 만족하는 타깃 claim이 없습니다. 임계치를 낮추거나 데이터 갱신을 확인하세요.")
+        st.stop()
+
+    st.success(f"타깃 claim {len(targets)}건 선정")
+    results=[]
+    for t in targets:
+        cid = t.get("claim_id","<unknown>")
+        text = t.get("text","")
+        st.markdown(f"**• Target**: `{cid}`  | contra={t.get('contradiction')}, conf={t.get('confidence')}")
+        # 교란 생성
+        ks = st.slider(f"교란 수(k) — {cid}", 1, 10, 5, key=f"k_{cid}")
+        perts = gen_perturbations(text, k=ks)
+
+        rows=[]
+        for p in perts:
+            rv = revalidate(p, policy={})
+            rows.append({"perturbation": p, **rv})
+        st.table(rows)
+
+        # 요약 집계
+        hit = sum(1 for r in rows if r["verdict"]=="HIT")
+        weak= sum(1 for r in rows if r["verdict"]=="WEAK")
+        miss= sum(1 for r in rows if r["verdict"]=="MISS")
+        summary = {
+            "claim_id": cid,
+            "text": text,
+            "contradiction": t.get("contradiction"),
+            "confidence": t.get("confidence"),
+            "n_hit": hit, "n_weak": weak, "n_miss": miss,
+            "samples": rows,
+        }
+        results.append(summary)
+
+    st.subheader("📊 반례사냥 요약")
+    st.json(results)
+
+    # 다운로드
+    out = {
+        "ts": int(time.time()),
+        "policy": {
+            "contra_min": contra_min, "conf_min": conf_min, "max_targets": int(max_targets)
+        },
+        "results": results
+    }
+    st.download_button("📤 JSON 저장", data=json.dumps(out, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="adversarial_hunt_report.json", mime="application/json", key="adv244_dl")
+
+    # 게이트: 코어 작업으로 등록
+    try:
+        if "backbone_gate" in globals():
+            ok, msg = backbone_gate("반례사냥 루프 v1", "초검증 핵심")
+        elif "spx_backbone_gate" in globals():
+            ok, msg = spx_backbone_gate("반례사냥 루프 v1", "초검증 핵심")
+        else:
+            ok, msg = True, "게이트 없음(코어로 진행)"
+    except Exception:
+        ok, msg = True, "게이트 확인 중 예외 → 코어로 진행"
+    st.caption(f"Gate: {msg}")
+# ───────────────────────────────────────────────
