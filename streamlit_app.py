@@ -6524,3 +6524,179 @@ def spx_backbone_gate(feature_name:str, justification:str=""):
 # ───────────────────────────────────────────────
 
 
+# ───────────────────────────────────────────────
+# 222 / REAL-CEG v1 — 현실연동(CE-Graph) 1차 완결 모듈
+# 목적: 최소 현실연동 파이프라인 + CE-Graph 생성 + 검증 경고 + 스냅샷
+# 사용: 221번 모듈 다음 "맨 아래"에 통째로 붙여넣기. 외부 패키지 불필요.
+import streamlit as st, json, hashlib, time
+from datetime import datetime, timezone, timedelta
+
+# ========== 내부 상태 준비 ==========
+if "ceg_index" not in st.session_state:
+    st.session_state.ceg_index = {
+        "sources": [],   # [{"id":...,"title":...,"url":...,"trust_score":...}, ...]
+        "formulas": [],  # [{"id":...,"statement":...,"units":{...},"source_id":...}, ...]
+        "witnesses": []  # [{"problem_id":...,"type":...,"instance":...,"witness":...}, ...]
+    }
+if "ceg_graph" not in st.session_state:
+    st.session_state.ceg_graph = {"nodes": [], "edges": []}
+
+def _sha(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def _now_kst_str():
+    kst = timezone(timedelta(hours=9))
+    return datetime.now(kst).strftime("%Y-%m-%d %H:%M:%S KST")
+
+# ========== 인제스트 유틸 ==========
+def _load_jsonl(text: str):
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception as e:
+            st.warning(f"JSONL 파싱 실패: {e} · line='{line[:120]}'")
+    return out
+
+def ingest_sources(text: str):
+    items = _load_jsonl(text)
+    st.session_state.ceg_index["sources"].extend(items)
+    return len(items)
+
+def ingest_formulas(text: str):
+    items = _load_jsonl(text)
+    st.session_state.ceg_index["formulas"].extend(items)
+    return len(items)
+
+def ingest_witnesses(text: str):
+    items = _load_jsonl(text)
+    st.session_state.ceg_index["witnesses"].extend(items)
+    return len(items)
+
+# ========== CE-Graph ==========
+def build_ce_graph(query: str, topk: int = 6):
+    nodes = []
+    edges = []
+    claim_id = f"claim:{_sha(query)[:12]}"
+    nodes.append({"id": claim_id, "kind": "claim", "payload": {"text": query, "ts": _now_kst_str()}})
+
+    # 간단한 점수: source/formula 제목/식문에 query 토큰 존재 카운트
+    def _score(item_str: str) -> float:
+        s = item_str.lower()
+        q = query.lower().split()
+        return sum(1 for t in q if t in s)
+
+    scored = []
+    for s in st.session_state.ceg_index["sources"]:
+        scored.append(("source", s, _score(json.dumps(s, ensure_ascii=False))))
+    for f in st.session_state.ceg_index["formulas"]:
+        scored.append(("formula", f, _score(json.dumps(f, ensure_ascii=False))))
+
+    scored.sort(key=lambda x: x[2], reverse=True)
+    hits = [x for x in scored if x[2] > 0][:topk]
+
+    # 노드/엣지 구성
+    for kind, obj, score in hits:
+        nid = f"{'src' if kind=='source' else 'eq'}:{obj.get('id', _sha(json.dumps(obj))[:10])}"
+        payload = {"score": score, **obj}
+        nodes.append({"id": nid, "kind": "evidence", "payload": payload})
+        edges.append({"src": nid, "dst": claim_id, "rel": "supports"})
+
+    # 기본 정합성 경고 (출처/단위)
+    warnings = []
+    if not hits:
+        warnings.append("⚠️ 증거 없음: 인제스트한 source/formula에서 관련 항목을 찾지 못했습니다.")
+
+    # 단위가 필요한 문제 유형일 때(식 포함 질의 추정), formula에 units 없으면 경고
+    need_units = any(k in query.lower() for k in ["단위", "unit", "차원", "dimension"])
+    if need_units:
+        lacking = []
+        for _, f, _ in scored:
+            if isinstance(f, dict) and f.get("statement") and not f.get("units"):
+                lacking.append(f.get("id", "unknown"))
+        if lacking:
+            warnings.append(f"⚠️ 단위 메타데이터 누락 formula: {', '.join(lacking[:5])}" + (" ..." if len(lacking)>5 else ""))
+
+    st.session_state.ceg_graph = {"nodes": nodes, "edges": edges}
+    return warnings
+
+# ========== 진행률(현실축) 자동 업데이트 ==========
+def bump_reality_progress(delta_ok: int = 5):
+    # SPX-1과 연동: 현실축이 있는 경우에만 부드럽게 증분
+    bb = st.session_state.get("spx_backbone")
+    if not isinstance(bb, dict):
+        return
+    cur = int(bb.get("reality", 0))
+    new = max(cur, min(100, cur + delta_ok))
+    bb["reality"] = new
+    st.session_state.spx_backbone = bb  # 저장
+
+# ========== UI ==========
+st.markdown("### 🧱 222 · REAL-CEG v1 — 현실연동/증거그래프(완결)")
+st.caption("JSONL 인제스트 → 질의 → CE-Graph 생성 → 기본 경고 → 현실축 자동 진행")
+
+with st.expander("① 소스 인제스트 (source_index.jsonl)", expanded=False):
+    demo_src = """{"id":"src:nist:constants","title":"CODATA Fundamental Constants","url":"https://physics.nist.gov/constants","domain":"nist.gov","year":2022,"license":"open","trust_score":0.99}
+{"id":"src:arxiv:1602.03837","title":"Observation of Gravitational Waves","url":"https://arxiv.org/abs/1602.03837","domain":"arxiv.org","year":2016,"license":"open","trust_score":0.98}
+"""
+    t = st.text_area("JSONL 붙여넣기", value=demo_src, key="ceg_t_src", height=140)
+    if st.button("인제스트(소스)"):
+        n = ingest_sources(t)
+        st.success(f"소스 {n}건 인제스트 완료")
+        bump_reality_progress(3)
+
+with st.expander("② 공식 인제스트 (formulas.jsonl)", expanded=False):
+    demo_eq = """{"id":"eq:planck","type":"equation","statement":"E = h·ν","units":{"E":"J","h":"J·s","ν":"s^-1"},"source_id":"src:nist:constants"}
+{"id":"eq:gw-strain","type":"equation","statement":"h ≈ ΔL / L","units":{"h":"dimensionless","ΔL":"m","L":"m"},"source_id":"src:arxiv:1602.03837"}
+"""
+    t = st.text_area("JSONL 붙여넣기", value=demo_eq, key="ceg_t_eq", height=140)
+    if st.button("인제스트(공식)"):
+        n = ingest_formulas(t)
+        st.success(f"공식 {n}건 인제스트 완료")
+        bump_reality_progress(3)
+
+with st.expander("③ 증인/정답 인제스트 (witnesses.jsonl)", expanded=False):
+    demo_w = """{"problem_id":"units:gw-strain","type":"UNITS","instance":{"expr":"ΔL/L","units":{"ΔL":"m","L":"m"}},"witness":{"unit_result":"dimensionless"}}
+"""
+    t = st.text_area("JSONL 붙여넣기", value=demo_w, key="ceg_t_w", height=120)
+    if st.button("인제스트(증인)"):
+        n = ingest_witnesses(t)
+        st.success(f"증인 {n}건 인제스트 완료")
+        bump_reality_progress(2)
+
+st.divider()
+
+# 질의 → CE-Graph
+q = st.text_input("질의(예: LIGO 중력파 단위 검증, Planck 관계 등)", value="중력파 h 단위 검증 및 Planck 관계")
+if st.button("CE-Graph 생성"):
+    warns = build_ce_graph(q, topk=6)
+    st.success("CE-Graph 생성 완료")
+    if warns:
+        for w in warns:
+            st.warning(w)
+    bump_reality_progress(5)
+
+# 결과 표시
+if st.session_state.ceg_graph["nodes"]:
+    st.subheader("CE-Graph 요약")
+    st.json({
+        "nodes": st.session_state.ceg_graph["nodes"],
+        "edges": st.session_state.ceg_graph["edges"],
+        "digest": _sha("".join(n["id"] for n in st.session_state.ceg_graph["nodes"]))[:16],
+        "ts": _now_kst_str()
+    })
+
+# 스냅샷 덤프
+dump = {
+    "ts": _now_kst_str(),
+    "index_counts": {k: len(v) for k,v in st.session_state.ceg_index.items()},
+    "graph_nodes": len(st.session_state.ceg_graph["nodes"]),
+    "graph_edges": len(st.session_state.ceg_graph["edges"]),
+}
+st.download_button("📥 현실연동 스냅샷(JSON)", data=json.dumps(dump, ensure_ascii=False, indent=2).encode("utf-8"),
+                   file_name="REAL_CEG_v1_snapshot.json", mime="application/json", key="ceg_dl")
+# ───────────────────────────────────────────────
+
