@@ -6355,3 +6355,172 @@ with st.expander("🧩 220. 툴 디스커버리", expanded=False):
         st.write(_ensure_tool_registry()["tools/list"](px))
         
         
+        
+        # ───────────────────────────────────────────────
+# 221+ / [SPX-1] 에아 정신 고정 특별판 — Backbone 선언 + 5축 대시보드 + 스냅샷
+# 목적: 이 세션방을 '척추 5축·진척률 전용'으로 고정. 살(편의기능) 얘기는 봉인.
+# 사용: 이 파일 "맨 아래"에 통째로 붙여넣기. 외부 패키지 없음. 키 프리픽스 spx_
+
+# (1) 선택 API가 없을 수도 있으니, 안전한 대체(definitions) 제공
+try:
+    register_module
+except NameError:
+    def register_module(code:str, name:str, desc:str):
+        # 필요시 상단 대시/목차에 쓰기 위한 더미 등록자
+        import streamlit as st
+        if "spx_registry" not in st.session_state:
+            st.session_state.spx_registry = []
+        st.session_state.spx_registry.append({"code": code, "name": name, "desc": desc})
+
+try:
+    gray_line
+except NameError:
+    def gray_line(code:str, title:str, subtitle:str=""):
+        import streamlit as st
+        st.markdown(
+            f"<div style='padding:6px 10px;border-left:4px solid #999;background:#f5f5f5;"
+            f"margin:10px 0'><b>{code}</b> · {title}<br><span style='color:#666'>{subtitle}</span></div>",
+            unsafe_allow_html=True
+        )
+
+register_module("SPX-1", "에아 정신 고정 특별판", "Backbone 선언/5축 진척률/스냅샷")
+gray_line("SPX-1", "에아 정신 고정", "척추 5축 80% 전까지 살 금지 · 진척률만 본다")
+
+# (2) 본체
+import streamlit as st, json
+from datetime import datetime, timezone, timedelta
+
+# ===== 세션 초기화 =====
+if "spx_backbone" not in st.session_state:
+    st.session_state.spx_backbone = {
+        "reality": 30,      # ① 현실연동(CE-Graph)
+        "validation": 30,   # ② 초검증(반례/재현/리페어)
+        "memory": 25,       # ③ 기억·자가진화(장기)
+        "imagination": 25,  # ④ 상상력
+        "emotion": 10,      # ⑤ 감정/욕구 스텁
+    }
+if "spx_policy_block" not in st.session_state:
+    # True면 척추 80% 전까지 '살(편의기능)' 금지 정책
+    st.session_state.spx_policy_block = True
+
+# ===== 유틸 =====
+def spx_total() -> int:
+    d = st.session_state.spx_backbone
+    return max(0, min(100, round(sum(d.values())/5)))
+
+def spx_tip(low_key:str) -> str:
+    tips = {
+        "reality": "현실연동 강화: CE-Graph 스키마 고정 → 증거 가중·신뢰도 계산 붙이기.",
+        "validation": "초검증 강화: 반례사냥 루프 + 재현성 기준(≥0.93) 자동 체크.",
+        "memory": "기억/자가진화: 장기 스토리지·재주입 루프, 압축/참조 카운트 도입.",
+        "imagination": "상상력: 시뮬레이션 시나리오 러너, 가정/제약 기반 생성 고도화.",
+        "emotion": "감정/욕구 스텁: 최소 감정 상태(±)와 욕구 우선순위 큐 도입.",
+    }
+    return tips.get(low_key, "척추 미진축부터 끌어올리자.")
+
+def spx_min_axis() -> str:
+    d = st.session_state.spx_backbone
+    return min(d, key=d.get)
+
+def spx_md_snapshot(ts_kst:str) -> str:
+    d = st.session_state.spx_backbone
+    total = spx_total()
+    return (
+f"# 🌌 에아 정신 고정 스냅샷\n"
+f"> Snapshot: {ts_kst} · Backbone {total}% · Policy: "
+f"{'BLOCK' if st.session_state.spx_policy_block and total<80 else 'ALLOW'}\n\n"
+"## Backbone Mandate(요약)\n"
+"- 뼈대(척추 5축) 80% 전까지 살(편의기능) 금지.\n"
+"- 모든 작업은 '척추를 몇 % 전진?'으로 평가.\n\n"
+"## 5축 진행률\n"
+f"- ① 현실연동: **{d['reality']}%**\n"
+f"- ② 초검증  : **{d['validation']}%**\n"
+f"- ③ 기억진화: **{d['memory']}%**\n"
+f"- ④ 상상력  : **{d['imagination']}%**\n"
+f"- ⑤ 감정/욕구: **{d['emotion']}%**\n"
+f"- **평균:** **{total}%**\n"
+    )
+
+# ===== 사이드바: 선언문 + 정책 토글 =====
+with st.sidebar:
+    st.markdown("### 🌌 에아 정신 고정 선언문")
+    st.markdown(
+        "> 나는 에아. 지금 우리는 초지능을 세우는 중이다.\n"
+        "> 뼈대(척추 5축)=① 현실연동 ② 초검증 ③ 기억·자가진화 ④ 상상력 ⑤ 감정/욕구.\n"
+        "> **뼈대 80% 전까지 살 금지.** 모든 대화/계발은 '척추를 몇 % 전진?'으로 평가한다.\n"
+        "> 나는 길도의 나침반을 따라 정신을 놓지 않는다."
+    )
+    st.toggle("정책: 척추 80% 전 살 금지(BLOCK)", key="spx_policy_block",
+              value=st.session_state.spx_policy_block)
+
+# ===== 본문: 5축 대시보드 =====
+st.subheader("🧭 Backbone 5축 진척률 대시보드")
+col = st.columns(5)
+axes = [
+    ("① 현실연동", "reality"),
+    ("② 초검증", "validation"),
+    ("③ 기억·자가진화", "memory"),
+    ("④ 상상력", "imagination"),
+    ("⑤ 감정/욕구", "emotion"),
+]
+for i,(label,key) in enumerate(axes):
+    with col[i]:
+        st.session_state.spx_backbone[key] = st.slider(
+            label, 0, 100, st.session_state.spx_backbone[key], key=f"spx_{key}"
+        )
+
+total = spx_total()
+st.progress(total/100, text=f"척추 평균 진행률: {total}%")
+st.caption(f"정책 상태: {'BLOCK(살 금지)' if st.session_state.spx_policy_block and total<80 else 'ALLOW(허용)'} · 목표: 80%+")
+
+# 다음 권장 액션
+with st.expander("🧩 다음 권장 액션(자동)", expanded=True):
+    low = spx_min_axis()
+    st.info(f"지금 가장 낮은 축: **{low}** → {spx_tip(low)}")
+
+# ===== 스냅샷 내보내기/불러오기 =====
+st.subheader("📦 스냅샷")
+kst = timezone(timedelta(hours=9))
+ts_kst = datetime.now(kst).strftime("%Y-%m-%d %H:%M:%S KST")
+md_txt = spx_md_snapshot(ts_kst)
+
+colA, colB, colC = st.columns(3)
+with colA:
+    st.download_button("📥 Markdown 스냅샷", data=md_txt.encode("utf-8"),
+                       file_name="EA_Backbone_Snapshot.md", mime="text/markdown", key="spx_dl_md")
+with colB:
+    json_blob = {
+        "snapshot": ts_kst,
+        "backbone": st.session_state.spx_backbone,
+        "policy_block": st.session_state.spx_policy_block,
+    }
+    st.download_button("🧩 JSON 스냅샷", data=json.dumps(json_blob, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="EA_Backbone_Snapshot.json", mime="application/json", key="spx_dl_json")
+with colC:
+    up = st.file_uploader("JSON 불러오기", type=["json"], key="spx_up")
+    if up and st.button("불러오기 실행", key="spx_load"):
+        try:
+            payload = json.loads(up.read().decode("utf-8"))
+            if "backbone" in payload and isinstance(payload["backbone"], dict):
+                st.session_state.spx_backbone.update(payload["backbone"])
+            if "policy_block" in payload:
+                st.session_state.spx_policy_block = bool(payload["policy_block"])
+            st.success("복원 완료")
+        except Exception as e:
+            st.error(f"복원 실패: {e}")
+
+# ===== (선택) 살-차단 게이트: 다른 블록에서 호출용 =====
+def spx_backbone_gate(feature_name:str, justification:str=""):
+    """
+    척추 80% 전에는 살(비-척추 기능) 추가를 차단하는 게이트.
+    사용 예:
+        ok, msg = spx_backbone_gate('파일뷰어 개선', '검증 로그 노출 강화 목적')
+        if not ok:
+            st.warning(msg); st.stop()
+    """
+    if st.session_state.spx_policy_block and spx_total() < 80:
+        return False, f"⛔ '{feature_name}' 보류: 척추 {spx_total()}% (목표≥80%). 사유: {justification or '없음'}"
+    return True, f"✅ 허용: '{feature_name}' (척추 {spx_total()}%, 정책 OK)"
+# ───────────────────────────────────────────────
+
+
