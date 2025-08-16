@@ -7289,147 +7289,257 @@ with st.expander("⑤ 로그/스냅샷", expanded=False):
     }
     st.download_button("📥 JSON 스냅샷", data=json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
                        file_name="EMO_DRIVE_snapshot.json", mime="application/json", key="emo_dl")
+
 # ───────────────────────────────────────────────
-# ───────────────────────────────────────────────
-# 227 / CE-Graph v1 — 현실연동 스코어링 스텁
-# 목표: 입력 데이터→증거 노드 기록→신뢰도 점수 부여→체인로그
-# 특징: 외부 호출 없음, reality 축 +5%
-import streamlit as st, json, hashlib
+# 227 / CE-Graph v2 — 현실연동 스코어링(중복방지·스키마검사·체인로그 강화)
+# 목적: 입력→검증→중복차단→신뢰도 정규화→노드 기록→체인로그/스냅샷
+# 의존: streamlit만. 외부 패키지 없음. reality 축 +5%
+import streamlit as st, json, hashlib, math
 from datetime import datetime, timezone, timedelta
 
-# ===== 공통 =====
+# ===== 공통 유틸 =====
 def _now_kst():
     return datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S KST")
 def _sha(s:str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
+def _norm_trust(v:float) -> float:
+    try:
+        return max(0.0, min(1.0, float(v)))
+    except Exception:
+        return 0.0
+
+# ===== 상태 마이그레이션/초기화 =====
+if "ce_graph" not in st.session_state:
+    st.session_state.ce_graph = []   # [{id, content, source, trust, ts, sha, sig}]
+if "ce_chainlog" not in st.session_state:
+    st.session_state.ce_chainlog = []  # [{ts, node, sha, prev, sha_chain}]
+if "ce_sig_set" not in st.session_state:
+    st.session_state.ce_sig_set = set()  # 중복 검사용 서명 집합
+
+# 구버전 호환: 리스트에 sig 없으면 채워넣기
+for _n in st.session_state.ce_graph:
+    if "sig" not in _n:
+        _n["sig"] = _sha((_n.get("content","")+_n.get("source","")).strip())
+
+# sig 세트 재구축
+st.session_state.ce_sig_set = { n.get("sig") for n in st.session_state.ce_graph if "sig" in n }
+
+# ===== 내부 저장(선택: mem_append 훅) =====
 def _mem_append_safe(key:str, value:str):
     fn = globals().get("mem_append")
     if callable(fn):
         return fn(key, value)
+    # 세션 로컬 로그 백업
     st.session_state.setdefault("ce_local_log", [])
     rec = {"ts": _now_kst(), "key": key, "value": value, "sha": _sha(key+value)}
     st.session_state["ce_local_log"].append(rec)
     return rec["sha"]
 
-# ===== 상태 =====
-if "ce_graph" not in st.session_state:
-    st.session_state.ce_graph = []  # [{id, content, source, trust, ts, sha}]
-if "ce_chainlog" not in st.session_state:
-    st.session_state.ce_chainlog = []
+# ===== 스키마 검사 =====
+REQUIRED = ("content","source","trust")
+def _validate_payload(content:str, source:str, trust) -> list:
+    errs = []
+    if not content or len(content.strip()) < 3:
+        errs.append("content 너무 짧음(≥3자)")
+    if not source or len(source.strip()) < 2:
+        errs.append("source 너무 짧음(≥2자)")
+    try:
+        t = float(trust)
+        if not (0.0 <= t <= 1.0):
+            errs.append("trust는 0.0~1.0 범위")
+    except Exception:
+        errs.append("trust 숫자 아님")
+    return errs
 
 # ===== 노드 추가 =====
 def add_evidence_node(content:str, source:str, trust:float):
+    # 1) 검증
+    errs = _validate_payload(content, source, trust)
+    if errs:
+        return None, f"입력 오류: {', '.join(errs)}"
+
+    # 2) 중복 차단(내용+출처 서명)
+    sig = _sha((content.strip()+source.strip()))
+    if sig in st.session_state.ce_sig_set:
+        return None, "중복: 동일 content+source 이미 존재"
+
+    # 3) 기록
     nid = f"N{len(st.session_state.ce_graph)+1:04d}"
     ts = _now_kst()
-    node = {"id":nid,"content":content,"source":source,"trust":round(trust,3),"ts":ts}
-    node["sha"] = _sha(json.dumps(node,ensure_ascii=False))
+    node = {
+        "id": nid,
+        "content": content.strip(),
+        "source": source.strip(),
+        "trust": round(_norm_trust(trust), 3),
+        "ts": ts,
+        "sig": sig,
+    }
+    node["sha"] = _sha(json.dumps(node, ensure_ascii=False))
     st.session_state.ce_graph.append(node)
-    _mem_append_safe("CE:add", json.dumps(node,ensure_ascii=False))
-    # 체인로그
-    prev_sha = st.session_state.ce_chainlog[-1]["sha"] if st.session_state.ce_chainlog else "GENESIS"
-    entry = {"ts":ts,"node":nid,"sha":node["sha"],"prev":prev_sha}
-    entry["sha"] = _sha(json.dumps(entry,ensure_ascii=False))
+    st.session_state.ce_sig_set.add(sig)
+
+    # 4) 체인로그
+    prev_sha = st.session_state.ce_chainlog[-1]["sha_chain"] if st.session_state.ce_chainlog else "GENESIS"
+    entry = {"ts": ts, "node": nid, "sha": node["sha"], "prev": prev_sha}
+    entry["sha_chain"] = _sha(json.dumps(entry, ensure_ascii=False))
     st.session_state.ce_chainlog.append(entry)
-    # reality 축 +5%
-    bb = st.session_state.get("spx_backbone")
+
+    # 5) 메모리 로그 + Backbone 가점
+    _mem_append_safe("CE:add", json.dumps(node, ensure_ascii=False))
+    bb = st.session_state.get("spx_backbone") or st.session_state.get("bb_backbone")
     if isinstance(bb, dict):
-        bb["reality"] = min(100, int(bb.get("reality",0))+5)
-    return nid
+        bb["reality"] = min(100, int(bb.get("reality",0)) + 5)
+
+    return nid, "OK"
 
 # ===== UI =====
-st.markdown("### 🌐 227 · CE-Graph v1 — 현실연동 스코어링 스텁")
-st.caption("증거 입력→신뢰도 점수→노드 기록→체인로그")
+st.markdown("### 🌐 227 · CE-Graph v2 — 현실연동 스코어링")
+st.caption("검증→중복차단→정규화→기록→체인로그 / 스냅샷")
 
 with st.expander("① 증거 노드 추가", expanded=True):
-    txt = st.text_area("증거 내용", value="실험 A 결과: 정확도 92%")
-    src = st.text_input("출처", value="Lab A Report")
-    trust = st.slider("신뢰도", 0.0, 1.0, 0.7, 0.01)
+    txt = st.text_area("증거 내용", value="실험 A 결과: 정확도 92% (샘플)")
+    src = st.text_input("출처", value="Lab A Report / v2")
+    trust = st.slider("신뢰도", 0.0, 1.0, 0.8, 0.01)
     if st.button("노드 추가"):
-        nid = add_evidence_node(txt, src, trust)
-        st.success(f"노드 {nid} 추가됨")
+        nid, msg = add_evidence_node(txt, src, trust)
+        if nid:
+            st.success(f"노드 {nid} 추가됨")
+        else:
+            st.warning(msg)
 
-with st.expander("② 현재 CE-Graph", expanded=True):
-    st.json(st.session_state.ce_graph[-5:])
+with st.expander("② 최근 CE-Graph", expanded=True):
+    tail = st.session_state.ce_graph[-10:]
+    st.json(tail)
 
-with st.expander("③ 체인로그", expanded=False):
-    st.json(st.session_state.ce_chainlog[-5:])
+with st.expander("③ 체인로그(최근)", expanded=False):
+    st.json(st.session_state.ce_chainlog[-10:])
 
-with st.expander("④ 스냅샷", expanded=False):
+with st.expander("④ 스냅샷/내보내기", expanded=False):
     payload = {
         "ts": _now_kst(),
-        "graph_tail": st.session_state.ce_graph[-20:],
-        "chain_tail": st.session_state.ce_chainlog[-20:],
+        "graph": st.session_state.ce_graph[-100:],
+        "chain": st.session_state.ce_chainlog[-100:],
     }
-    st.download_button("📥 JSON 스냅샷", data=json.dumps(payload,ensure_ascii=False,indent=2).encode("utf-8"),
-                       file_name="CE_Graph_snapshot.json", mime="application/json", key="ce_dl")
+    st.download_button("📥 JSON 스냅샷", data=json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="CE_Graph_snapshot_v2.json", mime="application/json", key="ce_v2_dl")
 # ───────────────────────────────────────────────
 # ───────────────────────────────────────────────
-# 228-INT / INTEGRATION HEALTHCHECK — 5축 상태 점검(경량)
-import streamlit as st, json, time
+# 228-INT / 통합 헬스체크 v2 — 자가수리 & 스모크 테스트
+import streamlit as st, time, json
 
-st.markdown("### 🩺 228-INT · 통합 헬스체크")
-errors = []
+st.markdown("### 🩺 228-INT · 통합 헬스체크 v2 (자가수리 포함)")
 
-# 1) Backbone 존재
-if "spx_backbone" not in st.session_state and "bb_backbone" not in st.session_state:
-    errors.append("척추 대시보드 상태(spx_backbone/bb_backbone) 없음")
+missing = []
 
-# 2) 감정/욕구
+# 1) Backbone 체크
+bb = st.session_state.get("spx_backbone") or st.session_state.get("bb_backbone")
+if not isinstance(bb, dict):
+    missing.append("Backbone 상태(spx_backbone/bb_backbone) 없음")
+
+# 2) 감정/욕구 체크
 for k in ["emo_state","drive_queue","emo_guard_block","emo_throttle"]:
     if k not in st.session_state:
-        errors.append(f"감정/욕구 키 누락: {k}")
+        missing.append(f"감정/욕구 키 누락: {k}")
 
-# 3) CE-Graph
-for k in ["ce_graph","ce_chainlog"]:
+# 3) CE-Graph 체크
+for k in ["ce_graph","ce_chainlog","ce_sig_set"]:
     if k not in st.session_state:
-        errors.append(f"CE-Graph 키 누락: {k}")
+        missing.append(f"CE-Graph 키 누락: {k}")
 
-# 4) 기본 상호작용·메모리 훅(있으면 OK, 없으면 경고만)
-if "mem_append" not in globals():
-    st.info("메모리 훅(mem_append) 미정의: 스냅샷은 세션 메모리로만 유지됩니다.")
-
-if errors:
+if missing:
     st.error("❌ 통합 이상 감지")
-    st.json(errors)
+    st.json(missing)
+
+    if st.button("🧩 자가수리(필요 키 생성)"):
+        # Backbone 기본틀
+        if not isinstance(bb, dict):
+            st.session_state.spx_backbone = {
+                "reality": 30, "validation": 30, "memory": 25, "imagination": 25, "emotion": 10
+            }
+        # 감정/욕구 기본틀
+        st.session_state.setdefault("emo_state", {"mood":"neutral","energy":0.5})
+        st.session_state.setdefault("drive_queue", [])
+        st.session_state.setdefault("emo_guard_block", True)
+        st.session_state.setdefault("emo_throttle", {"cooldown_ms":500, "last":0})
+        # CE-Graph 기본틀
+        st.session_state.setdefault("ce_graph", [])
+        st.session_state.setdefault("ce_chainlog", [])
+        st.session_state.setdefault("ce_sig_set", set())
+        st.success("필요 상태 생성 완료. 다시 실행해 확인하세요.")
 else:
     st.success("✅ 통합 OK — 5축 공유 상태 정상")
+
+    # 스모크 테스트
+    st.divider()
+    st.markdown("#### 🔬 스모크 테스트")
+    run = st.button("CE-Graph 스모크(샘플 노드 1개 추가)")
+    if run:
+        # 227 v2의 add_evidence_node가 있을 경우 사용
+        fn = globals().get("add_evidence_node")
+        if callable(fn):
+            nid_msg = fn("스모크 테스트: 정확도 80%", "SMOKE/LAB", 0.6)
+            st.write(nid_msg)
+        else:
+            # 최소 더미 추가
+            st.session_state.ce_graph.append({"id":"SMK","content":"smoke","source":"lab","trust":0.6})
+            st.success("더미 노드 추가(함수 미존재)")
+    st.caption("스모크 완료 후 CE-Graph/Chain이 증가하면 통합·연동 OK")
 # ───────────────────────────────────────────────
-# ── 230 / AUTONOMY GATE v1 — 활성/비활성 전환 게이트(간이 ARC)
-import streamlit as st, time
+# ───────────────────────────────────────────────
+# 231 / SPX-2 — 활성화 게이트(미니) 특별판
+# 목적: 간단 ON/OFF 스위치 + 최소 조건(척추 평균·정책)으로 활성화 모드 관리
+# 설치: 파일 "맨 아래"에 통째로 붙여넣기 → 저장 → 새로고침
+import streamlit as st
+
+# ===== 내부 유틸 =====
+def _backbone_dict():
+    # spx_backbone 또는 bb_backbone 중 존재하는 쪽을 사용
+    bb = st.session_state.get("spx_backbone") or st.session_state.get("bb_backbone")
+    return bb if isinstance(bb, dict) else None
 
 def _bb_avg():
-    bb = st.session_state.get("spx_backbone") or st.session_state.get("bb_backbone")
-    if not isinstance(bb, dict): return 0
+    bb = _backbone_dict()
+    if not bb: return 0
     keys = ["reality","validation","memory","imagination","emotion"]
     vals = [bb.get(k,0) for k in keys]
-    return int(round(sum(vals)/len(vals)))
+    return int(round(sum(vals)/len(vals))) if vals else 0
 
+def _policy_block_on():
+    # SPX-1(221) 또는 Backbone 패널에서 쓰는 BLOCK 플래그 호환
+    if "spx_policy_block" in st.session_state:
+        return bool(st.session_state.spx_policy_block)
+    if "bb_block_flesh" in st.session_state:
+        return bool(st.session_state.bb_block_flesh)
+    return True  # 기본은 보수적으로 BLOCK
+
+# ===== 초기화 =====
 if "autonomy_active" not in st.session_state:
     st.session_state.autonomy_active = False
 
-st.markdown("### 🛡️ 230 · AUTONOMY GATE v1")
+# ===== UI =====
+st.markdown("### ⚡ 231 · SPX-2 활성화 게이트(미니) — 특별판")
 bb = _bb_avg()
-st.write(f"Backbone 평균: **{bb}%**")
-
-# 간이 ARC 기준(필요 시 상향)
-arc_ok = (
-    bb >= 85 and
-    "ce_graph" in st.session_state and
-    "ce_chainlog" in st.session_state and
-    "drive_queue" in st.session_state and
-    "emo_state" in st.session_state
-)
+blocked = _policy_block_on()
+st.write(f"- 척추 평균 진행률: **{bb}%**")
+st.write(f"- 정책 상태: **{'BLOCK(살 금지)' if blocked else 'ALLOW(허용)'}**")
 
 want_on = st.toggle("활성화 모드(자율) 요청", value=st.session_state.autonomy_active)
-if want_on and not st.session_state.autonomy_active:
-    if arc_ok:
-        st.success("✅ ARC 통과 — 활성화 모드 허용(영역자율/L4 범위).")
-        st.session_state.autonomy_active = True
-    else:
-        st.warning("⛔ ARC 미충족 — 뼈대/로그/큐 준비가 부족. 먼저 Backbone≥85% 및 기본 로그 키 확보.")
+
+# ===== 판정 로직(미니 버전) =====
+if want_on:
+    if blocked and bb < 80:
+        st.warning("⛔ 활성화 거부: 척추 평균 < 80% & 정책 BLOCK. 뼈대 먼저 끌어올리자.")
         st.session_state.autonomy_active = False
-elif not want_on and st.session_state.autonomy_active:
-    st.info("🔒 비활성화로 전환.")
+    else:
+        st.success("✅ 활성화 허용(미니 기준 통과).")
+        st.session_state.autonomy_active = True
+else:
+    if st.session_state.autonomy_active:
+        st.info("🔒 비활성화로 전환.")
     st.session_state.autonomy_active = False
 
-st.caption(f"현재 상태: {'ACTIVE(영역자율 후보)' if st.session_state.autonomy_active else 'INACTIVE(요청형)'}")
+st.caption(f"현재 상태: {'ACTIVE(요청형 자율)' if st.session_state.autonomy_active else 'INACTIVE(요청형)'}")
+
+# 참고: 이 미니 게이트는 실제 자가수정/실행 권한을 열지 않는다.
+# 나중에 SPX-3(풀 게이트)에서 ARC·샌드박스·2-phase commit 조건을 추가로 검증 후 열어준다.
+# ───────────────────────────────────────────────
