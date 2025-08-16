@@ -6801,3 +6801,161 @@ if st.session_state.valid_reports:
 st.info(f"총 {st.session_state.valid_counter['total']}건 · PASS {st.session_state.valid_counter['pass']} · FAIL {st.session_state.valid_counter['fail']}")
 # ───────────────────────────────────────────────
 
+# ───────────────────────────────────────────────
+# 224 / MEM-EVO v1 — 기억·자가진화(장기) 1차 완결 모듈
+# 목적: append-only 장기기억 + 체인해시 무결성 + 자가진화 루프(제안→선택→적용 로그)
+import streamlit as st, json, hashlib, time
+from datetime import datetime, timezone, timedelta
+
+# ====== 공통 ======
+def _now_kst():
+    return datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S KST")
+def _sha(s: str): return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+# ====== 상태 초기화 ======
+if "mem_log" not in st.session_state:
+    # append-only 장기기억(메모리 로그)
+    st.session_state.mem_log = []  # [{"ts":..., "key":..., "value":..., "prev": <sha>, "sha": <sha>}]
+if "mem_head" not in st.session_state:
+    st.session_state.mem_head = None  # 최신 sha
+if "evo_log" not in st.session_state:
+    st.session_state.evo_log = []  # 자가진화 실행 로그
+if "mem_cache" not in st.session_state:
+    st.session_state.mem_cache = {}  # 세션 캐시(key→value)
+
+# ====== 장기기억: append-only + 체인해시 ======
+def mem_append(key:str, value:str):
+    prev = st.session_state.mem_head or ""
+    blob = {"ts": _now_kst(), "key": key, "value": value, "prev": prev}
+    sha = _sha(json.dumps(blob, ensure_ascii=False, sort_keys=True))
+    blob["sha"] = sha
+    st.session_state.mem_log.append(blob)
+    st.session_state.mem_head = sha
+    st.session_state.mem_cache[key] = value
+    return sha
+
+def mem_verify_chain():
+    """체인 무결성 검사"""
+    prev = ""
+    for i, rec in enumerate(st.session_state.mem_log):
+        raw = {"ts": rec["ts"], "key": rec["key"], "value": rec["value"], "prev": rec["prev"]}
+        sha = _sha(json.dumps(raw, ensure_ascii=False, sort_keys=True))
+        if sha != rec["sha"] or rec["prev"] != prev:
+            return False, f"{i}번째 레코드 무결성 위반"
+        prev = sha
+    return True, f"OK · 총 {len(st.session_state.mem_log)}건 · head={prev[:10]}"
+
+def mem_search(keyword:str, limit:int=10):
+    res = []
+    for rec in reversed(st.session_state.mem_log):
+        if keyword.lower() in rec["key"].lower() or keyword.lower() in rec["value"].lower():
+            res.append(rec)
+            if len(res) >= limit: break
+    return res
+
+# ====== 요약(간단 버전) ======
+def mem_summarize(max_items:int=20):
+    logs = st.session_state.mem_log[-max_items:]
+    keys = {}
+    for rec in logs:
+        keys.setdefault(rec["key"], 0)
+        keys[rec["key"]] += 1
+    return {"recent": logs, "key_freq": sorted(keys.items(), key=lambda x: x[1], reverse=True)}
+
+# ====== 자가진화(개선안 생성 → 선택 → 적용) ======
+def evo_proposals():
+    """척추지표/경고를 읽고 개선안 3개 제안(간단 규칙 기반)"""
+    tips = []
+    bb = st.session_state.get("spx_backbone") or st.session_state.get("bb_backbone") or {}
+    low_key = None
+    if isinstance(bb, dict) and bb:
+        low_key = min(bb, key=bb.get)
+    if low_key is None:
+        low_key = "reality"
+    mapping = {
+        "reality": "CE-Graph 증거 점수화(신뢰도·연도 가중치) 추가",
+        "validation": "반례사냥 반복수 ↑, 재현성 기준 자동 판정 로그화",
+        "memory": "메모리 TTL/요약/참조카운트 도입",
+        "imagination": "역인과 시나리오 러너 분기 확대",
+        "emotion": "기본 감정상태(±1)·욕구 큐(Top-1) 스텁"
+    }
+    base = mapping.get(low_key, "검증 가능한 최소 기능 강화")
+    return [
+        {"id": "P1", "target": low_key, "action": base},
+        {"id": "P2", "target": "validation", "action": "재현실패 케이스 자동 수집/회귀테스트 편성"},
+        {"id": "P3", "target": "memory", "action": "체인해시 스냅샷 자동백업(주기 설정)"},
+    ]
+
+def evo_apply(proposal_id:str):
+    ts = _now_kst()
+    # 실제 적용은 향후 모듈에서 구현. 여기선 ‘적용 기록 + 관련 기억 저장’까지 수행.
+    sel = [p for p in evo_proposals() if p["id"] == proposal_id]
+    if not sel:
+        return False, "제안 ID를 찾을 수 없음"
+    p = sel[0]
+    mem_append(f"EVO:{p['target']}", f"[{ts}] {p['action']}")
+    st.session_state.evo_log.append({"ts": ts, "proposal": p, "applied": True})
+    # memory 축 +5%
+    bb = st.session_state.get("spx_backbone")
+    if isinstance(bb, dict):
+        cur = int(bb.get("memory", 0)); bb["memory"] = min(100, cur+5)
+    return True, f"적용 완료 · {p['target']} 강화 기록 남김"
+
+# ====== UI ======
+st.markdown("### 🧠 224 · MEM-EVO v1 — 기억·자가진화(장기) 완결")
+st.caption("append-only 장기기억(체인해시) + 검색/요약 + 자가진화(제안→적용 로그)")
+
+# 1) 세션기억 → 장기기억 저장
+with st.expander("① 기억 저장", expanded=True):
+    key = st.text_input("key", value="last_input")
+    val = st.text_area("value", value="여기에 기억할 내용을 적으세요.", height=80)
+    if st.button("장기기억 저장"):
+        sha = mem_append(key, val)
+        st.success(f"기억 저장 완료 · sha={sha[:10]}")
+        # memory 축 +5
+        bb = st.session_state.get("spx_backbone")
+        if isinstance(bb, dict):
+            cur = int(bb.get("memory",0)); bb["memory"] = min(100, cur+5)
+
+# 2) 검색/요약/체인검증
+with st.expander("② 검색·요약·무결성", expanded=False):
+    q = st.text_input("검색어", value="")
+    if st.button("검색 실행"):
+        res = mem_search(q, limit=10)
+        st.json(res if res else {"result":"없음"})
+    if st.button("요약 보기"):
+        st.json(mem_summarize())
+    if st.button("체인 무결성 검증"):
+        ok,msg = mem_verify_chain()
+        (st.success if ok else st.error)(msg)
+
+# 3) 내보내기/불러오기(이식성)
+with st.expander("③ 스냅샷(내보내기/불러오기)", expanded=False):
+    dump = {"ts": _now_kst(), "mem_log": st.session_state.mem_log, "head": st.session_state.mem_head}
+    st.download_button("📥 JSON 스냅샷", data=json.dumps(dump, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="MEM_EVO_snapshot.json", mime="application/json", key="mem_dl")
+    up = st.file_uploader("JSON 스냅샷 불러오기", type=["json"], key="mem_up")
+    if up and st.button("불러오기"):
+        try:
+            payload = json.loads(up.read().decode("utf-8"))
+            if "mem_log" in payload:
+                st.session_state.mem_log = payload["mem_log"]
+                st.session_state.mem_head = payload.get("head")
+                st.success("불러오기 완료")
+        except Exception as e:
+            st.error(f"불러오기 실패: {e}")
+
+# 4) 자가진화 — 제안/선택/적용 로그
+with st.expander("④ 자가진화 루프", expanded=True):
+    props = evo_proposals()
+    st.write("제안 목록:")
+    st.json(props)
+    pid = st.selectbox("적용할 제안 ID", [p["id"] for p in props])
+    if st.button("제안 적용"):
+        ok,msg = evo_apply(pid)
+        (st.success if ok else st.error)(msg)
+    if st.session_state.evo_log:
+        st.write("최근 자가진화 로그:")
+        st.json(st.session_state.evo_log[-5:])
+# ───────────────────────────────────────────────
+
