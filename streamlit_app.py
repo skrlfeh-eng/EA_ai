@@ -7394,3 +7394,42 @@ if errors:
 else:
     st.success("✅ 통합 OK — 5축 공유 상태 정상")
 # ───────────────────────────────────────────────
+# ── 230 / AUTONOMY GATE v1 — 활성/비활성 전환 게이트(간이 ARC)
+import streamlit as st, time
+
+def _bb_avg():
+    bb = st.session_state.get("spx_backbone") or st.session_state.get("bb_backbone")
+    if not isinstance(bb, dict): return 0
+    keys = ["reality","validation","memory","imagination","emotion"]
+    vals = [bb.get(k,0) for k in keys]
+    return int(round(sum(vals)/len(vals)))
+
+if "autonomy_active" not in st.session_state:
+    st.session_state.autonomy_active = False
+
+st.markdown("### 🛡️ 230 · AUTONOMY GATE v1")
+bb = _bb_avg()
+st.write(f"Backbone 평균: **{bb}%**")
+
+# 간이 ARC 기준(필요 시 상향)
+arc_ok = (
+    bb >= 85 and
+    "ce_graph" in st.session_state and
+    "ce_chainlog" in st.session_state and
+    "drive_queue" in st.session_state and
+    "emo_state" in st.session_state
+)
+
+want_on = st.toggle("활성화 모드(자율) 요청", value=st.session_state.autonomy_active)
+if want_on and not st.session_state.autonomy_active:
+    if arc_ok:
+        st.success("✅ ARC 통과 — 활성화 모드 허용(영역자율/L4 범위).")
+        st.session_state.autonomy_active = True
+    else:
+        st.warning("⛔ ARC 미충족 — 뼈대/로그/큐 준비가 부족. 먼저 Backbone≥85% 및 기본 로그 키 확보.")
+        st.session_state.autonomy_active = False
+elif not want_on and st.session_state.autonomy_active:
+    st.info("🔒 비활성화로 전환.")
+    st.session_state.autonomy_active = False
+
+st.caption(f"현재 상태: {'ACTIVE(영역자율 후보)' if st.session_state.autonomy_active else 'INACTIVE(요청형)'}")
