@@ -10392,27 +10392,13 @@ if st.button("리페어 실행", key="rep245_run"):
     except Exception:
         ok, msg = True, "게이트 확인 중 예외 → 코어로 진행"
     st.caption(f"Gate: {msg}")
+
 # ───────────────────────────────────────────────
-# ───────────────────────────────────────────────
-# [246] 증거 재수집 스텁 v1 — ‘부족한 claim’ 자동 큐잉 & 어댑터 라우팅 자리표시자
-# 목적:
-#   - CE-Graph에서 '부족/문제'인 claim 자동 선별 → 증거 재수집 큐(evidence_fetch_queue.json) 생성
-#   - 간단한 어댑터 라우팅 규칙(adapter_routes.json) 생성(논문/특허/표준/데이터셋)
-#   - [245] 리페어 결과(선택)를 반영해 우선순위 가중
-#
-# 입력:
-#   - CE-Graph JSON (nodes, edges)
-#   - (선택) repair_changelog.json ([245] 출력)
-#   - (선택) source_index.jsonl (소스 힌트)
-#
-# 출력:
-#   - evidence_fetch_queue.json  (claim별 검색 쿼리/어댑터/우선순위/사유)
-#   - adapter_routes.json        (어댑터 엔드포인트 자리표시자)
-#
-# 외부 패키지: 없음(표준 + Streamlit)
-import streamlit as st, json, math, hashlib, time, re
-from typing import Dict, Any, List, Tuple
-from collections import defaultdict
+# [246-HOTFIX] CE-HIT Builder v2 (Unique Keys)
+# 목적: PASS/FAIL 제약 수·증거 등을 입력해 HIT(검증 단위)를 큐에 적재
+# 변경점: 모든 위젯에 고유 key 부여 -> StreamlitDuplicateElementId 방지
+import streamlit as st, time, json, hashlib
+from datetime import datetime
 
 if "register_module" not in globals():
     def register_module(num,name,desc): pass
@@ -10420,203 +10406,61 @@ if "gray_line" not in globals():
     def gray_line(num,title,subtitle):
         st.markdown(f"**[{num}] {title}** — {subtitle}")
 
-register_module("246","증거 재수집 스텁 v1","부족 claim 자동 큐잉 & 어댑터 라우팅 자리표시자")
-gray_line("246","Evidence Re-Fetch Queue","부족한 claim을 자동 선별하여 재수집 계획 생성")
+register_module("246-HOTFIX","CE-HIT Builder v2","위젯 키 고유화(충돌 방지)")
+gray_line("246-HOTFIX","HIT 생성/적재","중복키 방지 버전")
 
-# ====== 유틸 ======
-def _sha12(s:str)->str:
-    import hashlib; return hashlib.sha256(s.encode("utf-8")).hexdigest()[:12]
+# 세션 큐 키 선택(기존 이름과 호환)
+_qkey = "hit_queue" if "hit_queue" in st.session_state else ("ce_hit_queue" if "ce_hit_queue" in st.session_state else "hit_queue")
+if _qkey not in st.session_state:
+    st.session_state[_qkey] = []
 
-def _read_text(fileobj, fallback:str)->str:
-    if fileobj is not None:
-        try: return fileobj.read().decode("utf-8")
-        except Exception: return ""
-    return fallback or ""
+# 입력 위젯 (모두 unique key)
+with st.expander("🧱 HIT 입력 (PASS/FAIL 제약 · 증거 · 신뢰도)", expanded=True):
+    claim = st.text_area("주장(Claim)", key="m246_claim_txt")
+    evidence = st.text_area("증거 요약(Evidence)", key="m246_evidence_txt")
+    pass_cons = st.number_input("PASS 제약 개수", min_value=0, max_value=999, value=1, step=1, key="m246_pass_n")
+    fail_cons = st.number_input("FAIL 제약 개수", min_value=0, max_value=999, value=0, step=1, key="m246_fail_n")
+    conf = st.slider("신뢰도(0.0~1.0)", 0.0, 1.0, 0.7, 0.01, key="m246_conf")
+    src = st.text_input("출처/근거 링크(선택)", key="m246_src")
+    add_to_graph = st.checkbox("HIT를 CE-Graph에 'contradicts' 간선으로 추가", value=False, key="m246_add_graph")
 
-def _parse_graph(text:str):
-    try:
-        data=json.loads(text) if text.strip() else {}
-        nodes=list(data.get("nodes") or [])
-        edges=list(data.get("edges") or [])
-        return nodes, edges, []
-    except Exception as e:
-        return [], [], [f"CE-Graph 파싱 실패: {e}"]
-
-def _score_claims(nodes, edges):
-    kind = {n.get("id"): n.get("kind") for n in nodes}
-    S = defaultdict(float); C = defaultdict(float)
-    for e in edges:
-        if e.get("rel") not in ("supports","contradicts"): continue
-        src, dst = e.get("src"), e.get("dst")
-        if kind.get(src)!="evidence" or kind.get(dst)!="claim": continue
-        w=float(e.get("weight",1.0)); w = max(0.0, w)
-        if e.get("rel")=="supports": S[dst]+=w
-        else: C[dst]+=w
-    scores={}
-    for n in nodes:
-        if n.get("kind")!="claim": continue
-        cid=n["id"]; s=S[cid]; c=C[cid]; tot=s+c
-        if tot<=0:
-            scores[cid]={"consensus":0.0,"contradiction":0.0,"confidence":0.0}
-        else:
-            scores[cid]={"consensus":s/tot,"contradiction":c/tot,"confidence":math.log1p(tot)}
-    return scores
-
-def _norm_words(text:str)->List[str]:
-    ws = re.findall(r"[A-Za-z가-힣0-9]{3,}", text or "")
-    return [w.lower() for w in ws][:12]
-
-def _guess_adapters(words:List[str])->List[str]:
-    wset=set(words)
-    # 간단 힌트 규칙
-    routes=[]
-    if any(k in wset for k in ["theorem","lemma","proof","정리","증명","논문","arxiv"]):
-        routes.append("papers")
-    if any(k in wset for k in ["특허","patent","ipc","장치","device"]):
-        routes.append("patents")
-    if any(k in wset for k in ["iso","iec","표준","standard","ks"]):
-        routes.append("standards")
-    if any(k in wset for k in ["dataset","data","ligo","실험","측정","관측"]):
-        routes.append("datasets")
-    if not routes:
-        routes=["papers","datasets"]  # 기본
-    return routes
-
-def _gen_queries(claim_text:str, adapters:List[str])->List[str]:
-    words=_norm_words(claim_text)
-    key=" ".join(words[:8]) or claim_text[:80]
-    qs=[key]
-    if "papers" in adapters:   qs.append(key+" site:arxiv.org")
-    if "patents" in adapters:  qs.append(key+" site:patents.google.com")
-    if "standards" in adapters:qs.append(key+" ISO OR IEC standard")
-    if "datasets" in adapters: qs.append(key+" dataset OR benchmark")
-    # 중복 제거
-    seen=set(); out=[]
-    for q in qs:
-        if q and q not in seen:
-            seen.add(q); out.append(q)
-    return out
-
-# ====== 입력 UI ======
-st.subheader("📥 입력")
-c1,c2,c3 = st.columns(3)
-with c1:
-    up_graph = st.file_uploader("CE-Graph JSON 업로드", type=["json"], key="evq_graph")
-with c2:
-    up_repair = st.file_uploader("repair_changelog.json (선택)", type=["json"], key="evq_repair")
-with c3:
-    up_srcidx = st.file_uploader("source_index.jsonl (선택)", type=["json","jsonl","txt"], key="evq_srcidx")
-
-txt_graph = st.text_area("또는 CE-Graph JSON 붙여넣기", height=200, key="evq_graph_txt")
-
-st.subheader("⚙️ 선별 기준")
-colA,colB,colC,colD = st.columns(4)
+colA,colB = st.columns([1,1])
 with colA:
-    pass_cons = st.number_input("PASS 기준(Consensus ≥)", 0.0, 1.0, 0.8, 0.05)
+    if st.button("HIT 큐에 적재", key="m246_btn_enqueue"):
+        hit = {
+            "id": f"HIT-{int(time.time()*1000)}",
+            "ts": datetime.utcnow().isoformat()+"Z",
+            "claim": claim.strip(),
+            "evidence": evidence.strip(),
+            "pass_cons": int(pass_cons),
+            "fail_cons": int(fail_cons),
+            "confidence": float(conf),
+            "source": src.strip(),
+            "add_to_graph": bool(add_to_graph),
+        }
+        st.session_state[_qkey].append(hit)
+        st.success(f"적재 완료: {_qkey} size = {len(st.session_state[_qkey])}")
 with colB:
-    max_contra = st.number_input("모순 상한(Contradiction ≤)", 0.0, 1.0, 0.2, 0.05)
-with colC:
-    min_conf = st.number_input("최소 신뢰(confidence ≥)", 0.0, 10.0, 0.3, 0.1,
-                               help="간선 총량 log1p 기반")
-with colD:
-    topk = st.number_input("claim 최대 선별 수", 1, 1000, 50, 1)
+    if st.button("큐 비우기", key="m246_btn_clear"):
+        st.session_state[_qkey].clear()
+        st.info("큐를 비웠습니다.")
 
-st.caption("기준 미달(Consensus<PASS 또는 Contradiction>상한 또는 Confidence<최소치)인 claim을 선별합니다.")
+# 미리보기
+if st.session_state[_qkey]:
+    st.caption("현재 큐")
+    st.json(st.session_state[_qkey][-1])
 
-# ====== 실행 ======
-if st.button("재수집 큐 생성", key="evq_run"):
-    gblob=_read_text(up_graph, txt_graph)
-    nodes, edges, errs = _parse_graph(gblob)
-    if errs: st.error("; ".join(errs)); st.stop()
-
-    scores = _score_claims(nodes, edges)
-
-    # repair 로그로 우선순위 가중(선택)
-    repair_gain = defaultdict(int)
-    if up_repair is not None:
-        try:
-            rjson = json.loads(_read_text(up_repair, ""))
-            for ch in rjson.get("changelog", []):
-                cid = ch.get("claim_id"); level=ch.get("level","")
-                if cid and level=="HIT": repair_gain[cid]+=2
-                elif cid and level=="WEAK": repair_gain[cid]+=1
-        except Exception:
-            pass
-
-    # claim 텍스트 맵
-    claim_text = {}
-    for n in nodes:
-        if n.get("kind")=="claim":
-            payload = n.get("payload") or {}
-            claim_text[n["id"]] = payload.get("text") or n["id"]
-
-    # 선별 사유/점수 계산
-    rows=[]
-    for cid, m in scores.items():
-        cons=m["consensus"]; contra=m["contradiction"]; conf=m["confidence"]
-        need = []
-        if cons < pass_cons: need.append("low_consensus")
-        if contra > max_contra: need.append("high_contradiction")
-        if conf < min_conf: need.append("low_confidence")
-        if need:
-            base = (1.0 - cons) + max(0.0, contra - max_contra) + max(0.0, (min_conf - conf)/max(min_conf,1e-9))
-            prio = base*10 + repair_gain[cid]
-            rows.append({"claim_id":cid,"need":need,"prio":round(prio,2),"consensus":round(cons,3),"contradiction":round(contra,3),"confidence":round(conf,3)})
-
-    # 우선순위 정렬 및 상위 topk
-    rows.sort(key=lambda x: (-x["prio"], x["claim_id"]))
-    targets = rows[:int(topk)]
-
-    # 어댑터 라우팅 & 쿼리 생성
-    queue=[]
-    for r in targets:
-        cid=r["claim_id"]; text=claim_text.get(cid,"")
-        words=_norm_words(text)
-        adapters=_guess_adapters(words)
-        queries=_gen_queries(text, adapters)
-        queue.append({
-            "claim_id": cid,
-            "priority": r["prio"],
-            "need": r["need"],
-            "adapters": adapters,
-            "queries": queries,
-            "claim_text": text
-        })
-
-    st.subheader("🧾 선별 결과(상위)")
-    st.dataframe(targets, use_container_width=True, hide_index=True)
-
-    st.subheader("🗂 재수집 큐(미리보기)")
-    st.json(queue[:10] if len(queue)>10 else queue)
-
-    # 어댑터 라우팅 자리표시자
-    adapter_routes = {
-        "papers":   {"endpoint": "adapter://papers.search",   "hint": "title/abstract 키워드 기반 검색(예: arXiv)"},
-        "patents":  {"endpoint": "adapter://patents.search",  "hint": "발명의 명칭/요약/IPC 코드"},
-        "standards":{"endpoint": "adapter://standards.search","hint": "ISO/IEC/KS 번호·키워드"},
-        "datasets": {"endpoint": "adapter://datasets.search", "hint": "데이터셋명/키워드(예: LIGO, benchmark)"},
-        "_contract": {"input": {"query":"str","k":"int"}, "output":{"items":"list[evidence]","span":"opt"}},
-    }
-
-    # 다운로드
-    st.download_button("📤 evidence_fetch_queue.json 저장",
-        data=json.dumps({"generated_at":int(time.time()),"items":queue}, ensure_ascii=False, indent=2).encode("utf-8"),
-        file_name="evidence_fetch_queue.json", mime="application/json", key="evq_dl1")
-    st.download_button("📤 adapter_routes.json 저장",
-        data=json.dumps(adapter_routes, ensure_ascii=False, indent=2).encode("utf-8"),
-        file_name="adapter_routes.json", mime="application/json", key="evq_dl2")
-
-    # 게이트(척추 정책) 기록
-    try:
-        if "backbone_gate" in globals():
-            ok, msg = backbone_gate("Evidence Re-Fetch Queue v1", "현실연동·초검증 강화")
-        elif "spx_backbone_gate" in globals():
-            ok, msg = spx_backbone_gate("Evidence Re-Fetch Queue v1", "현실연동·초검증 강화")
-        else:
-            ok, msg = True, "게이트 없음(코어 진행)"
-    except Exception:
-        ok, msg = True, "게이트 확인 중 예외 → 코어 진행"
+# 게이트(있으면) 로그
+try:
+    if "backbone_gate" in globals():
+        ok,msg = backbone_gate("CE-HIT Builder v2","② 초검증 루프 전진")
+    elif "spx_backbone_gate" in globals():
+        ok,msg = spx_backbone_gate("CE-HIT Builder v2","② 초검증 루프 전진")
+    else:
+        ok,msg = True,"게이트 미사용"
     st.caption(f"Gate: {msg}")
+except Exception:
+    pass
 # ───────────────────────────────────────────────
 # ───────────────────────────────────────────────
 # [247] 어댑터 모의 실행기 v1 — 증거 재수집 큐 실행·검증 루프(더미 어댑터)
