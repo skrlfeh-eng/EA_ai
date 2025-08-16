@@ -8047,3 +8047,434 @@ with st.expander("⑤ 그래프/리포트 확인·내보내기", expanded=False)
     st.markdown("**리포트 누적**")
     st.json(st.session_state.ce_reports_234)
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [235] 재현성 배치 러너 v1 — N회 반복·요약 리포트 (SELF-CONTAINED)
+# 목적: 같은 입력을 N회 실행해 재현성 서명 분포·안정도(%)를 측정하고 요약 리포트 생성
+# 설치: 파일 맨 아래 통째로 붙여넣기 → 저장 → 새로고침
+import streamlit as st
+from datetime import datetime
+import hashlib
+from collections import Counter
+
+# (안전가드) 상단 헬퍼 부재 시 더미
+if "register_module" not in globals():
+    def register_module(num, name, desc): pass
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle):
+        st.markdown(f"**[{num}] {title}** — {subtitle}")
+
+register_module("235", "재현성 배치 러너 v1", "N회 반복·요약 리포트")
+gray_line("235", "재현성 배치 러너", "동일 입력 N회 실행 → 서명 분포/안정도 산출")
+
+# === 232의 재현성 서명 함수가 있으면 사용, 없으면 폴백 ===
+def _fallback_repro_sig(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+reproducibility_signature = globals().get("reproducibility_signature", _fallback_repro_sig)
+
+# === 세션 상태 ===
+if "batch_reports_235" not in st.session_state:
+    st.session_state.batch_reports_235 = []
+
+st.subheader("🔁 [235] 재현성 배치 러너 v1")
+
+# 입력 소스 선택
+mode = st.radio("입력 소스", ["직접 입력", "233 최신 수정안(patched) 사용"], horizontal=True, key="batch_mode_235")
+
+base_text = ""
+if mode == "233 최신 수정안(patched) 사용":
+    if "repair_history_233" in st.session_state and st.session_state.repair_history_233:
+        last = st.session_state.repair_history_233[-1]
+        base_text = (last["proposals"][0] if last.get("proposals") else last.get("original",""))
+        st.text_area("입력 미리보기(읽기전용)", base_text, height=120, disabled=True, key="batch_preview_233")
+    else:
+        st.info("233 리페어 기록이 없습니다. '직접 입력'을 사용하세요.")
+else:
+    base_text = st.text_area("테스트할 텍스트 입력", placeholder="예: A는 가능하다. 성공.", height=120, key="batch_input_manual_235")
+
+# 파라미터
+colA, colB, colC = st.columns([1,1,1])
+with colA:
+    runs = st.number_input("반복 횟수 N", min_value=5, max_value=500, value=50, step=5, key="batch_runs_235")
+with colB:
+    jitter = st.slider("비결정성 가중치(시뮬레이션)", 0.0, 0.10, 0.00, 0.01, key="batch_jitter_235")
+with colC:
+    tag = st.text_input("태그/메모(선택)", placeholder="ex) L13-REAL", key="batch_tag_235")
+
+# 내부: 가벼운 비결정성 시뮬레이션(텍스트 끝 공백/마커 변형)
+def _noisy_variant(s: str, i: int, j: float) -> str:
+    if j <= 0.0:
+        return s
+    # i 해시로 약간의 흔들림: 공백/마커 삽입 확률을 낮게 유지
+    h = int(hashlib.sha1(f"{s}|{i}".encode()).hexdigest(), 16)
+    if (h % 1000)/1000.0 < j:
+        return s + f" ⟨v{i%7}⟩"  # 아주 작은 텍스트 변형
+    return s
+
+# 실행
+if st.button("배치 실행", key="batch_run_235"):
+    txt = (base_text or "").strip()
+    if not txt:
+        st.warning("입력을 제공하세요.")
+    else:
+        sigs = []
+        for i in range(int(runs)):
+            variant = _noisy_variant(txt, i, float(jitter))
+            sigs.append(reproducibility_signature(variant))
+        dist = Counter(sigs)
+        mode_sig, mode_freq = dist.most_common(1)[0]
+        unique = len(dist)
+        stability = round((mode_freq / len(sigs)) * 100.0, 2)
+
+        report = {
+            "timestamp_utc": datetime.utcnow().isoformat() + "Z",
+            "input_sample": (txt[:160] + ("…" if len(txt) > 160 else "")),
+            "runs": int(runs),
+            "jitter": float(jitter),
+            "unique_signatures": unique,
+            "mode_signature": mode_sig,
+            "mode_frequency": mode_freq,
+            "stability_percent": stability,
+            "signature_histogram": dict(dist),
+            "tag": tag
+        }
+        st.session_state.batch_reports_235.append(report)
+
+        st.success("배치 완료!")
+        st.metric("안정도(최다 서명 비율)", f"{stability} %")
+        st.write(f"서명 종류 수: **{unique}** / 최다 서명: `{mode_sig}` × **{mode_freq}**")
+        st.json(report)
+
+# 누적 리포트 표시/내보내기
+with st.expander("📦 누적 리포트", expanded=False):
+    if st.session_state.batch_reports_235:
+        st.json(st.session_state.batch_reports_235)
+        import json
+        st.download_button(
+            "JSON 다운로드", 
+            data=json.dumps(st.session_state.batch_reports_235, ensure_ascii=False, indent=2).encode("utf-8"),
+            file_name="GEA_Repro_Batch_Reports_235.json", mime="application/json",
+            key="dl_235_json"
+        )
+    else:
+        st.caption("아직 리포트가 없습니다.")
+# ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [236] CE-Coverage 스코어러 v1 — 현실 키워드 기반 커버리지 측정
+# 목적: 입력 텍스트가 현실연동(CE-Graph) 핵심 키워드/프레이즈를 얼마나 포함하는지 가중합 점수화
+# 설치: 파일 맨 아래에 그대로 붙여넣기 → 저장 → 새로고침
+import streamlit as st
+import re
+from datetime import datetime
+
+# 안전 가드
+if "register_module" not in globals():
+    def register_module(num,name,desc): pass
+if "gray_line" not in globals():
+    def gray_line(num,title,subtitle):
+        st.markdown(f"**[{num}] {title}** — {subtitle}")
+
+register_module("236", "CE-Coverage 스코어러", "현실 키워드/프레이즈 커버리지")
+gray_line("236", "CE-Coverage 스코어러", "현실연동(CE-Graph) 키워드 매칭율")
+
+# === 초기 키워드 세트(예시) ===
+DEFAULT_KEYWORDS = {
+    "과학": 2.0,
+    "실험": 2.5,
+    "데이터": 1.5,
+    "반례": 3.0,
+    "재현성": 3.0,
+    "증거": 2.5,
+    "논문": 1.5,
+    "검증": 2.0,
+    "관찰": 1.5,
+    "측정": 2.0,
+    "시뮬레이션": 2.5,
+}
+
+# === 세션 초기화 ===
+if "ce_keywords_236" not in st.session_state:
+    st.session_state.ce_keywords_236 = DEFAULT_KEYWORDS.copy()
+
+st.subheader("🌐 [236] CE-Coverage 스코어러 v1")
+
+# 키워드 관리
+with st.expander("⚙️ 키워드/가중치 관리", expanded=False):
+    st.caption("현실연동 CE-Graph 축에서 중요하게 보는 키워드와 가중치")
+    for kw,wt in list(st.session_state.ce_keywords_236.items()):
+        cols = st.columns([2,1,1])
+        with cols[0]:
+            st.text_input("키워드", kw, key=f"kw_{kw}")
+        with cols[1]:
+            st.number_input("가중치", 0.5, 5.0, wt, 0.5, key=f"wt_{kw}")
+        with cols[2]:
+            if st.button("❌", key=f"del_{kw}"):
+                st.session_state.ce_keywords_236.pop(kw)
+
+    new_kw = st.text_input("새 키워드 추가", key="new_kw_236")
+    new_wt = st.number_input("가중치", 0.5, 5.0, 1.0, 0.5, key="new_wt_236")
+    if st.button("추가", key="add_kw_236") and new_kw.strip():
+        st.session_state.ce_keywords_236[new_kw.strip()] = new_wt
+
+# 입력 텍스트
+txt = st.text_area("검증할 텍스트 입력", height=160, key="ce_input_236")
+
+# 스코어 계산
+def ce_score(text:str, keywords:dict) -> dict:
+    text = text.lower()
+    matches = {}
+    total_score = 0.0
+    max_score = sum(keywords.values())
+    for kw,wt in keywords.items():
+        if re.search(re.escape(kw.lower()), text):
+            matches[kw] = wt
+            total_score += wt
+    coverage = round((total_score / max_score) * 100, 2) if max_score>0 else 0.0
+    return {"coverage":coverage, "total":total_score, "max":max_score, "matches":matches}
+
+if st.button("스코어 계산", key="ce_btn_236"):
+    result = ce_score(txt, st.session_state.ce_keywords_236)
+    st.success(f"Coverage: {result['coverage']} %")
+    st.write(f"획득 점수: {result['total']} / {result['max']}")
+    if result["matches"]:
+        st.json(result["matches"])
+    else:
+        st.caption("매칭된 키워드 없음")
+
+    # 기록 저장
+    if "ce_history_236" not in st.session_state:
+        st.session_state.ce_history_236 = []
+    st.session_state.ce_history_236.append({
+        "ts": datetime.utcnow().isoformat()+"Z",
+        "input": txt[:120],
+        "result": result
+    })
+
+# 누적 기록
+with st.expander("📦 히스토리", expanded=False):
+    if "ce_history_236" in st.session_state:
+        st.json(st.session_state.ce_history_236)
+    else:
+        st.caption("아직 기록 없음")
+# ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [237] CE-Graph 스텁 v2 — 엔티티/관계 추출 미니그래프
+# 목적:
+#   1) 텍스트에서 간이 엔티티(명사/고유명) 추출
+#   2) 규칙 기반 관계(edge) 탐지 → 미니그래프 구성
+#   3) [234]의 evidence/claim과 자동 연결(있으면 활용, 없으면 단독 동작)
+# 설치: 파일 맨 아래 통째로 붙여넣기 → 저장 → 새로고침
+import streamlit as st
+import re, json, hashlib
+from datetime import datetime
+from typing import List, Dict, Tuple
+
+# 안전 가드(상단 헬퍼 부재 시 더미 정의)
+if "register_module" not in globals():
+    def register_module(num, name, desc): pass
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle):
+        st.markdown(f"**[{num}] {title}** — {subtitle}")
+
+register_module("237", "CE-Graph v2(엔티티/관계)", "엔티티/관계 추출 미니그래프")
+gray_line("237", "엔티티/관계 추출", "규칙 기반 · CE-Graph 연동(선택)")
+
+# ========== 세션 상태 ==========
+if "ce_mini_237" not in st.session_state:
+    st.session_state.ce_mini_237 = {
+        "nodes": [],     # [{id,label,type}]
+        "edges": [],     # [{src,dst,rel,weight}]
+        "last_text": "", # 마지막 분석 텍스트
+        "history": []    # 리포트 히스토리
+    }
+
+# ========== 간이 엔티티/관계 규칙 ==========
+DEFAULT_ENTITY_RULES = [
+    # 한글/영문/숫자 조합 명사 덩어리(긴 토큰 우선)
+    r"[A-Za-z][A-Za-z0-9_\-]{2,}",            # 영문 식별자(ex. LIGO, Planck, ISO80000)
+    r"[가-힣A-Za-z0-9]{2,}",                  # 한글/혼합 일반 명사
+]
+DEFAULT_RELATION_TEMPLATES = [
+    # "X 는 Y 이다/이다", "X가 Y를 측정", "X→Y 개선" 등 간단 패턴
+    (r"(?P<a>[\w가-힣\-]{2,})는\s?(?P<b>[\w가-힣\-]{2,})[이다|다]\b", "is_a"),
+    (r"(?P<a>[\w가-힣\-]{2,})가\s?(?P<b>[\w가-힣\-]{2,})를\s?측정", "measures"),
+    (r"(?P<a>[\w가-힣\-]{2,})와\s?(?P<b>[\w가-힣\-]{2,})\s?관계", "related_to"),
+    (r"(?P<a>[\w가-힣\-]{2,})\s?→\s?(?P<b>[\w가-힣\-]{2,})", "influences"),
+]
+
+# ========== 유틸 ==========
+def _id(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:10]
+
+def extract_entities(text: str, rules: List[str]) -> List[str]:
+    found = set()
+    for rgx in rules:
+        for m in re.finditer(rgx, text):
+            tok = m.group(0)
+            # 너무 일반적인 불용어/숫자만/짧은 것 제거
+            if len(tok) < 2 or tok.isdigit():
+                continue
+            if tok.lower() in {"그리고","하지만","그러나","이는","것","수","등","the","and","for","with"}:
+                continue
+            found.add(tok)
+    # 길이가 긴 순/사전순
+    return sorted(found, key=lambda x:(-len(x), x))
+
+def extract_relations(text: str, templates: List[Tuple[str,str]]) -> List[Tuple[str,str,str]]:
+    edges = []
+    for rgx, rel in templates:
+        for m in re.finditer(rgx, text):
+            a = m.groupdict().get("a","").strip()
+            b = m.groupdict().get("b","").strip()
+            if a and b and a != b:
+                edges.append((a,b,rel))
+    return edges
+
+def upsert_node(nodes: List[Dict], label: str, ntype: str="entity") -> str:
+    nid = f"n:{_id(label)}"
+    if not any(n["id"] == nid for n in nodes):
+        nodes.append({"id": nid, "label": label, "type": ntype})
+    return nid
+
+def upsert_edge(edges: List[Dict], src: str, dst: str, rel: str, w: float=1.0):
+    edges.append({"src": src, "dst": dst, "rel": rel, "weight": float(w)})
+
+# ========== UI ==========
+st.subheader("🧠 [237] 엔티티/관계 미니그래프(스텁 v2)")
+
+# 입력 소스 선택
+mode = st.radio("입력 소스", ["직접 입력", "최근 주장(234) 활용"], horizontal=True, key="mini_mode_237")
+
+text = ""
+if mode == "최근 주장(234) 활용" and "ce_graph_234" in st.session_state and st.session_state.ce_graph_234.get("claims"):
+    text = st.session_state.ce_graph_234["claims"][-1]["text"]
+    st.text_area("분석 텍스트(읽기전용)", text, height=120, disabled=True, key="mini_text_ro_237")
+else:
+    text = st.text_area("분석할 텍스트 입력", height=120, key="mini_text_237")
+
+with st.expander("⚙️ 규칙 편집(고급)", expanded=False):
+    st.caption("엔티티 정규식 규칙과 관계 템플릿을 수정/추가할 수 있어요.")
+    # 엔티티 규칙
+    if "entity_rules_237" not in st.session_state:
+        st.session_state.entity_rules_237 = DEFAULT_ENTITY_RULES.copy()
+    for i, rgx in enumerate(list(st.session_state.entity_rules_237)):
+        cols = st.columns([6,1])
+        with cols[0]:
+            st.text_input(f"엔티티 규칙 {i+1}", rgx, key=f"rgx_ent_{i}")
+        with cols[1]:
+            if st.button("❌", key=f"del_ent_{i}"):
+                st.session_state.entity_rules_237.pop(i); st.experimental_rerun()
+    new_ent = st.text_input("새 엔티티 규칙 추가 (정규식)", key="new_ent_237")
+    if st.button("추가(엔티티)", key="add_ent_237") and new_ent.strip():
+        st.session_state.entity_rules_237.append(new_ent.strip())
+
+    # 관계 규칙
+    if "rel_rules_237" not in st.session_state:
+        st.session_state.rel_rules_237 = DEFAULT_RELATION_TEMPLATES.copy()
+    # 표시/수정
+    for j, tpl in enumerate(list(st.session_state.rel_rules_237)):
+        rgx, rel = tpl
+        cols = st.columns([6,3,1])
+        with cols[0]:
+            st.text_input(f"관계 정규식 {j+1}", rgx, key=f"rgx_rel_{j}")
+        with cols[1]:
+            st.text_input(f"관계 라벨 {j+1}", rel, key=f"lbl_rel_{j}")
+        with cols[2]:
+            if st.button("❌", key=f"del_rel_{j}"):
+                st.session_state.rel_rules_237.pop(j); st.experimental_rerun()
+    new_rel_rgx = st.text_input("새 관계 정규식", key="new_rel_rgx_237")
+    new_rel_lab = st.text_input("새 관계 라벨", key="new_rel_lab_237")
+    if st.button("추가(관계)", key="add_rel_237") and new_rel_rgx.strip() and new_rel_lab.strip():
+        st.session_state.rel_rules_237.append((new_rel_rgx.strip(), new_rel_lab.strip()))
+
+# 실행
+if st.button("미니그래프 생성", key="mini_build_237"):
+    txt = (text or "").strip()
+    if not txt:
+        st.warning("텍스트를 입력하세요.")
+    else:
+        ents = extract_entities(txt, st.session_state.entity_rules_237)
+        rels = extract_relations(txt, st.session_state.rel_rules_237)
+
+        nodes, edges = [], []
+        for e in ents:
+            upsert_node(nodes, e, "entity")
+        for a,b,rel in rels:
+            a_id = upsert_node(nodes, a, "entity")
+            b_id = upsert_node(nodes, b, "entity")
+            upsert_edge(edges, a_id, b_id, rel, w=1.0)
+
+        # [234] 연동: 최근 claim/evidence를 그래프에 참고 노드로 추가(있을 때만)
+        if "ce_graph_234" in st.session_state:
+            ce = st.session_state.ce_graph_234
+            if ce.get("claims"):
+                c = ce["claims"][-1]
+                cid = upsert_node(nodes, f"CLAIM:{c['id']}", "claim")
+                # claim과 엔티티 연결(가벼운 supports)
+                for n in nodes:
+                    if n["type"] == "entity":
+                        upsert_edge(edges, cid, n["id"], "mentions", w=0.3)
+            if ce.get("evidence"):
+                # 상위 3개 evidence만 참고 노드로 연결
+                for ev in ce["evidence"][:3]:
+                    eid = upsert_node(nodes, f"EVI:{ev['id']}", "evidence")
+                    for n in nodes:
+                        if n["type"] == "entity":
+                            upsert_edge(edges, n["id"], eid, "supported_by", w=0.2)
+
+        # 세션 저장
+        st.session_state.ce_mini_237.update({
+            "nodes": nodes,
+            "edges": edges,
+            "last_text": txt
+        })
+
+        # 간단 요약/히스토리
+        report = {
+            "timestamp_utc": datetime.utcnow().isoformat()+"Z",
+            "entity_count": len([n for n in nodes if n["type"]=="entity"]),
+            "edge_count": len(edges),
+            "sample_entities": [n["label"] for n in nodes if n["type"]=="entity"][:10],
+        }
+        st.session_state.ce_mini_237["history"].append(report)
+
+        st.success("미니그래프 생성 완료")
+        st.json(report)
+
+# 현재 그래프 표시
+with st.expander("🗺️ 현재 미니그래프(노드/엣지)", expanded=False):
+    st.markdown("**Nodes**")
+    st.json(st.session_state.ce_mini_237["nodes"])
+    st.markdown("**Edges**")
+    st.json(st.session_state.ce_mini_237["edges"])
+
+# ASCII 인접 리스트(가벼운 가시화)
+def ascii_adj(nodes: List[Dict], edges: List[Dict]) -> str:
+    name = {n["id"]: f"{n['label']}({n['type'][0]})" for n in nodes}
+    adj = {}
+    for e in edges:
+        adj.setdefault(e["src"], []).append((e["dst"], e["rel"]))
+    lines = []
+    for src, outs in adj.items():
+        outs_s = ", ".join(f"{name.get(dst,dst)}[{rel}]" for dst,rel in outs[:6])
+        lines.append(f"- {name.get(src,src)} -> {outs_s}")
+    return "\n".join(lines) if lines else "(엣지 없음)"
+
+with st.expander("🖼️ ASCII 인접 리스트", expanded=False):
+    txt = ascii_adj(st.session_state.ce_mini_237["nodes"], st.session_state.ce_mini_237["edges"])
+    st.code(txt or "(그래프 없음)")
+
+# 내보내기
+with st.expander("📦 내보내기/히스토리", expanded=False):
+    payload = {
+        "graph": {
+            "nodes": st.session_state.ce_mini_237["nodes"],
+            "edges": st.session_state.ce_mini_237["edges"]
+        },
+        "source": st.session_state.ce_mini_237["last_text"],
+        "created_utc": datetime.utcnow().isoformat()+"Z"
+    }
+    st.download_button("JSON 다운로드", data=json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="GEA_CE_MiniGraph_237.json", mime="application/json", key="dl_237_json")
+    st.markdown("**히스토리**")
+    st.json(st.session_state.ce_mini_237["history"])
+# ───────────────────────────────────────────────
