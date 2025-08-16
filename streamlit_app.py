@@ -4624,3 +4624,261 @@ _compact_row([
     ("📈 108. 헬스체크/알림", _mod_108),
 ])
 
+# ─────────────────────────────────────────────
+# 109~111 모듈 (촘촘 레이아웃 버전, append-only)
+# ─────────────────────────────────────────────
+
+import random, statistics
+
+# ── 109. 세션 상태 스냅샷 비교
+if "109_snapshots" not in st.session_state:
+    st.session_state["109_snapshots"] = {}
+
+def _mod_109():
+    st.caption("SessionState 스냅샷을 저장하고 비교합니다.")
+    snap_name = st.text_input("스냅샷 이름", key="109_name", value=f"snap{len(st.session_state['109_snapshots'])+1}")
+    if st.button("스냅샷 저장", key="btn_109_save"):
+        st.session_state["109_snapshots"][snap_name] = dict(st.session_state)
+        st.success(f"{snap_name} 저장됨")
+
+    snaps = list(st.session_state["109_snapshots"].keys())
+    if len(snaps) >= 2:
+        s1 = st.selectbox("스냅샷 A", snaps, key="109_sel1")
+        s2 = st.selectbox("스냅샷 B", snaps, key="109_sel2")
+        if st.button("비교 실행", key="btn_109_cmp"):
+            diff = {k: (st.session_state["109_snapshots"][s1].get(k), st.session_state["109_snapshots"][s2].get(k))
+                    for k in set(st.session_state["109_snapshots"][s1]) | set(st.session_state["109_snapshots"][s2])
+                    if st.session_state["109_snapshots"][s1].get(k) != st.session_state["109_snapshots"][s2].get(k)}
+            st.json(diff)
+
+# ── 110. 무작위 스트레스 테스트
+if "110_stats" not in st.session_state:
+    st.session_state["110_stats"] = {"runs": 0, "avg": 0.0}
+
+def _mod_110():
+    st.caption("간단한 무작위 부하/스트레스 테스트")
+    n = st.number_input("연산 횟수", min_value=1000, max_value=200000, value=50000, step=5000, key="110_n")
+    if st.button("실행", key="btn_110_run"):
+        arr = [random.random() for _ in range(int(n))]
+        avg = statistics.fmean(arr)
+        s = st.session_state["110_stats"]
+        s["runs"] += 1
+        s["avg"] = (s["avg"]*0.9) + (avg*0.1)
+        st.success(f"테스트 완료 (평균값 {avg:.5f})")
+
+    st.metric("실행 수", st.session_state["110_stats"]["runs"])
+    st.metric("평균값", f"{st.session_state['110_stats']['avg']:.5f}")
+
+# ── 111. 로그 뷰어 (최근 이벤트/리포트 JSON)
+def _mod_111():
+    st.caption("093 모듈에서 기록된 이벤트/리포트를 조회")
+    log_dir = Path(".gea_logs"); log_dir.mkdir(exist_ok=True)
+    files = sorted(log_dir.glob("*.json"))
+    if not files:
+        st.info("저장된 로그 없음")
+        return
+    sel = st.selectbox("열람할 로그 파일", [f.name for f in files], key="111_sel")
+    if st.button("열기", key="btn_111_open"):
+        try:
+            data = json.loads((log_dir/sel).read_text(encoding="utf-8"))
+            st.json(data)
+        except Exception as e:
+            st.error(f"읽기 오류: {e}")
+
+# ── 화면 배치: 2열 레이아웃
+st.subheader("— 109~111 모듈 (촘촘 레이아웃)")
+
+_compact_row([
+    ("🗂️ 109. 세션 스냅샷 비교", _mod_109),
+    ("🔥 110. 스트레스 테스트", _mod_110),
+])
+
+_compact_row([
+    ("📜 111. 로그 뷰어", _mod_111),
+])
+
+# ─────────────────────────────────────────────
+# 112~120 모듈 (촘촘 레이아웃, append-only)
+# ─────────────────────────────────────────────
+
+# 112. 프롬프트 템플릿 보관함 (빠른 삽입)
+if "112_templates" not in st.session_state:
+    st.session_state["112_templates"] = {
+        "분석요청": "아래 내용을 항목별로 분석해줘:\n- 핵심 요약\n- 근거/출처\n- 리스크",
+        "창작보조": "이 주제로 3가지 콘셉트를 제안하고, 각 100자 설명과 톤 가이드를 줘.",
+        "디버깅": "코드 문제를 재현 단계와 함께 설명하고, 최소 수정 제안을 3가지 줘."
+    }
+
+def _mod_112():
+    st.caption("자주 쓰는 프롬프트를 저장/삽입 합니다.")
+    colA, colB = st.columns([2,1])
+    with colA:
+        t_sel = st.selectbox("템플릿 선택", list(st.session_state["112_templates"].keys()), key="112_sel")
+        st.text_area("내용 미리보기", st.session_state["112_templates"][t_sel], height=140, key="112_prev")
+    with colB:
+        new_name = st.text_input("새 템플릿명", key="112_newname")
+        new_body = st.text_area("새 템플릿 내용", height=140, key="112_newbody")
+        if st.button("추가", key="btn_112_add"):
+            if new_name and new_body:
+                st.session_state["112_templates"][new_name] = new_body
+                st.success("추가됨")
+    if st.button("입력창에 삽입", key="btn_112_use"):
+        st.session_state["last_prompt"] = st.session_state["112_prev"]
+        st.info("입력창 연결 모듈에서 last_prompt를 사용하세요.")
+
+# 113. 고정 메모 (핀 메모) — 세션 간 유지
+if "113_pins" not in st.session_state:
+    st.session_state["113_pins"] = []
+
+def _mod_113():
+    st.caption("항상 떠있길 원하는 메모를 핀으로 저장합니다.")
+    memo = st.text_area("핀으로 저장할 메모", key="113_memo")
+    cols = st.columns(2)
+    if cols[0].button("핀 추가", key="btn_113_add"):
+        if memo.strip():
+            st.session_state["113_pins"].append({"text": memo.strip(), "ts": time.strftime("%Y-%m-%d %H:%M:%S")})
+            st.success("핀 추가됨")
+    if cols[1].button("모두 지우기", key="btn_113_clear"):
+        st.session_state["113_pins"].clear()
+        st.warning("모든 핀이 제거됨")
+    for i, p in enumerate(st.session_state["113_pins"][-8:][::-1], 1):
+        st.markdown(f"**📌 {i}. [{p['ts']}]**  \n{p['text']}")
+
+# 114. 환경/설정 Export·Import (JSON)
+def _mod_114():
+    st.caption("주요 설정/상태를 JSON으로 내보내고, 다시 불러옵니다.")
+    export_keys = [k for k in st.session_state.keys() if not k.startswith("_")]
+    if st.button("현재 세션 JSON 내보내기", key="btn_114_exp"):
+        payload = {k: st.session_state.get(k) for k in export_keys}
+        Path(".gea_state").mkdir(exist_ok=True)
+        p = Path(".gea_state/GEA_session_export.json")
+        p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        st.success(f"저장됨: {p}")
+    up = st.file_uploader("세션 JSON 불러오기", type=["json"], key="114_upload")
+    if up and st.button("불러오기 적용", key="btn_114_imp"):
+        try:
+            data = json.loads(up.read().decode("utf-8"))
+            for k,v in data.items():
+                st.session_state[k] = v
+            st.success("세션 상태가 갱신되었습니다.")
+        except Exception as e:
+            st.error(f"불러오기 실패: {e}")
+
+# 115. 안전/가드 스위치(Soft Guard)
+if "115_guard" not in st.session_state:
+    st.session_state["115_guard"] = {"enabled": True, "level": 2}
+
+def _mod_115():
+    st.caption("응답 안전 가드 (라이트 규칙) — 하이리스크 문구 방지용")
+    st.session_state["115_guard"]["enabled"] = st.toggle("가드 활성화", value=st.session_state["115_guard"]["enabled"], key="115_guard_on")
+    st.session_state["115_guard"]["level"] = st.slider("가드 레벨", 0, 5, st.session_state["115_guard"]["level"], key="115_guard_lv")
+    st.info("※ 응답 생성 모듈에서 가드가 켜져있으면 민감/위험 키워드를 정제합니다.")
+
+# 116. 실행 트레이스 미니 뷰어 (최근 예외/로그)
+if "116_trace" not in st.session_state:
+    st.session_state["116_trace"] = []
+
+def _mod_116():
+    st.caption("앱 내부 로그/예외를 간단히 확인 (세션 로컬)")
+    if st.button("더미 로그 쌓기", key="btn_116_push"):
+        st.session_state["116_trace"].append(
+            {"t": time.strftime("%H:%M:%S"), "msg": f"ok-{len(st.session_state['116_trace'])+1}"}
+        )
+    if st.session_state["116_trace"]:
+        st.table(st.session_state["116_trace"][-10:])
+    else:
+        st.info("로그 없음")
+
+# 117. Uptime/버전 패널
+if "117_start_ts" not in st.session_state:
+    st.session_state["117_start_ts"] = time.time()
+
+def _mod_117():
+    st.caption("앱 구동 시간/버전 표시")
+    uptime = time.time() - st.session_state["117_start_ts"]
+    st.metric("Uptime (min)", f"{uptime/60:.1f}")
+    st.metric("Python", platform.python_version())
+    st.metric("Streamlit", st.__version__)
+
+# 118. 미니 벤치(토큰 흉내) — 문자열 슬라이싱·연산
+def _mod_118():
+    st.caption("간단 벤치마크(문자열 조작) — 환경변화 감지용")
+    mult = st.slider("규모", 1, 30, 8, key="118_scale")
+    if st.button("실행", key="btn_118_run"):
+        base = "abcdEFGH0123" * (1000 * mult)
+        t0 = time.time()
+        s = sum((ord(c) for c in base if c.isalnum()))
+        dur = (time.time() - t0)*1000
+        st.success(f"합계={s}, 시간={dur:.1f} ms")
+
+# 119. 피드백 스위치/메모 (이번 세션)
+if "119_feedback" not in st.session_state:
+    st.session_state["119_feedback"] = {"like": 0, "dislike": 0, "notes": []}
+
+def _mod_119():
+    st.caption("세션 만족도 기록")
+    c1, c2 = st.columns(2)
+    if c1.button("👍 좋았어요", key="btn_119_like"):
+        st.session_state["119_feedback"]["like"] += 1
+    if c2.button("👎 별로였어요", key="btn_119_bad"):
+        st.session_state["119_feedback"]["dislike"] += 1
+    note = st.text_input("간단 메모", key="119_note")
+    if st.button("메모 추가", key="btn_119_add"):
+        if note:
+            st.session_state["119_feedback"]["notes"].append({"t": time.strftime("%H:%M:%S"), "n": note})
+    st.write(st.session_state["119_feedback"])
+
+# 120. 유지보수 툴 — 캐시/세션 리셋
+def _mod_120():
+    st.caption("문제 생길 때 쓸 수 있는 즉시 조치 버튼")
+    col1, col2, col3 = st.columns(3)
+    if col1.button("세션 초기화", key="btn_120_rst"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.warning("세션 전체 초기화됨 — 페이지 새로고침 권장")
+    if col2.button("st.cache_data/ressources 무효화", key="btn_120_cache"):
+        try:
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            st.success("캐시 클리어")
+        except Exception as e:
+            st.error(f"클리어 실패: {e}")
+    if col3.button("임시 디렉토리 정리(.gea_state/.gea_logs)", key="btn_120_clean"):
+        cleaned = []
+        for d in [Path('.gea_state'), Path('.gea_logs')]:
+            if d.exists():
+                for p in d.glob("*"):
+                    try:
+                        p.unlink()
+                        cleaned.append(str(p))
+                    except Exception:
+                        pass
+        st.info(f"삭제된 파일 수: {len(cleaned)}")
+
+# ── 화면 배치: 2열 레이아웃(촘촘)
+st.subheader("— 112~120 모듈 (촘촘 레이아웃)")
+
+_compact_row([
+    ("🧩 112. 프롬프트 템플릿", _mod_112),
+    ("📌 113. 핀 메모", _mod_113),
+])
+
+_compact_row([
+    ("📤 114. Export/Import", _mod_114),
+    ("🛡️ 115. 가드 스위치", _mod_115),
+])
+
+_compact_row([
+    ("🧭 116. 트레이스 뷰어", _mod_116),
+    ("⏱️ 117. Uptime/버전", _mod_117),
+])
+
+_compact_row([
+    ("⚙️ 118. 미니 벤치", _mod_118),
+    ("📝 119. 피드백 기록", _mod_119),
+])
+
+_compact_row([
+    ("🧹 120. 유지보수 툴", _mod_120),
+])
+
