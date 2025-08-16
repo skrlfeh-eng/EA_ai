@@ -10395,11 +10395,9 @@ if st.button("리페어 실행", key="rep245_run"):
 
 # ───────────────────────────────────────────────
 # ───────────────────────────────────────────────
-# [246C] CE-HIT 통합 스위트 v3 (No-Dup-Key Edition)
-# 포함: 246(HIT작성) + 247(큐미리보기) + 248(그래프반영 Stub)
-#     + 249(검증 Stub) + 250(리포트)
-# 모든 위젯 key = m246c_*  → StreamlitDuplicateElementId 원천 차단
-import streamlit as st, time, json, hashlib
+# [246C-v4] CE-HIT 통합 스위트 (No-Dup-Key/Label)
+# 246~250 통합판. 모든 key= m246c4_*, 라벨에 [v4] 붙여 충돌 원천 차단.
+import streamlit as st, time, json
 from datetime import datetime
 
 if "register_module" not in globals():
@@ -10408,27 +10406,28 @@ if "gray_line" not in globals():
     def gray_line(num,title,subtitle):
         st.markdown(f"**[{num}] {title}** — {subtitle}")
 
-register_module("246C","CE-HIT 통합 스위트 v3","246~250 통합/키충돌 차단")
-gray_line("246C","CE-HIT 통합","작성→미리보기→그래프반영→검증→리포트")
+register_module("246C-v4","CE-HIT 통합","246~250 통합/중복키 방지")
+gray_line("246C-v4","CE-HIT 통합 v4","작성→미리보기→그래프반영→검증→리포트")
 
-# 공용 큐 (기존 이름과 호환)
+# 공용 큐(기존과 호환 이름 우선)
 _qkey = "hit_queue" if "hit_queue" in st.session_state else ("ce_hit_queue" if "ce_hit_queue" in st.session_state else "hit_queue")
 if _qkey not in st.session_state:
     st.session_state[_qkey] = []
 
 # ========== 246: HIT 작성 ==========
-with st.expander("🧱 246. HIT 작성 (PASS/FAIL 제약 · 증거 · 신뢰도)", expanded=True):
-    claim = st.text_area("주장(Claim)", key="m246c_claim")
-    evidence = st.text_area("증거 요약(Evidence)", key="m246c_evi")
-    pass_cons = st.number_input("PASS 제약 개수", 0, 999, 1, 1, key="m246c_pass")
-    fail_cons = st.number_input("FAIL 제약 개수", 0, 999, 0, 1, key="m246c_fail")
-    conf = st.slider("신뢰도(0.0~1.0)", 0.0, 1.0, 0.70, 0.01, key="m246c_conf")
-    src = st.text_input("출처/근거 링크(선택)", key="m246c_src")
-    add_to_graph = st.checkbox("CE-Graph에 'contradicts' 간선 추가", value=False, key="m246c_add")
-    colA,colB = st.columns(2)
-    with colA:
-        if st.button("HIT 큐에 적재", key="m246c_push"):
-            hit = {
+with st.expander("🧱 246. HIT 작성 [v4]", expanded=True):
+    claim = st.text_area("주장(Claim) [v4]", key="m246c4_claim")
+    evidence = st.text_area("증거 요약(Evidence) [v4]", key="m246c4_evi")
+    pass_cons = st.number_input("PASS 제약 개수 [v4]", 0, 999, 1, 1, key="m246c4_pass")
+    fail_cons = st.number_input("FAIL 제약 개수 [v4]", 0, 999, 0, 1, key="m246c4_fail")
+    conf = st.slider("신뢰도(0.0~1.0) [v4]", 0.0, 1.0, 0.70, 0.01, key="m246c4_conf")
+    src = st.text_input("출처/근거 링크(선택) [v4]", key="m246c4_src")
+    add_to_graph = st.checkbox("CE-Graph에 'contradicts' 추가 [v4]", value=False, key="m246c4_add")
+
+    c1,c2 = st.columns(2)
+    with c1:
+        if st.button("HIT 큐에 적재 [v4]", key="m246c4_push"):
+            st.session_state[_qkey].append({
                 "id": f"HIT-{int(time.time()*1000)}",
                 "ts": datetime.utcnow().isoformat()+"Z",
                 "claim": (claim or "").strip(),
@@ -10438,73 +10437,58 @@ with st.expander("🧱 246. HIT 작성 (PASS/FAIL 제약 · 증거 · 신뢰도)
                 "confidence": float(conf),
                 "source": (src or "").strip(),
                 "add_to_graph": bool(add_to_graph),
-            }
-            st.session_state[_qkey].append(hit)
+            })
             st.success(f"적재 완료: {_qkey} size = {len(st.session_state[_qkey])}")
-    with colB:
-        if st.button("작성 입력 초기화", key="m246c_reset"):
-            for k in ("m246c_claim","m246c_evi","m246c_pass","m246c_fail","m246c_conf","m246c_src","m246c_add"):
-                if k in st.session_state: del st.session_state[k]
+    with c2:
+        if st.button("작성 입력 초기화 [v4]", key="m246c4_reset"):
+            for k in ("m246c4_claim","m246c4_evi","m246c4_pass","m246c4_fail","m246c4_conf","m246c4_src","m246c4_add"):
+                st.session_state.pop(k, None)
             st.experimental_rerun()
 
 # ========== 247: 큐 미리보기 ==========
-with st.expander("👀 247. 큐 미리보기 / 관리", expanded=False):
+with st.expander("👀 247. 큐 미리보기/관리 [v4]", expanded=False):
     st.caption(f"큐 크기: {len(st.session_state[_qkey])}")
     if st.session_state[_qkey]:
         st.json(st.session_state[_qkey][-1], expanded=False)
-        c1,c2 = st.columns(2)
-        with c1:
-            if st.button("큐 전체 보기", key="m246c_view_all"):
+        d1,d2 = st.columns(2)
+        with d1:
+            if st.button("큐 전체 보기 [v4]", key="m246c4_view_all"):
                 st.json(st.session_state[_qkey], expanded=False)
-        with c2:
-            if st.button("큐 비우기", key="m246c_clear"):
+        with d2:
+            if st.button("큐 비우기 [v4]", key="m246c4_clear"):
                 st.session_state[_qkey].clear()
                 st.info("큐를 비웠습니다.")
 
-# ========== 248: 그래프 반영(Stub) ==========
-with st.expander("🕸️ 248. CE-Graph 반영(Stub)", expanded=False):
-    st.caption("실환경 그래프 엔진 연결 전까지는 로그만 남김.")
-    if st.button("그래프에 반영 시뮬레이트", key="m246c_graph_apply"):
+# ========== 248: 그래프 반영 Stub ==========
+with st.expander("🕸️ 248. CE-Graph 반영(Stub) [v4]", expanded=False):
+    st.caption("실환경 그래프 엔진 연결 전까지는 로그만 남깁니다.")
+    if st.button("그래프 반영 시뮬레이트 [v4]", key="m246c4_graph_apply"):
         applied = [h for h in st.session_state[_qkey] if h.get("add_to_graph")]
         st.write(f"'contradicts' 간선 후보: {len(applied)}개")
         st.code(json.dumps(applied, ensure_ascii=False, indent=2))
         st.success("반영 시뮬레이션 완료(Stub)")
 
-# ========== 249: 검증 러너(Stub) ==========
-with st.expander("🧪 249. 검증 러너(Stub)", expanded=False):
-    st.caption("간단한 규칙 기반 검증 시뮬레이터")
-    th_fail = st.slider("FAIL 허용 상한(개)", 0, 10, 0, key="m246c_th_fail")
-    th_conf = st.slider("최소 신뢰도", 0.0, 1.0, 0.6, 0.01, key="m246c_th_conf")
-    if st.button("검증 실행", key="m246c_run_val"):
-        results = []
-        for h in st.session_state[_qkey]:
-            ok = (h["fail_cons"] <= th_fail) and (h["confidence"] >= th_conf)
-            results.append({**h, "ok": ok})
-        st.session_state["m246c_results"] = results
+# ========== 249: 검증 러너 Stub ==========
+with st.expander("🧪 249. 검증 러너(Stub) [v4]", expanded=False):
+    th_fail = st.slider("FAIL 허용 상한(개) [v4]", 0, 10, 0, key="m246c4_th_fail")
+    th_conf = st.slider("최소 신뢰도 [v4]", 0.0, 1.0, 0.6, 0.01, key="m246c4_th_conf")
+    if st.button("검증 실행 [v4]", key="m246c4_run_val"):
+        results = [{**h, "ok": (h["fail_cons"] <= th_fail) and (h["confidence"] >= th_conf)}
+                   for h in st.session_state[_qkey]]
+        st.session_state["m246c4_results"] = results
         st.success(f"검증 완료: {sum(1 for r in results if r['ok'])}/{len(results)} pass")
         st.json(results, expanded=False)
 
 # ========== 250: 상태 리포트 ==========
-with st.expander("📑 250. 상태 리포트(JSON)", expanded=False):
+with st.expander("📑 250. 상태 리포트(JSON) [v4]", expanded=False):
     report = {
         "ts": datetime.utcnow().isoformat()+"Z",
         "queue_size": len(st.session_state[_qkey]),
         "last_hit": (st.session_state[_qkey][-1] if st.session_state[_qkey] else None),
-        "validation": st.session_state.get("m246c_results"),
+        "validation": st.session_state.get("m246c4_results"),
     }
     st.json(report, expanded=False)
-    st.download_button("보고서 저장(JSON)", data=json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
-                       file_name="CE_HIT_Report.json", mime="application/json", key="m246c_dl_report")
-
-# 게이트 메시지(있으면)
-try:
-    if "backbone_gate" in globals():
-        ok,msg = backbone_gate("CE-HIT 통합 스위트 v3","② 초검증 루프 고도화")
-    elif "spx_backbone_gate" in globals():
-        ok,msg = spx_backbone_gate("CE-HIT 통합 스위트 v3","② 초검증 루프 고도화")
-    else:
-        ok,msg = True,"게이트 미사용"
-    st.caption(f"Gate: {msg}")
-except Exception:
-    pass
+    st.download_button("보고서 저장(JSON) [v4]",
+        data=json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
+        file_name="CE_HIT_Report.json", mime="application/json", key="m246c4_dl")
 # ───────────────────────────────────────────────
