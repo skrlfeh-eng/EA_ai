@@ -5915,3 +5915,124 @@ _compact_row([
     ("⚖️ 200. BMI 계산기", _mod_200),
 ])
 
+# ─────────────────────────────────────────────
+# 201~210 모듈 (촘촘 레이아웃, append-only)
+# ─────────────────────────────────────────────
+
+import datetime, base64, qrcode, io
+
+# 201. 오늘 날짜 / 시간 표시
+def _mod_201():
+    st.caption("오늘 날짜/시간")
+    now = datetime.datetime.now()
+    st.write(f"📅 {now.strftime('%Y-%m-%d %H:%M:%S')}")
+
+# 202. Epoch 변환기
+def _mod_202():
+    st.caption("Epoch 변환기")
+    epoch = st.number_input("Epoch 입력", value=int(datetime.datetime.now().timestamp()), key="202_epoch")
+    if st.button("변환", key="btn_202"):
+        st.write(datetime.datetime.fromtimestamp(epoch))
+
+# 203. 문자열 Base64 Encode/Decode
+def _mod_203():
+    st.caption("Base64 변환기")
+    s = st.text_input("문자열", key="203_s")
+    c1, c2 = st.columns(2)
+    if c1.button("Encode", key="btn_203_enc"):
+        st.code(base64.b64encode(s.encode()).decode())
+    if c2.button("Decode", key="btn_203_dec"):
+        try:
+            st.code(base64.b64decode(s.encode()).decode())
+        except Exception as e:
+            st.error(e)
+
+# 204. QR 코드 생성기
+def _mod_204():
+    st.caption("QR 코드 생성기")
+    s = st.text_input("텍스트/URL", key="204_s")
+    if st.button("QR 생성", key="btn_204"):
+        img = qrcode.make(s)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        st.image(buf.getvalue())
+
+# 205. 간단 ToDo List
+def _mod_205():
+    st.caption("ToDo List")
+    if "todos" not in st.session_state: st.session_state.todos = []
+    new = st.text_input("할 일 추가", key="205_new")
+    if st.button("추가", key="btn_205_add"):
+        st.session_state.todos.append(new)
+    for i, t in enumerate(st.session_state.todos):
+        st.write(f"- {t}")
+
+# 206. 간단 메모장
+def _mod_206():
+    st.caption("메모장")
+    memo = st.text_area("메모 입력", key="206_memo")
+    if st.button("저장", key="btn_206_save"):
+        st.session_state["last_memo"] = memo
+    if "last_memo" in st.session_state:
+        st.write("저장된 메모:", st.session_state["last_memo"])
+
+# 207. Stopwatch (간단)
+def _mod_207():
+    st.caption("스톱워치")
+    if "start_time" not in st.session_state: st.session_state.start_time = None
+    c1, c2 = st.columns(2)
+    if c1.button("시작", key="btn_207_start"):
+        st.session_state.start_time = datetime.datetime.now()
+    if c2.button("종료", key="btn_207_stop") and st.session_state.start_time:
+        delta = datetime.datetime.now() - st.session_state.start_time
+        st.success(f"경과 시간: {delta}")
+
+# 208. 카운트다운 타이머
+def _mod_208():
+    st.caption("카운트다운")
+    sec = st.number_input("초 입력", value=5, key="208_sec")
+    if st.button("시작", key="btn_208_start"):
+        st.info(f"⏳ {sec}초 후 완료 (실시간 갱신은 없음)")
+
+# 209. 텍스트 비교기
+def _mod_209():
+    st.caption("텍스트 비교")
+    t1, t2 = st.text_area("텍스트1", key="209_t1"), st.text_area("텍스트2", key="209_t2")
+    if st.button("비교", key="btn_209_cmp"):
+        st.write("같음 ✅" if t1 == t2 else "다름 ❌")
+
+# 210. 문자열 길이 측정
+def _mod_210():
+    st.caption("문자열 길이 측정")
+    s = st.text_input("문자열", key="210_s")
+    if st.button("길이", key="btn_210_len"):
+        st.write(f"길이: {len(s)}")
+
+# ── 화면 배치: 2열 레이아웃
+st.subheader("— 201~210 모듈 (촘촘 레이아웃)")
+
+_compact_row([
+    ("📅 201. 날짜/시간", _mod_201),
+    ("🕰️ 202. Epoch 변환", _mod_202),
+])
+
+_compact_row([
+    ("🔐 203. Base64", _mod_203),
+    ("🔲 204. QR 코드", _mod_204),
+])
+
+_compact_row([
+    ("📝 205. ToDo", _mod_205),
+    ("📒 206. 메모장", _mod_206),
+])
+
+_compact_row([
+    ("⏱️ 207. 스톱워치", _mod_207),
+    ("⏳ 208. 카운트다운", _mod_208),
+])
+
+_compact_row([
+    ("🆚 209. 텍스트 비교", _mod_209),
+    ("📏 210. 문자열 길이", _mod_210),
+])
+
