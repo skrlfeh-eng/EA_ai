@@ -7611,3 +7611,91 @@ else:
 st.caption(f"현재 상태: {'ACTIVE(자율 풀모드)' if st.session_state.autonomy_full else 'INACTIVE'} · {datetime.utcnow().isoformat()}Z")
 
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [232] 초검증 루프 v1 — 반례·재현성 스텁 (SELF-CONTAINED)
+# 목적: 출력에 대해 "반례 수집 → 재현성 검사 → 리포트" 자동 수행
+# 설치: 파일 맨 아래에 통째로 붙여넣기 → 저장 → 새로고침
+import streamlit as st
+from datetime import datetime
+import hashlib
+
+# (안전가드) 대시보드 상단에 쓰이던 헬퍼가 없을 때를 대비한 더미 정의
+if "register_module" not in globals():
+    def register_module(num, name, desc): pass
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle): 
+        st.markdown(f"**[{num}] {title}** — {subtitle}")
+
+# 모듈 등록(있으면 쓰고, 없으면 위 더미가 흡수)
+register_module("232", "초검증 루프 v1", "반례·재현성 자동 점검 스텁")
+gray_line("232", "초검증 루프", "출력에 대해 반례 수집·재현성 확인·리포트")
+
+# === 세션 상태 초기화 ===
+if "val_reports" not in st.session_state:
+    st.session_state.val_reports = []
+
+# === 반례 수집 ===
+def collect_counterexamples(output: str):
+    """
+    간단 반례 스텁:
+    - '있다' ↔ '없다'
+    - '성공' ↔ '실패'
+    - 규정 키워드 없으면 '반례 후보 없음(스텁)'
+    """
+    counters = []
+    if "있다" in output:
+        counters.append(output.replace("있다", "없다"))
+    if "없다" in output:
+        counters.append(output.replace("없다", "있다"))
+    if "성공" in output:
+        counters.append(output.replace("성공", "실패"))
+    if "실패" in output:
+        counters.append(output.replace("실패", "성공"))
+    if not counters:
+        counters.append("반례 후보 없음(스텁)")
+    return list(dict.fromkeys(counters))  # 중복 제거
+
+# === 재현성 검사 ===
+def reproducibility_signature(output: str) -> str:
+    """
+    동일 입력에 대해 동일 서명을 내는 간이 재현성 지표.
+    (후속 버전에서 seed/환경/입력스냅샷 포함 예정)
+    """
+    return hashlib.sha256(output.encode("utf-8")).hexdigest()[:12]
+
+# === 리포트 생성 ===
+def generate_validation_report(output: str):
+    counters = collect_counterexamples(output)
+    rep_hash = reproducibility_signature(output)
+    report = {
+        "timestamp_utc": datetime.utcnow().isoformat() + "Z",
+        "output": output,
+        "counterexamples": counters,
+        "reproducibility_sig": rep_hash,
+        "notes": "v1 스텁(다음 버전에서 리페어 루프/증거 연동 강화)"
+    }
+    st.session_state.val_reports.append(report)
+    return report
+
+# === UI ===
+st.subheader("🧪 [232] 초검증 루프 v1")
+sample_out = st.text_input("검증할 출력값을 입력하세요 (예: 'A는 가능하다. 성공.'): ", key="val_input_232")
+
+col_run, col_clear = st.columns([1,1])
+with col_run:
+    if st.button("검증 실행 (반례·재현성)", key="val_run_232"):
+        if sample_out.strip():
+            rep = generate_validation_report(sample_out.strip())
+            st.success("검증 완료! 리포트 생성됨.")
+            st.json(rep)
+        else:
+            st.warning("출력값을 입력하세요.")
+with col_clear:
+    if st.button("리포트 초기화", key="val_clear_232"):
+        st.session_state.val_reports.clear()
+        st.info("누적 리포트를 비웠습니다.")
+
+if st.session_state.val_reports:
+    with st.expander("📜 누적 리포트 보기"):
+        st.json(st.session_state.val_reports)
+# ───────────────────────────────────────────────
