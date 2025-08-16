@@ -4033,3 +4033,117 @@ def m093_self_test():
     m093_log("DEBUG", "m093", "self test start")
     m093_log("INFO",  "m093", "ok")
     return {"ok": True, "count": len(m093_get_logs())}
+
+# ================================
+# 094. [회색] LTM 토픽 인덱스 (검색·저장·미리보기)
+# 목적: gea_logs/ltm 내 JSON/JSON.GZ에서 토픽 키워드 매칭 → 경량 인덱스 저장/조회
+# 출력 경로: gea_logs/ltm_index/idx_<topic>.json
+# 의존: (선택) 092 KeyFactory. 없으면 자동 shim 사용.
+# ================================
+import os, re, json, glob, time
+import streamlit as st
+
+# --- 도달 확인(임시 표시: 필요 없으면 지워도 됨)
+st.write("— 094 모듈 로드됨")
+
+# ---- 092 키 래퍼가 없어도 동작하도록 shim ----
+try:
+    m092_button  # type: ignore
+    m092_text    # type: ignore
+    m092_select  # type: ignore
+except NameError:
+    import uuid
+    def _auto_key(prefix="k"): return f"{prefix}_{uuid.uuid4().hex[:8]}"
+    def m092_button(label: str, group: str = "m094_btn"):
+        return st.button(label, key=_auto_key(group))
+    def m092_text(label: str, group: str = "m094_txt", value: str = ""):
+        return st.text_input(label, value=value, key=_auto_key(group))
+    def m092_select(label: str, options, group: str = "m094_sel"):
+        return st.selectbox(label, options, key=_auto_key(group))
+
+# 기본 경로 준비
+LOG_DIR = st.session_state.get("LOG_DIR", "gea_logs")
+LTM_DIR = st.session_state.get("LTM_DIR", os.path.join(LOG_DIR, "ltm"))
+os.makedirs(LTM_DIR, exist_ok=True)
+
+LTM_IDX_DIR = os.path.join(LOG_DIR, "ltm_index")
+os.makedirs(LTM_IDX_DIR, exist_ok=True)
+
+def m094_ltm_build_index(topic: str, topk_files: int = 200) -> str:
+    """LTM 폴더에서 topic 키워드 포함 파일을 찾고 경량 인덱스를 저장"""
+    patt = (topic or "").lower().strip()
+    files = sorted(glob.glob(os.path.join(LTM_DIR, "*.json*")))
+    hits = []
+    for p in files:
+        try:
+            text = ""
+            if p.endswith(".gz"):
+                import gzip
+                with gzip.open(p, "rt", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+            else:
+                text = open(p, "r", encoding="utf-8", errors="ignore").read()
+            if patt and (patt in text.lower()):
+                hits.append({"file": os.path.basename(p), "size": len(text)})
+        except Exception:
+            continue
+        if len(hits) >= topk_files:
+            break
+    idx = {
+        "topic": topic,
+        "matched": len(hits),
+        "generated_at": int(time.time()),
+        "items": hits
+    }
+    safe = re.sub(r"[^0-9A-Za-z가-힣_-]+", "_", topic)[:64] or "topic"
+    outp = os.path.join(LTM_IDX_DIR, f"idx_{safe}.json")
+    with open(outp, "w", encoding="utf-8") as f:
+        json.dump(idx, f, ensure_ascii=False, indent=2)
+    return outp
+
+with st.expander("📁 094. LTM 토픽 인덱스", expanded=False):
+    tp = m092_text("토픽(키워드)", value="증거")
+    col1, col2 = st.columns([1,1])
+    with col1:
+        if m092_button("인덱스 생성/저장"):
+            path = m094_ltm_build_index(tp, 200)
+            st.success(f"저장됨: {path}")
+            st.json(json.load(open(path, "r", encoding="utf-8")))
+    with col2:
+        # 최근 인덱스 미리보기
+        idx_files = sorted(glob.glob(os.path.join(LTM_IDX_DIR, "idx_*.json")), reverse=True)[:10]
+        if idx_files:
+            pick = m092_select("최근 인덱스", [os.path.basename(p) for p in idx_files])
+            if m092_button("열기"):
+                st.json(json.load(open(os.path.join(LTM_IDX_DIR, pick), "r", encoding="utf-8")))
+        else:
+            st.info("생성된 인덱스가 없습니다. 먼저 '인덱스 생성/저장'을 눌러주세요.")
+            
+            # === 94번: 지식 그래프 시각화 모듈 ===
+import networkx as nx
+import matplotlib.pyplot as plt
+
+def visualize_knowledge_graph(concepts, relations):
+    G = nx.Graph()
+    for c in concepts:
+        G.add_node(c)
+    for rel in relations:
+        G.add_edge(rel[0], rel[1], label=rel[2])
+    fig, ax = plt.subplots()
+    pos = nx.spring_layout(G, seed=42)
+    nx.draw(G, pos, with_labels=True, node_size=3000, node_color="lightblue", ax=ax)
+    nx.draw_networkx_edge_labels(
+        G, pos, edge_labels={(u, v): d["label"] for u, v, d in G.edges(data=True)}, ax=ax
+    )
+    st.pyplot(fig)
+
+# === 95번: 메타인지 피드백 모듈 ===
+def metacognition_feedback(user_thoughts):
+    st.subheader("🧠 메타인지 피드백 시스템")
+    if user_thoughts:
+        st.write("당신이 입력한 생각:", user_thoughts)
+        st.write("→ 시스템 해석: 입력된 사고 과정을 기반으로 패턴을 검토합니다.")
+        if "모름" in user_thoughts or "헷갈" in user_thoughts:
+            st.warning("⚠️ 혼란 신호 감지됨: 추가 학습 또는 설명 필요!")
+        else:
+            st.success("✅ 안정적 사고 패턴: 현재 학습 방향은 올바릅니다.")
