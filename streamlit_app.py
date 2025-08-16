@@ -7363,3 +7363,34 @@ with st.expander("④ 스냅샷", expanded=False):
     st.download_button("📥 JSON 스냅샷", data=json.dumps(payload,ensure_ascii=False,indent=2).encode("utf-8"),
                        file_name="CE_Graph_snapshot.json", mime="application/json", key="ce_dl")
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# 228-INT / INTEGRATION HEALTHCHECK — 5축 상태 점검(경량)
+import streamlit as st, json, time
+
+st.markdown("### 🩺 228-INT · 통합 헬스체크")
+errors = []
+
+# 1) Backbone 존재
+if "spx_backbone" not in st.session_state and "bb_backbone" not in st.session_state:
+    errors.append("척추 대시보드 상태(spx_backbone/bb_backbone) 없음")
+
+# 2) 감정/욕구
+for k in ["emo_state","drive_queue","emo_guard_block","emo_throttle"]:
+    if k not in st.session_state:
+        errors.append(f"감정/욕구 키 누락: {k}")
+
+# 3) CE-Graph
+for k in ["ce_graph","ce_chainlog"]:
+    if k not in st.session_state:
+        errors.append(f"CE-Graph 키 누락: {k}")
+
+# 4) 기본 상호작용·메모리 훅(있으면 OK, 없으면 경고만)
+if "mem_append" not in globals():
+    st.info("메모리 훅(mem_append) 미정의: 스냅샷은 세션 메모리로만 유지됩니다.")
+
+if errors:
+    st.error("❌ 통합 이상 감지")
+    st.json(errors)
+else:
+    st.success("✅ 통합 OK — 5축 공유 상태 정상")
+# ───────────────────────────────────────────────
