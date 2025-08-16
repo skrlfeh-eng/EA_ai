@@ -10131,3 +10131,131 @@ if st.button("반례사냥 실행", key="adv244_run"):
         ok, msg = True, "게이트 확인 중 예외 → 코어로 진행"
     st.caption(f"Gate: {msg}")
 
+# ───────────────────────────────────────────────
+# [245–250 Reset v5] CE-HIT & 검증 통합 (No-Dup, label [v5], key m245p5_*)
+# 원인: 245 블록의 잔여 위젯이 246 입력들과 충돌 → 전 구간 리셋
+import streamlit as st, time, json
+from datetime import datetime
+
+# 안전장치(없으면 no-op)
+if "register_module" not in globals():
+    def register_module(num,name,desc): pass
+if "gray_line" not in globals():
+    def gray_line(num,title,subtitle):
+        st.markdown(f"**[{num}] {title}** — {subtitle}")
+
+# ===== 245. CE-Graph 기본 설정/게이트 [v5] =====
+register_module("245-v5", "CE-Graph 기본설정/게이트", "입력 정책/라벨/간선타입 제어")
+gray_line("245-v5", "CE-Graph 설정", "라벨/간선타입/정책 토글(충돌 방지용) [v5]")
+
+if "m245p5_cfg" not in st.session_state:
+    st.session_state.m245p5_cfg = {
+        "default_edge": "contradicts",
+        "allow_auto_add": False,
+        "label_prefix": "CE",
+    }
+
+c1,c2,c3 = st.columns(3)
+with c1:
+    st.session_state.m245p5_cfg["default_edge"] = st.selectbox(
+        "기본 간선 타입 [v5]", ["contradicts","supports","refutes","relates"],
+        index=["contradicts","supports","refutes","relates"].index(st.session_state.m245p5_cfg["default_edge"]),
+        key="m245p5_edge")
+with c2:
+    st.session_state.m245p5_cfg["allow_auto_add"] = st.toggle(
+        "적재 시 자동 그래프추가 허용 [v5]", value=st.session_state.m245p5_cfg["allow_auto_add"],
+        key="m245p5_auto")
+with c3:
+    st.session_state.m245p5_cfg["label_prefix"] = st.text_input(
+        "노드 라벨 프리픽스 [v5]", st.session_state.m245p5_cfg["label_prefix"], key="m245p5_labelpre")
+
+st.caption(f"설정: {st.session_state.m245p5_cfg}")
+
+# 공용 큐(기존 잔여와 호환되는 이름 우선)
+_qkey = "hit_queue" if "hit_queue" in st.session_state else ("ce_hit_queue" if "ce_hit_queue" in st.session_state else "hit_queue")
+if _qkey not in st.session_state:
+    st.session_state[_qkey] = []
+
+# ===== 246. HIT 작성 [v5] =====
+with st.expander("🧱 246. HIT 작성 [v5]", expanded=True):
+    claim = st.text_area("주장(Claim) [v5]", key="m245p5_claim")
+    evid = st.text_area("증거 요약(Evidence) [v5]", key="m245p5_evi")
+    pass_cons = st.number_input("PASS 제약 개수 [v5]", 0, 999, 1, 1, key="m245p5_pass")
+    fail_cons = st.number_input("FAIL 제약 개수 [v5]", 0, 999, 0, 1, key="m245p5_fail")
+    conf = st.slider("신뢰도(0.0~1.0) [v5]", 0.0, 1.0, 0.70, 0.01, key="m245p5_conf")
+    src = st.text_input("출처/근거 링크(선택) [v5]", key="m245p5_src")
+    add_to_graph = st.checkbox(
+        f"CE-Graph에 '{st.session_state.m245p5_cfg['default_edge']}' 간선으로 추가 [v5]",
+        value=st.session_state.m245p5_cfg["allow_auto_add"], key="m245p5_add")
+
+    cA,cB = st.columns(2)
+    with cA:
+        if st.button("HIT 큐에 적재 [v5]", key="m245p5_push"):
+            st.session_state[_qkey].append({
+                "id": f"HIT-{int(time.time()*1000)}",
+                "ts": datetime.utcnow().isoformat()+"Z",
+                "claim": (claim or "").strip(),
+                "evidence": (evid or "").strip(),
+                "pass_cons": int(pass_cons),
+                "fail_cons": int(fail_cons),
+                "confidence": float(conf),
+                "source": (src or "").strip(),
+                "edge": st.session_state.m245p5_cfg["default_edge"],
+                "label_prefix": st.session_state.m245p5_cfg["label_prefix"],
+                "add_to_graph": bool(add_to_graph),
+            })
+            st.success(f"적재 완료: {_qkey} size = {len(st.session_state[_qkey])}")
+    with cB:
+        if st.button("작성 입력 초기화 [v5]", key="m245p5_reset"):
+            for k in ("m245p5_claim","m245p5_evi","m245p5_pass","m245p5_fail","m245p5_conf","m245p5_src","m245p5_add"):
+                st.session_state.pop(k, None)
+            st.experimental_rerun()
+
+# ===== 247. 큐 미리보기/관리 [v5] =====
+with st.expander("👀 247. 큐 미리보기/관리 [v5]", expanded=False):
+    st.caption(f"큐 크기: {len(st.session_state[_qkey])}")
+    if st.session_state[_qkey]:
+        st.json(st.session_state[_qkey][-1], expanded=False)
+        d1,d2 = st.columns(2)
+        with d1:
+            if st.button("큐 전체 보기 [v5]", key="m245p5_view_all"):
+                st.json(st.session_state[_qkey], expanded=False)
+        with d2:
+            if st.button("큐 비우기 [v5]", key="m245p5_clear"):
+                st.session_state[_qkey].clear()
+                st.info("큐를 비웠습니다.")
+
+# ===== 248. 그래프 반영 Stub [v5] =====
+with st.expander("🕸️ 248. CE-Graph 반영(Stub) [v5]", expanded=False):
+    st.caption("실그래프 엔진 연결 전에는 로그만 남김.")
+    if st.button("그래프 반영 시뮬레이트 [v5]", key="m245p5_apply"):
+        applied = [h for h in st.session_state[_qkey] if h.get("add_to_graph")]
+        st.write(f"추가 후보: {len(applied)}개 (edge='{st.session_state.m245p5_cfg['default_edge']}')")
+        st.code(json.dumps(applied, ensure_ascii=False, indent=2))
+        st.success("반영 시뮬레이션 완료 [v5]")
+
+# ===== 249. 검증 러너 Stub [v5] =====
+with st.expander("🧪 249. 검증 러너(Stub) [v5]", expanded=False):
+    th_fail = st.slider("FAIL 허용 상한(개) [v5]", 0, 10, 0, key="m245p5_th_fail")
+    th_conf = st.slider("최소 신뢰도 [v5]", 0.0, 1.0, 0.6, 0.01, key="m245p5_th_conf")
+    if st.button("검증 실행 [v5]", key="m245p5_run"):
+        results = [{**h, "ok": (h["fail_cons"] <= th_fail) and (h["confidence"] >= th_conf)}
+                   for h in st.session_state[_qkey]]
+        st.session_state["m245p5_results"] = results
+        st.success(f"검증 완료: {sum(1 for r in results if r['ok'])}/{len(results)} pass")
+        st.json(results, expanded=False)
+
+# ===== 250. 상태 리포트 [v5] =====
+with st.expander("📑 250. 상태 리포트(JSON) [v5]", expanded=False):
+    report = {
+        "ts": datetime.utcnow().isoformat()+"Z",
+        "cfg": st.session_state.m245p5_cfg,
+        "queue_size": len(st.session_state[_qkey]),
+        "last_hit": (st.session_state[_qkey][-1] if st.session_state[_qkey] else None),
+        "validation": st.session_state.get("m245p5_results"),
+    }
+    st.json(report, expanded=False)
+    st.download_button("보고서 저장(JSON) [v5]",
+        data=json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
+        file_name="CE_HIT_Report_v5.json", mime="application/json", key="m245p5_dl")
+# ───────────────────────────────────────────────
