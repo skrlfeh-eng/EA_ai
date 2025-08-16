@@ -9020,3 +9020,549 @@ else:
             st.session_state.rep_hist_239 = []
             st.success("히스토리 초기화 완료")
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [240] 반례 사냥기 v1 — 입력 교란(Fuzz)로 동차성/재현성 깨짐 탐지
+# 목적:
+#   - 수식(expr)과 단위 매핑(mapping)을 자동 교란(Fuzz)하여 "동차성(좌/우 차원 일치)"을 깨는 반례를 탐지
+#   - [238] 단위/차원 검사 v1을 호출해 차원 동치 여부를 평가
+#   - [239] 재현성 스캐너와 연동: 재현성 점수 하락을 유발하는 입력 패턴을 포착
+#
+# 설치/사용:
+#   - [238] → [239] 아래에 이 블록을 "그대로 붙여넣기"
+#   - 외부 패키지 없음(표준 라이브러리 + Streamlit)
+import streamlit as st, random, re, time
+from typing import Dict, Tuple, List
+
+if "register_module" not in globals():
+    def register_module(num,name,desc): pass
+if "gray_line" not in globals():
+    def gray_line(num,title,subtitle):
+        st.markdown(f"**[{num}] {title}** — {subtitle}")
+
+register_module("240", "반례 사냥기 v1", "Fuzz로 동차성/재현성 깨짐 탐지")
+gray_line("240", "반례 사냥기", "교란 생성 → 차원검사 → 반례 수집/요약")
+
+# [238]의 핵심 함수 확인
+_missing_238 = []
+for fn in ("parse_unit_string","eval_dim","dim_eq","pretty_dim"):
+    if fn not in globals():
+        _missing_238.append(fn)
+
+if _missing_238:
+    st.warning("⚠️ [238] 단위/차원 검사 모듈이 필요합니다. 먼저 [238]을 붙여넣어 주세요.")
+else:
+    # ===== 입력 소스 =====
+    st.subheader("🧪 [240] 반례 사냥 실행")
+    src = st.radio("입력 소스", ["[238] 위젯 재사용", "직접 입력"], horizontal=True, key="fuzz_src_240")
+
+    def _get_expr_map_from_238() -> Tuple[str, Dict[str,str]]:
+        expr = st.session_state.get("expr_238","").strip()
+        mtxt = st.session_state.get("map_238","")
+        mp: Dict[str,str] = {}
+        for line in (mtxt or "").splitlines():
+            if "=" in line:
+                k,v = line.split("=",1)
+                mp[k.strip()] = v.strip()
+        return expr, mp
+
+    if src == "[238] 위젯 재사용":
+        expr0, map0 = _get_expr_map_from_238()
+    else:
+        expr0 = st.text_input("수식 입력(예: E = h * nu)", key="fuzz_expr_240")
+        map_txt = st.text_area("변수→단위 매핑(예: E = J, h = J·s, nu = Hz)", height=120, key="fuzz_map_240")
+        map0: Dict[str,str] = {}
+        for line in (map_txt or "").splitlines():
+            if "=" in line:
+                k,v = line.split("=",1)
+                map0[k.strip()] = v.strip()
+
+    # ===== Fuzz 전략 =====
+    st.markdown("**교란 전략 선택** (복수 선택 가능)")
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        f_drop = st.checkbox("변수 매핑 누락/오타", value=True, help="일부 변수 매핑 삭제 또는 변수명 오타")
+        f_unit_prefix = st.checkbox("접두어 착종", value=True, help="m↔mm, s↔ms 등 접두어 혼동")
+    with c2:
+        f_unit_swap = st.checkbox("유사 단위 교체", value=True, help="N↔kg·m/s², J↔N·m 등 동등표현/틀린표현 섞기")
+        f_op_noise = st.checkbox("연산자 변형", value=True, help="곱 기호 생략/공백/점 등 표기 교란")
+    with c3:
+        f_whitespace = st.checkbox("공백/대소문자 변형", value=True)
+        f_expr_side = st.checkbox("좌/우 항 구조 교란", value=False, help="괄호/항 재배치(안전 범위)")
+
+    n_trials = st.slider("시도 횟수", 10, 500, 100, step=10, key="fuzz_trials_240")
+    seed = st.number_input("랜덤 시드", value=240, step=1, key="fuzz_seed_240")
+    timeout_ms = st.slider("최대 실행 시간(ms)", 100, 10000, 2000, step=100, key="fuzz_timeout_240")
+
+    # 게이트(척추 정책) — 있으면 체크
+    gate_msg = ""
+    try:
+        if "backbone_gate" in globals():
+            ok, gate_msg = backbone_gate("반례 사냥기", "초검증(반례) 핵심")
+        elif "spx_backbone_gate" in globals():
+            ok, gate_msg = spx_backbone_gate("반례 사냥기", "초검증(반례) 핵심")
+        else:
+            ok, gate_msg = True, "게이트 없음(코어 모듈로 간주)"
+    except Exception:
+        ok, gate_msg = True, "게이트 확인 중 예외 → 코어로 진행"
+    st.caption(f"Gate: {gate_msg}")
+
+    # ===== 교란 유틸 =====
+    prefixes = [
+        ("m",""),  # milli 제거
+        ("","m"),  # milli 추가
+        ("k",""),  # kilo 제거
+        ("","k"),  # kilo 추가
+    ]
+    # 흔한 단위 동등식(올바른 것과 틀린 것을 섞어 반례 유도)
+    unit_equiv_ok = {
+        "N":"kg·m/s^2",
+        "J":"N·m",
+        "W":"J/s",
+        "Pa":"N/m^2",
+        "Hz":"1/s",
+    }
+    unit_equiv_bad = {
+        "N":"kg·m^2/s",     # 고의 오류
+        "J":"N/s",          # 고의 오류
+        "W":"J·s",          # 고의 오류
+        "Pa":"N·s/m^2",     # 고의 오류
+        "Hz":"s",           # 고의 오류
+    }
+
+    def fuzz_mapping(mp: Dict[str,str]) -> Dict[str,str]:
+        out = dict(mp)
+        # 1) 드롭/오타
+        if f_drop and out and random.random()<0.35:
+            k = random.choice(list(out.keys()))
+            if random.random()<0.5:
+                del out[k]
+            else:
+                out[k+"x"] = out.pop(k)  # 변수명 오타
+        # 2) 접두어 착종
+        if f_unit_prefix and out and random.random()<0.5:
+            k = random.choice(list(out.keys()))
+            u = out[k]
+            # 단위 기호에서 대표 심볼 하나를 골라 접두어 적용
+            m = re.findall(r"[A-Za-z]+", u)
+            if m:
+                sym = random.choice(m)
+                pre = random.choice(prefixes)
+                # 간단 치환(심볼 앞에 접두어 더하거나 빼기)
+                if pre[0] and sym.startswith(pre[0]):
+                    new_sym = sym[len(pre[0]):]
+                else:
+                    new_sym = pre[1]+sym
+                out[k] = u.replace(sym, new_sym, 1)
+        # 3) 유사 단위 교체(올바름/틀림 랜덤)
+        if f_unit_swap and out and random.random()<0.5:
+            k = random.choice(list(out.keys()))
+            u = out[k]
+            key = None
+            for cand in unit_equiv_ok.keys():
+                if re.search(rf"\b{cand}\b", u):
+                    key = cand
+                    break
+            if key:
+                out[k] = u.replace(key, random.choice([unit_equiv_ok[key], unit_equiv_bad[key]]), 1)
+        # 4) 대소문자/공백 변형
+        if f_whitespace and out and random.random()<0.5:
+            k = random.choice(list(out.keys()))
+            u = out[k]
+            if random.random()<0.5:
+                u = u.replace(" ", "")
+            else:
+                u = re.sub(r"\s*([·/*])\s*", r" \1 ", u)
+            if random.random()<0.5:
+                u = u.upper()
+            out[k] = u
+        return out
+
+    def fuzz_expr(expr: str) -> str:
+        e = expr
+        if "=" not in e:
+            return e
+        lhs, rhs = [x.strip() for x in e.split("=",1)]
+        # 1) 연산자 변형
+        if f_op_noise and random.random()<0.5:
+            rhs = rhs.replace("*","·") if random.random()<0.5 else rhs.replace("·","*")
+            rhs = rhs.replace(" ", "") if random.random()<0.5 else re.sub(r"\s*([+\-*/·])\s*", r" \1 ", rhs)
+        # 2) 괄호/항 재배치(안전 범위)
+        if f_expr_side and random.random()<0.3:
+            rhs = re.sub(r"\(([^()]+)\)", r"\1", rhs)  # 괄호 제거
+        return f"{lhs} = {rhs}"
+
+    # ===== 평가 =====
+    def eval_pair(expr: str, mp: Dict[str,str]) -> Tuple[bool, List[str], str, str]:
+        """동차성 결과, 미지정 변수, lhs/rhs 차원 표현"""
+        # [238]의 파서 사용
+        var_dims = {}
+        for k,u in mp.items():
+            var_dims[k] = parse_unit_string(u)
+        if "=" not in expr:
+            raise ValueError("`lhs = rhs` 형태 필요")
+        lhs, rhs = [x.strip() for x in expr.split("=",1)]
+        d_lhs, unk_l = eval_dim(lhs, var_dims)
+        d_rhs, unk_r = eval_dim(rhs, var_dims)
+        same = dim_eq(d_lhs, d_rhs)
+        unknowns = sorted(set(unk_l + unk_r))
+        return bool(same), unknowns, pretty_dim(d_lhs), pretty_dim(d_rhs)
+
+    # ===== 실행 =====
+    if st.button("반례 사냥 시작", key="fuzz_go_240"):
+        if not expr0 or not map0:
+            st.error("수식과 매핑을 먼저 입력/재사용 해주세요.")
+        else:
+            random.seed(int(seed))
+            start = time.time()
+            found: List[Dict] = []
+            tried = 0
+            pass_cnt = 0
+            while tried < n_trials:
+                if (time.time() - start)*1000 > timeout_ms:
+                    break
+                tried += 1
+                mp_f = fuzz_mapping(map0)
+                expr_f = fuzz_expr(expr0)
+                try:
+                    same, unknowns, dl, dr = eval_pair(expr_f, mp_f)
+                    if same and not unknowns:
+                        pass_cnt += 1
+                    else:
+                        found.append({
+                            "idx": tried,
+                            "expr": expr_f,
+                            "mapping": mp_f,
+                            "same_dim": same,
+                            "unknowns": unknowns,
+                            "lhs_dim": dl,
+                            "rhs_dim": dr
+                        })
+                except Exception as e:
+                    found.append({
+                        "idx": tried, "expr": expr_f, "mapping": mp_f,
+                        "error": str(e)
+                    })
+
+            elapsed = int((time.time() - start)*1000)
+            st.metric("시도/통과/반례", f"{tried} / {pass_cnt} / {len([x for x in found if not x.get('same_dim') or x.get('unknowns') or x.get('error')])}")
+            st.caption(f"실행 시간: {elapsed} ms (제한 {timeout_ms} ms)")
+
+            # 반례 유형 요약
+            type_counts = {"차원불일치":0,"미지정변수":0,"예외":0}
+            samples = {"차원불일치":None,"미지정변수":None,"예외":None}
+            for r in found:
+                if r.get("error"):
+                    type_counts["예외"] += 1
+                    if not samples["예외"]: samples["예외"] = r
+                elif r.get("unknowns"):
+                    type_counts["미지정변수"] += 1
+                    if not samples["미지정변수"]: samples["미지정변수"] = r
+                elif r.get("same_dim") is False:
+                    type_counts["차원불일치"] += 1
+                    if not samples["차원불일치"]: samples["차원불일치"] = r
+
+            st.subheader("🔎 반례 요약")
+            st.write(type_counts)
+
+            # 대표 샘플 3종
+            def _show(title, rec):
+                if not rec: return
+                st.markdown(f"**{title}**")
+                st.code(f"expr: {rec.get('expr')}\nmap : {rec.get('mapping')}\n"
+                        f"lhs : {rec.get('lhs_dim')}\nrhs : {rec.get('rhs_dim')}\n"
+                        f"unknowns: {rec.get('unknowns')}\nerror: {rec.get('error')}",
+                        language="text")
+
+            _show("차원 불일치", samples["차원불일치"])
+            _show("미지정 변수", samples["미지정변수"])
+            _show("예외 발생", samples["예외"])
+
+            # 전체 결과(간단 테이블)
+            if found:
+                st.write("📋 반례 상세:")
+                st.dataframe([
+                    {
+                        "idx": r["idx"],
+                        "same_dim": r.get("same_dim"),
+                        "unknowns": ",".join(r.get("unknowns",[])) if r.get("unknowns") else "",
+                        "error": r.get("error",""),
+                        "lhs_dim": r.get("lhs_dim",""),
+                        "rhs_dim": r.get("rhs_dim",""),
+                        "expr": r.get("expr",""),
+                        "mapping": "; ".join([f"{k}={v}" for k,v in r.get("mapping",{}).items()]),
+                    } for r in found
+                ], use_container_width=True)
+            else:
+                st.success("반례가 발견되지 않았습니다. 현재 입력은 교란에 상당히 견고합니다. 🎉")
+
+            # 힌트
+            st.info("TIP: 반례가 잘 안 나오면 시도 횟수를 늘리거나(≥300), 접두어 착종/유사 단위 교체 옵션을 모두 켜고 실행해 보세요.")
+# ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [241] 증거 CE-Graph 정합성 검사 v1 — Claim↔Evidence 링크 무결성/가중치 점검
+# 목적:
+#   - Claim/Evidence/Method/Dataset/Metric 노드와 supports/contradicts/derived_from/measured_by 간선 정합성 검사
+#   - 필수 제약: 고유 ID, 허용 타입, 파손 링크, 루프(순환) 탐지(derived_from), 고립 Claim 탐지
+#   - 커버리지/합의도/모순도(간단 지표) 산출 + 취약점 자동 요약
+#
+# 설치/사용:
+#   - 외부 패키지 없음(표준 라이브러리 + Streamlit)
+#   - JSON 입력: (1) 텍스트로 붙여넣기 (2) 파일 업로드(.json)
+import streamlit as st, json, math, itertools
+from collections import defaultdict, deque
+from typing import Dict, Any, List, Tuple, Set
+
+# ── 호환 헬퍼(상단 프레임워크가 없을 때를 대비)
+if "register_module" not in globals():
+    def register_module(num,name,desc): pass
+if "gray_line" not in globals():
+    def gray_line(num,title,subtitle):
+        st.markdown(f"**[{num}] {title}** — {subtitle}")
+
+register_module("241", "CE-Graph 정합성 검사 v1", "무결성/커버리지/합의도/모순도")
+gray_line("241", "CE-Graph 정합성 검사", "Claim↔Evidence 링크 무결성 + 지표 산출 + 취약점 요약")
+
+# ===== 허용 타입/관계 사양(스텁) =====
+ALLOWED_NODE_TYPES: Set[str] = {"claim","evidence","method","dataset","metric"}
+ALLOWED_EDGE_TYPES: Set[str] = {"supports","contradicts","derived_from","measured_by"}
+
+# supports/contradicts는 evidence→claim만 허용(스텁 정책, 필요 시 확장)
+REL_CONSTRAINTS = {
+    "supports":      ("evidence","claim"),
+    "contradicts":   ("evidence","claim"),
+    "derived_from":  (None, None),   # 자유(단, cycle 금지)
+    "measured_by":   (None, "metric")
+}
+
+# ===== 입력 위젯 =====
+st.subheader("📥 CE-Graph 입력")
+left, right = st.columns(2)
+with left:
+    sample_btn = st.button("샘플 불러오기", help="간단한 샘플 그래프를 불러옵니다.")
+with right:
+    up = st.file_uploader("JSON 업로드(.json)", type=["json"], key="ceg241_up")
+
+txt = st.text_area("또는 JSON을 직접 붙여넣기 (keys: nodes, edges)", height=220, key="ceg241_text")
+
+if sample_btn and not txt:
+    sample = {
+        "nodes": [
+            {"id":"claim:abc","kind":"claim","payload":{"text":"중력파 관측 주장"}},
+            {"id":"evi:1","kind":"evidence","payload":{"source":"ligo","span":[0,10], "score":0.92}},
+            {"id":"evi:2","kind":"evidence","payload":{"source":"paper","score":0.75}},
+            {"id":"met:h", "kind":"metric","payload":{"name":"p_value","value":0.003}},
+        ],
+        "edges": [
+            {"src":"evi:1","dst":"claim:abc","rel":"supports","weight":0.92},
+            {"src":"evi:2","dst":"claim:abc","rel":"contradicts","weight":0.20},
+            {"src":"claim:abc","dst":"met:h","rel":"measured_by"}
+        ]
+    }
+    txt = json.dumps(sample, ensure_ascii=False, indent=2)
+    st.session_state["ceg241_text"] = txt
+
+# ===== 파서 =====
+def load_graph(blob: Any) -> Tuple[List[Dict[str,Any]], List[Dict[str,Any]], List[str]]:
+    errs: List[str] = []
+    nodes, edges = [], []
+    try:
+        if isinstance(blob, str):
+            data = json.loads(blob)
+        else:
+            data = blob
+        nodes = list(data.get("nodes") or [])
+        edges = list(data.get("edges") or [])
+        if not isinstance(nodes, list) or not isinstance(edges, list):
+            errs.append("nodes/edges는 리스트여야 합니다.")
+    except Exception as e:
+        errs.append(f"JSON 파싱 실패: {e}")
+    return nodes, edges, errs
+
+payload_data = None
+if up:
+    try:
+        payload_data = json.loads(up.read().decode("utf-8"))
+    except Exception as e:
+        st.error(f"업로드 JSON 파싱 실패: {e}")
+
+nodes, edges, errs0 = load_graph(payload_data if payload_data else (txt or "{}"))
+
+if errs0:
+    st.error("입력 오류: " + "; ".join(errs0))
+else:
+    with st.expander("입력 미리보기", expanded=False):
+        st.code(json.dumps({"nodes":nodes,"edges":edges}, ensure_ascii=False, indent=2), language="json")
+
+# ===== 정합성 검사 =====
+def check_unique_ids(nodes: List[Dict[str,Any]]) -> List[str]:
+    seen, dup = set(), []
+    for n in nodes:
+        i = n.get("id")
+        if i in seen: dup.append(i)
+        seen.add(i)
+    return dup
+
+def check_types(nodes: List[Dict[str,Any]], edges: List[Dict[str,Any]]) -> Tuple[List[str], List[str]]:
+    bad_nodes, bad_edges = [], []
+    for n in nodes:
+        if n.get("kind") not in ALLOWED_NODE_TYPES:
+            bad_nodes.append(f"{n.get('id')}:{n.get('kind')}")
+    # 간선 타입/역할 제약
+    id2kind = {n.get("id"): n.get("kind") for n in nodes}
+    for e in edges:
+        rel = e.get("rel")
+        if rel not in ALLOWED_EDGE_TYPES:
+            bad_edges.append(f"{e}")
+            continue
+        src, dst = e.get("src"), e.get("dst")
+        sk, dk = id2kind.get(src), id2kind.get(dst)
+        exp = REL_CONSTRAINTS.get(rel)
+        if exp:
+            exp_s, exp_d = exp
+            if exp_s and sk!=exp_s: bad_edges.append(f"{rel}: src {src}({sk})≠{exp_s}")
+            if exp_d and dk!=exp_d: bad_edges.append(f"{rel}: dst {dst}({dk})≠{exp_d}")
+    return bad_nodes, bad_edges
+
+def build_adj(edges: List[Dict[str,Any]]) -> Dict[str,List[str]]:
+    g = defaultdict(list)
+    for e in edges:
+        if e.get("rel")=="derived_from":
+            g[e.get("src")].append(e.get("dst"))
+    return g
+
+def detect_cycle(adj: Dict[str,List[str]]) -> List[List[str]]:
+    # 단순 DFS 사이클 탐지
+    cycles = []
+    color = {}
+    stack = []
+    def dfs(u):
+        color[u] = 1
+        stack.append(u)
+        for v in adj.get(u,[]):
+            if color.get(v,0)==0:
+                dfs(v)
+            elif color.get(v)==1:
+                # 사이클 추출
+                if v in stack:
+                    i = stack.index(v)
+                    cycles.append(stack[i:]+[v])
+        color[u] = 2
+        stack.pop()
+    for u in list(adj.keys()):
+        if color.get(u,0)==0:
+            dfs(u)
+    return cycles
+
+def coverage_and_consensus(nodes, edges) -> Dict[str,Any]:
+    # claim이 evidence로 몇 % 커버되는지, supports vs contradicts 비율, 고립 Claim 등
+    id2k = {n["id"]:n.get("kind") for n in nodes}
+    claims = [n["id"] for n in nodes if n.get("kind")=="claim"]
+    ev_by_claim = defaultdict(lambda: {"supports":[], "contradicts":[]})
+    for e in edges:
+        if e.get("rel") in ("supports","contradicts"):
+            src, dst = e.get("src"), e.get("dst")
+            if id2k.get(src)=="evidence" and id2k.get(dst)=="claim":
+                ev_by_claim[dst][e["rel"]].append(e)
+    report = {}
+    for c in claims:
+        sup = ev_by_claim[c]["supports"]
+        con = ev_by_claim[c]["contradicts"]
+        w_sup = sum([float(e.get("weight",1.0)) for e in sup])
+        w_con = sum([float(e.get("weight",1.0)) for e in con])
+        tot_evi = len(sup)+len(con)
+        cov = 0.0 if tot_evi==0 else min(1.0, (len(sup)+len(con))/max(1,tot_evi))  # 단순 커버리지(자리표시자)
+        # 합의도: w_sup / (w_sup + w_con)
+        agree = None
+        if (w_sup + w_con) > 0:
+            agree = w_sup/(w_sup+w_con)
+        report[c] = {
+            "evidence_count": tot_evi,
+            "supports_weight": w_sup, "contradicts_weight": w_con,
+            "coverage": cov, "consensus": agree,
+            "isolated": tot_evi==0
+        }
+    return report
+
+# ===== 실행 버튼 =====
+if st.button("정합성 검사 실행", key="ceg241_run"):
+    problems: List[str] = []
+
+    # 1) 고유 ID
+    dups = check_unique_ids(nodes)
+    if dups:
+        problems.append(f"중복 노드 ID: {', '.join(dups[:10])}" + (" ..." if len(dups)>10 else ""))
+
+    # 2) 타입/관계 제약
+    bad_nodes, bad_edges = check_types(nodes, edges)
+    if bad_nodes:
+        problems.append("허용되지 않은 노드 타입: " + ", ".join(bad_nodes[:10]) + (" ..." if len(bad_nodes)>10 else ""))
+    if bad_edges:
+        problems.append("간선 제약 위반: " + "; ".join(bad_edges[:5]) + (" ..." if len(bad_edges)>5 else ""))
+
+    # 3) derived_from 사이클
+    cycles = detect_cycle(build_adj(edges))
+    if cycles:
+        problems.append(f"derived_from 사이클 감지({len(cycles)}개). 첫 번째: {' → '.join(cycles[0])}")
+
+    # 4) 커버리지/합의도/고립
+    rep = coverage_and_consensus(nodes, edges)
+
+    # ===== 결과 표시 =====
+    if problems:
+        st.error("❌ 정합성 문제 발견")
+        for p in problems:
+            st.write("- " + p)
+    else:
+        st.success("✅ 주요 정합성 문제 없음")
+
+    # Claim별 리포트
+    st.subheader("📊 Claim별 커버리지/합의도/고립")
+    if rep:
+        rows = []
+        for cid, r in rep.items():
+            rows.append({
+                "claim": cid,
+                "evidence_count": r["evidence_count"],
+                "supports_w": round(r["supports_weight"],3),
+                "contradicts_w": round(r["contradicts_weight"],3),
+                "coverage": round(r["coverage"],3),
+                "consensus": (None if r["consensus"] is None else round(r["consensus"],3)),
+                "isolated": r["isolated"]
+            })
+        st.dataframe(rows, use_container_width=True)
+    else:
+        st.info("Claim 노드가 없거나 연결된 Evidence가 없습니다.")
+
+    # 취약점 자동 요약
+    st.subheader("🧩 취약점 요약(가이드)")
+    guides = []
+    if dups: guides.append("• 노드 ID 중복 제거 → 하나의 ID에 하나의 사실만.")
+    if bad_nodes: guides.append("• 허용 노드 타입만 사용(claim/evidence/method/dataset/metric).")
+    if bad_edges: guides.append("• supports/contradicts는 evidence→claim만. measured_by의 dst는 metric.")
+    if cycles: guides.append("• derived_from는 DAG 여야 함(사이클 제거).")
+    iso_claims = [c for c,r in rep.items() if r["isolated"]]
+    low_cov = [c for c,r in rep.items() if (not r["isolated"]) and r["coverage"]<0.7]
+    low_agree = [c for c,r in rep.items() if r["consensus"] is not None and r["consensus"]<0.6]
+    if iso_claims: guides.append(f"• 고립 Claim 연결 필요: {', '.join(iso_claims[:5])}" + (" ..." if len(iso_claims)>5 else ""))
+    if low_cov: guides.append(f"• 커버리지 강화 필요(≥0.7 권장): {', '.join(low_cov[:5])}" + (" ..." if len(low_cov)>5 else ""))
+    if low_agree: guides.append(f"• 합의도 낮음(반증 강함) → 반례 검토/추가 증거 수집: {', '.join(low_agree[:5])}" + (" ..." if len(low_agree)>5 else ""))
+
+    if guides:
+        for g in guides:
+            st.write(g)
+    else:
+        st.write("현재 그래프는 기본 가이드를 충족합니다. 🎉")
+
+    # 게이트(척추 정책) — 있으면 안내
+    gate_msg = ""
+    try:
+        if "backbone_gate" in globals():
+            ok, gate_msg = backbone_gate("CE-Graph 정합성 검사", "현실연동 핵심")
+        elif "spx_backbone_gate" in globals():
+            ok, gate_msg = spx_backbone_gate("CE-Graph 정합성 검사", "현실연동 핵심")
+        else:
+            ok, gate_msg = True, "게이트 없음(코어 모듈로 간주)"
+    except Exception:
+        ok, gate_msg = True, "게이트 확인 중 예외 → 코어로 진행"
+    st.caption(f"Gate: {gate_msg}")
+# ───────────────────────────────────────────────
