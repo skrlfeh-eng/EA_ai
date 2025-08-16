@@ -7860,3 +7860,190 @@ if st.session_state.repair_history_233:
     with st.expander("🧾 리페어 히스토리(누적)", expanded=False):
         st.json(st.session_state.repair_history_233)
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [234] CE-Graph 스텁 v1 — 외부 증거 연동 + 자동 주석(리페어 근거)
+# 목적:
+#   1) 주장(Claim)에 대해 증거(Evidence) 노드들을 수집/점수화하는 CE-Graph 스텁
+#   2) 233에서 생성한 수정안(patched)을 자동 인용 주석으로 강화
+# 설치: 파일 맨 아래 통째로 붙여넣기 → 저장 → 새로고침
+import streamlit as st
+from datetime import datetime
+import hashlib
+import re
+from typing import List, Dict
+
+# (안전가드) 상단 대시보드 헬퍼가 없더라도 문제없게 더미 정의
+if "register_module" not in globals():
+    def register_module(num, name, desc): pass
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle):
+        st.markdown(f"**[{num}] {title}** — {subtitle}")
+
+register_module("234", "CE-Graph 스텁 v1", "외부 증거 연동 + 자동 주석")
+gray_line("234", "CE-Graph", "주장-증거 그래프 구성 · 주석 자동화 · 233 수정안 주석 강화")
+
+# ===== 세션 상태 =====
+if "ce_graph_234" not in st.session_state:
+    st.session_state.ce_graph_234 = {
+        "claims": [],   # [{id,text,created_at}]
+        "evidence": [], # [{id,title,url,quote,score,created_at}]
+        "links": []     # [{claim_id,evi_id,rel,weight}]
+    }
+if "ce_reports_234" not in st.session_state:
+    st.session_state.ce_reports_234 = []  # 생성된 리포트 기록
+
+# ===== 유틸 =====
+def _uid(prefix:str, text:str) -> str:
+    h = hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
+    return f"{prefix}:{h}"
+
+def add_claim(text:str) -> str:
+    cid = _uid("claim", text)
+    store = st.session_state.ce_graph_234
+    if not any(c["id"] == cid for c in store["claims"]):
+        store["claims"].append({"id": cid, "text": text, "created_at": datetime.utcnow().isoformat()+"Z"})
+    return cid
+
+def add_evidence(title:str, url:str, quote:str, score:float=0.8) -> str:
+    payload = f"{title}|{url}|{quote}"
+    eid = _uid("evi", payload)
+    store = st.session_state.ce_graph_234
+    if not any(e["id"] == eid for e in store["evidence"]):
+        store["evidence"].append({
+            "id": eid, "title": title, "url": url, "quote": quote,
+            "score": float(max(0.0, min(1.0, score))),
+            "created_at": datetime.utcnow().isoformat()+"Z"
+        })
+    return eid
+
+def link_ce(claim_id:str, evi_id:str, rel:str="supports", weight:float=1.0):
+    store = st.session_state.ce_graph_234
+    store["links"].append({
+        "claim_id": claim_id, "evi_id": evi_id,
+        "rel": rel, "weight": float(weight)
+    })
+
+def score_coverage(claim_text:str, evidence_list:List[Dict]) -> Dict[str,float]:
+    """
+    간이 CE-coverage:
+      - 키워드: 띄어쓰기 기준 3~12자 토큰 중복 제거
+      - 일치율: (증거문에 등장한 키워드 수 / 전체 키워드 수)
+    """
+    toks = [t for t in re.split(r"[^\w가-힣]+", claim_text) if 3 <= len(t) <= 12]
+    if not toks:
+        return {"coverage": 0.0, "matched": 0, "total": 0}
+    toks = list(dict.fromkeys(toks))
+    joined = " ".join((e["quote"] + " " + e["title"]) for e in evidence_list).lower()
+    matched = sum(1 for t in toks if t.lower() in joined)
+    return {"coverage": round(matched/len(toks), 3), "matched": matched, "total": len(toks)}
+
+def auto_annotate(text:str, evidence_list:List[Dict]) -> str:
+    """
+    간이 자동 주석:
+      - 문장 끝에 [e1], [e2] 식으로 인용 꼬리표 부여
+      - 우선 점수가 높은 증거부터 배정
+    """
+    if not evidence_list:
+        return text
+    ev_sorted = sorted(evidence_list, key=lambda e: e["score"], reverse=True)
+    sentences = re.split(r"(?<=[.!?！？。])\s+", text.strip())
+    out = []
+    for i, s in enumerate(sentences):
+        tag = f"[e{(i % max(1,len(ev_sorted)))+1}]"
+        if s:
+            out.append(s + " " + tag)
+    return " ".join(out)
+
+def build_report(claim_id:str, claim_text:str, evis:List[Dict], annotated:str, cov:Dict[str,float]) -> Dict:
+    rep = {
+        "timestamp_utc": datetime.utcnow().isoformat()+"Z",
+        "claim_id": claim_id,
+        "claim_text": claim_text,
+        "evidence_refs": [
+            {"idx": i+1, "id": e["id"], "title": e["title"], "url": e["url"], "score": e["score"]}
+            for i, e in enumerate(evis)
+        ],
+        "annotated_text": annotated,
+        "coverage": cov
+    }
+    st.session_state.ce_reports_234.append(rep)
+    return rep
+
+# ===== UI =====
+st.subheader("🧩 [234] CE-Graph 스텁 v1 — 주장·증거 구성 + 자동 주석")
+
+# (A) 주장 입력
+with st.expander("① 주장(Claim) 작성", expanded=True):
+    claim_text = st.text_area("주장 텍스트", placeholder="예) 본 실험 결과, X는 Y 조건에서 성능이 우수하다.", height=100, key="ce_claim_text")
+    if st.button("주장 등록", key="ce_add_claim"):
+        if claim_text.strip():
+            cid = add_claim(claim_text.strip())
+            st.success(f"주장 등록 완료 · id={cid}")
+        else:
+            st.warning("주장을 입력하세요.")
+
+# (B) 증거 입력
+with st.expander("② 증거(Evidence) 추가", expanded=True):
+    col1, col2 = st.columns([3,2])
+    with col1:
+        e_title = st.text_input("증거 제목", placeholder="논문/데이터/표준 이름", key="ce_e_title")
+        e_url   = st.text_input("증거 URL", placeholder="https:// ...", key="ce_e_url")
+    with col2:
+        e_score = st.slider("증거 신뢰 점수", 0.0, 1.0, 0.8, 0.05, key="ce_e_score")
+    e_quote = st.text_area("핵심 인용/요약(짧게)", placeholder="증거의 핵심 문장/요약을 적어주세요.", height=80, key="ce_e_quote")
+    if st.button("증거 추가", key="ce_add_evi"):
+        if e_title.strip() and e_quote.strip():
+            eid = add_evidence(e_title.strip(), e_url.strip(), e_quote.strip(), e_score)
+            st.success(f"증거 추가 완료 · id={eid}")
+        else:
+            st.warning("제목과 인용(요약)은 필수입니다.")
+
+# (C) 링크 & 점수화 & 자동 주석
+with st.expander("③ 링크·점수화·자동 주석", expanded=True):
+    # 최근 주장 자동 선택
+    store = st.session_state.ce_graph_234
+    latest_claim = store["claims"][-1] if store["claims"] else None
+    if latest_claim:
+        st.info(f"최근 주장 선택됨: {latest_claim['id']}")
+        # 모든 증거를 supports로 연결(스텁)
+        for ev in store["evidence"]:
+            link_ce(latest_claim["id"], ev["id"], rel="supports", weight=ev["score"])
+        # 커버리지 계산
+        cov = score_coverage(latest_claim["text"], store["evidence"])
+        # 주석 텍스트 생성
+        annotated = auto_annotate(latest_claim["text"], store["evidence"])
+        # 리포트
+        rep = build_report(latest_claim["id"], latest_claim["text"], store["evidence"], annotated, cov)
+        st.success("CE-Graph 처리 완료 (스텁)")
+        st.json(rep)
+    else:
+        st.warning("먼저 주장을 등록하세요.")
+
+# (D) 233 수정안 자동 주석 강화
+with st.expander("④ 233 수정안(patched) 자동 주석 강화", expanded=True):
+    if "repair_history_233" in st.session_state and st.session_state.repair_history_233:
+        last = st.session_state.repair_history_233[-1]
+        patched = last["proposals"][0] if last.get("proposals") else ""
+        st.text_area("233 수정안 미리보기", patched, height=100, key="ce_patched_preview", disabled=True)
+        if st.button("수정안에 증거 주석 자동 삽입", key="ce_annotate_233"):
+            annotated = auto_annotate(patched, st.session_state.ce_graph_234["evidence"])
+            cov = score_coverage(patched, st.session_state.ce_graph_234["evidence"])
+            rep = {
+                "timestamp_utc": datetime.utcnow().isoformat()+"Z",
+                "source": "233_patched",
+                "annotated_text": annotated,
+                "coverage": cov
+            }
+            st.session_state.ce_reports_234.append(rep)
+            st.success("수정안 주석 강화 완료")
+            st.json(rep)
+    else:
+        st.info("233 리페어 히스토리가 아직 없습니다. 먼저 233 모듈을 실행해 수정안을 생성하세요.")
+
+# (E) 저장/내보내기
+with st.expander("⑤ 그래프/리포트 확인·내보내기", expanded=False):
+    st.markdown("**CE-Graph 스냅샷**")
+    st.json(st.session_state.ce_graph_234)
+    st.markdown("**리포트 누적**")
+    st.json(st.session_state.ce_reports_234)
+# ───────────────────────────────────────────────
