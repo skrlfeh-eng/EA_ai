@@ -6033,3 +6033,38 @@ with st.expander("🧩 209. 확장 자리(추후 기능 삽입)", expanded=False
 with st.expander("🧩 210. 확장 자리(추후 기능 삽입)", expanded=False):
     st.info("추가 기능 슬롯 4")
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────
+# 🔧 공통: 안전 초기화 유틸 (한 번만 정의)
+# ─────────────────────────────────────────────────────────────
+import streamlit as st
+import time, uuid, json, random, re
+from datetime import datetime
+
+if "tool_registry" not in st.session_state:
+    st.session_state.tool_registry = {}   # {tool_name: callable}
+
+def _ensure_tool_registry():
+    return st.session_state.tool_registry
+
+def safe_register(name: str, func, namespace: str = "core") -> str:
+    """
+    같은 이름이 이미 있으면 자동으로 suffix(#n)를 붙여 안전 등록.
+    return: 실제 등록된 최종 이름
+    """
+    reg = _ensure_tool_registry()
+    base = f"{namespace}/{name}" if namespace else name
+    key = base
+    i = 1
+    while key in reg:
+        key = f"{base}#{i}"
+        i += 1
+    reg[key] = func
+    return key
+
+def _once(flag: str) -> bool:
+    """세션 내에서 딱 1회만 실행되도록 보장"""
+    if flag in st.session_state:
+        return False
+    st.session_state[flag] = True
+    return True
