@@ -5915,124 +5915,121 @@ _compact_row([
     ("⚖️ 200. BMI 계산기", _mod_200),
 ])
 
-# ─────────────────────────────────────────────
-# 201~210 모듈 (촘촘 레이아웃, append-only)
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 201~210. 호환/안전 통합본 (외부 라이브러리 없어도 에러 없이 동작)
+# 충돌 방지: 고유 key 프리픽스 = "m201_"
+# ─────────────────────────────────────────────────────────────────────────────
+import datetime, base64
+from io import BytesIO
+import importlib
 
-import datetime, base64, qrcode, io
+def _lib_available(mod_name: str) -> bool:
+    try:
+        importlib.import_module(mod_name)
+        return True
+    except Exception:
+        return False
 
-# 201. 오늘 날짜 / 시간 표시
-def _mod_201():
-    st.caption("오늘 날짜/시간")
+# qrcode/PIL 사용 가능 여부
+_QR_OK = _lib_available("qrcode") and _lib_available("PIL")
+
+def _make_qr_image(data: str):
+    """qrcode + PIL 이 있을 때만 실제 QR 이미지를 생성한다."""
+    import qrcode
+    from PIL import Image
+    qr = qrcode.QRCode(box_size=8, border=2, version=None)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img: Image.Image = qr.make_image(fill_color="black", back_color="white")
+    return img
+
+def _img_to_b64(img) -> str:
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+with st.expander("🔳 201. QR 코드 생성기 (의존성 자동 감지)", expanded=False):
+    st.caption("※ qrcode + Pillow 가 있으면 생성, 없으면 안전하게 비활성 메시지 표시")
+    qr_text = st.text_input("QR에 담을 텍스트/URL", key="m201_qr_text")
+    col1, col2 = st.columns(2)
+    with col1:
+        gen = st.button("QR 생성", key="m201_btn_gen")
+    with col2:
+        st.write(f"의존성 상태: {'✅ 사용 가능' if _QR_OK else '❌ 미설치'}")
+        if not _QR_OK:
+            st.info("`requirements.txt`에 `qrcode`와 `Pillow`를 추가하면 QR 생성이 활성화됩니다.")
+
+    if gen:
+        if not qr_text:
+            st.warning("텍스트/URL을 입력해 주세요.")
+        elif not _QR_OK:
+            st.error("현재 환경에 qrcode/Pillow가 없어 이미지 생성을 수행할 수 없습니다.")
+        else:
+            try:
+                img = _make_qr_image(qr_text)
+                b64 = _img_to_b64(img)
+                st.image(img, caption="생성된 QR")
+                st.download_button(
+                    "PNG 다운로드",
+                    data=base64.b64decode(b64),
+                    file_name=f"qr_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
+                    mime="image/png",
+                    key="m201_dl",
+                )
+                st.success("QR 생성 완료!")
+            except Exception as e:
+                st.exception(e)
+
+with st.expander("🕒 202. 현재 시각 / 타임스탬프", expanded=False):
     now = datetime.datetime.now()
-    st.write(f"📅 {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    st.write("현재 시각:", now.strftime("%Y-%m-%d %H:%M:%S"))
+    st.code(f"epoch: {int(now.timestamp())}")
 
-# 202. Epoch 변환기
-def _mod_202():
-    st.caption("Epoch 변환기")
-    epoch = st.number_input("Epoch 입력", value=int(datetime.datetime.now().timestamp()), key="202_epoch")
-    if st.button("변환", key="btn_202"):
-        st.write(datetime.datetime.fromtimestamp(epoch))
-
-# 203. 문자열 Base64 Encode/Decode
-def _mod_203():
-    st.caption("Base64 변환기")
-    s = st.text_input("문자열", key="203_s")
-    c1, c2 = st.columns(2)
-    if c1.button("Encode", key="btn_203_enc"):
-        st.code(base64.b64encode(s.encode()).decode())
-    if c2.button("Decode", key="btn_203_dec"):
+with st.expander("🔐 203. Base64 인코더/디코더", expanded=False):
+    mode = st.radio("모드", ["encode", "decode"], horizontal=True, key="m201_b64_mode")
+    txt  = st.text_area("입력", key="m201_b64_in")
+    if st.button("실행", key="m201_b64_run"):
         try:
-            st.code(base64.b64decode(s.encode()).decode())
+            if mode == "encode":
+                out = base64.b64encode(txt.encode("utf-8")).decode("utf-8")
+            else:
+                out = base64.b64decode(txt.encode("utf-8")).decode("utf-8")
+            st.code(out)
         except Exception as e:
-            st.error(e)
+            st.exception(e)
 
-# 204. QR 코드 생성기
-def _mod_204():
-    st.caption("QR 코드 생성기")
-    s = st.text_input("텍스트/URL", key="204_s")
-    if st.button("QR 생성", key="btn_204"):
-        img = qrcode.make(s)
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        st.image(buf.getvalue())
+with st.expander("📦 204. 의존성 상태 체크", expanded=False):
+    rows = [
+        ("qrcode", _lib_available("qrcode")),
+        ("Pillow", _lib_available("PIL")),
+        ("psutil", _lib_available("psutil")),
+        ("numpy", _lib_available("numpy")),
+        ("pandas", _lib_available("pandas")),
+    ]
+    st.write({name: ("✅" if ok else "❌") for name, ok in rows})
+    st.caption("※ 필요시 requirements.txt에 추가하고 커밋/리빌드하세요.")
 
-# 205. 간단 ToDo List
-def _mod_205():
-    st.caption("ToDo List")
-    if "todos" not in st.session_state: st.session_state.todos = []
-    new = st.text_input("할 일 추가", key="205_new")
-    if st.button("추가", key="btn_205_add"):
-        st.session_state.todos.append(new)
-    for i, t in enumerate(st.session_state.todos):
-        st.write(f"- {t}")
+with st.expander("🧪 205. 간단 기능 테스트(에러 안전)", expanded=False):
+    st.write("문자열 뒤집기:", "GEA"[::-1])
+    st.write("ROT13:", "".join(
+        chr(((ord(c)-97+13)%26)+97) if c.islower()
+        else chr(((ord(c)-65+13)%26)+65) if c.isupper()
+        else c for c in "Ultimate-Aeon"
+    ))
 
-# 206. 간단 메모장
-def _mod_206():
-    st.caption("메모장")
-    memo = st.text_area("메모 입력", key="206_memo")
-    if st.button("저장", key="btn_206_save"):
-        st.session_state["last_memo"] = memo
-    if "last_memo" in st.session_state:
-        st.write("저장된 메모:", st.session_state["last_memo"])
+with st.expander("🧰 206. 모듈 가드/토글 예시", expanded=False):
+    enabled = st.toggle("이 블록 기능 토글", value=True, key="m201_tg")
+    st.write("상태:", "활성" if enabled else "비활성")
 
-# 207. Stopwatch (간단)
-def _mod_207():
-    st.caption("스톱워치")
-    if "start_time" not in st.session_state: st.session_state.start_time = None
-    c1, c2 = st.columns(2)
-    if c1.button("시작", key="btn_207_start"):
-        st.session_state.start_time = datetime.datetime.now()
-    if c2.button("종료", key="btn_207_stop") and st.session_state.start_time:
-        delta = datetime.datetime.now() - st.session_state.start_time
-        st.success(f"경과 시간: {delta}")
+with st.expander("🧩 207. 확장 자리(추후 기능 삽입)", expanded=False):
+    st.info("여기는 이후 기능을 꽂아넣는 확장 슬롯입니다. (번호 체계 유지)")
 
-# 208. 카운트다운 타이머
-def _mod_208():
-    st.caption("카운트다운")
-    sec = st.number_input("초 입력", value=5, key="208_sec")
-    if st.button("시작", key="btn_208_start"):
-        st.info(f"⏳ {sec}초 후 완료 (실시간 갱신은 없음)")
+with st.expander("🧩 208. 확장 자리(추후 기능 삽입)", expanded=False):
+    st.info("추가 기능 슬롯 2")
 
-# 209. 텍스트 비교기
-def _mod_209():
-    st.caption("텍스트 비교")
-    t1, t2 = st.text_area("텍스트1", key="209_t1"), st.text_area("텍스트2", key="209_t2")
-    if st.button("비교", key="btn_209_cmp"):
-        st.write("같음 ✅" if t1 == t2 else "다름 ❌")
+with st.expander("🧩 209. 확장 자리(추후 기능 삽입)", expanded=False):
+    st.info("추가 기능 슬롯 3")
 
-# 210. 문자열 길이 측정
-def _mod_210():
-    st.caption("문자열 길이 측정")
-    s = st.text_input("문자열", key="210_s")
-    if st.button("길이", key="btn_210_len"):
-        st.write(f"길이: {len(s)}")
-
-# ── 화면 배치: 2열 레이아웃
-st.subheader("— 201~210 모듈 (촘촘 레이아웃)")
-
-_compact_row([
-    ("📅 201. 날짜/시간", _mod_201),
-    ("🕰️ 202. Epoch 변환", _mod_202),
-])
-
-_compact_row([
-    ("🔐 203. Base64", _mod_203),
-    ("🔲 204. QR 코드", _mod_204),
-])
-
-_compact_row([
-    ("📝 205. ToDo", _mod_205),
-    ("📒 206. 메모장", _mod_206),
-])
-
-_compact_row([
-    ("⏱️ 207. 스톱워치", _mod_207),
-    ("⏳ 208. 카운트다운", _mod_208),
-])
-
-_compact_row([
-    ("🆚 209. 텍스트 비교", _mod_209),
-    ("📏 210. 문자열 길이", _mod_210),
-])
-
+with st.expander("🧩 210. 확장 자리(추후 기능 삽입)", expanded=False):
+    st.info("추가 기능 슬롯 4")
+# ─────────────────────────────────────────────────────────────────────────────
