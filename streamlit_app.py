@@ -4033,59 +4033,59 @@ def m093_self_test():
     m093_log("DEBUG", "m093", "self test start")
     m093_log("INFO",  "m093", "ok")
     return {"ok": True, "count": len(m093_get_logs())}
-
-# ================================
-# 094. [회색] LTM 토픽 인덱스 (검색·저장·미리보기)
+    
+    # ================================
+# 094-FULL. [회색] LTM 토픽 인덱스 (검색·저장·미리보기 확장판)
 # 목적: gea_logs/ltm 내 JSON/JSON.GZ에서 토픽 키워드 매칭 → 경량 인덱스 저장/조회
 # 출력 경로: gea_logs/ltm_index/idx_<topic>.json
-# 의존: (선택) 092 KeyFactory. 없으면 자동 shim 사용.
+# 표준 라이브러리 + streamlit만 사용 (추가 패키지 불필요)
 # ================================
-import os, re, json, glob, time
+import os, re, json, glob, time, hashlib
 import streamlit as st
 
-# --- 도달 확인(임시 표시: 필요 없으면 지워도 됨)
-st.write("— 094 모듈 로드됨")
+st.write("— 094-FULL 모듈 로드됨")  # 도달 체크
 
-# ---- 092 키 래퍼가 없어도 동작하도록 shim ----
-try:
-    m092_button  # type: ignore
-    m092_text    # type: ignore
-    m092_select  # type: ignore
-except NameError:
-    import uuid
-    def _auto_key(prefix="k"): return f"{prefix}_{uuid.uuid4().hex[:8]}"
-    def m092_button(label: str, group: str = "m094_btn"):
-        return st.button(label, key=_auto_key(group))
-    def m092_text(label: str, group: str = "m094_txt", value: str = ""):
-        return st.text_input(label, value=value, key=_auto_key(group))
-    def m092_select(label: str, options, group: str = "m094_sel"):
-        return st.selectbox(label, options, key=_auto_key(group))
+# ---- 고유 key 유틸 (중복 위젯 키 방지) ----
+def _k(suffix: str) -> str:
+    base = f"m094_{suffix}"
+    return f"{base}_{hashlib.sha256(base.encode()).hexdigest()[:6]}"
 
-# 기본 경로 준비
+# ---- 기본 경로 준비 ----
 LOG_DIR = st.session_state.get("LOG_DIR", "gea_logs")
 LTM_DIR = st.session_state.get("LTM_DIR", os.path.join(LOG_DIR, "ltm"))
-os.makedirs(LTM_DIR, exist_ok=True)
-
 LTM_IDX_DIR = os.path.join(LOG_DIR, "ltm_index")
+os.makedirs(LTM_DIR, exist_ok=True)
 os.makedirs(LTM_IDX_DIR, exist_ok=True)
 
-def m094_ltm_build_index(topic: str, topk_files: int = 200) -> str:
-    """LTM 폴더에서 topic 키워드 포함 파일을 찾고 경량 인덱스를 저장"""
-    patt = (topic or "").lower().strip()
+def _safe_name(name: str) -> str:
+    s = re.sub(r"[^0-9A-Za-z가-힣_.-]+", "_", (name or "topic"))
+    return s[:64] if s else "topic"
+
+def m094_scan_and_build(topic: str, topk_files: int = 200):
+    """LTM 폴더 스캔 → topic 키워드로 필터 → 간단 메타 인덱스 생성"""
+    patt = (topic or "").strip().lower()
     files = sorted(glob.glob(os.path.join(LTM_DIR, "*.json*")))
     hits = []
+    t0 = time.time()
     for p in files:
         try:
-            text = ""
             if p.endswith(".gz"):
                 import gzip
                 with gzip.open(p, "rt", encoding="utf-8", errors="ignore") as f:
                     text = f.read()
             else:
-                text = open(p, "r", encoding="utf-8", errors="ignore").read()
-            if patt and (patt in text.lower()):
-                hits.append({"file": os.path.basename(p), "size": len(text)})
-        except Exception:
+                with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+            if (not patt) or (patt in text.lower()):
+                # 가벼운 메타만 저장 (파일명/길이/간단 해시)
+                meta = {
+                    "file": os.path.basename(p),
+                    "size": len(text),
+                    "hash12": hashlib.sha256(text[-1024:].encode("utf-8")).hexdigest()[:12] if text else ""
+                }
+                hits.append(meta)
+        except Exception as e:
+            # 개별 파일 에러는 건너뜀 (로그만 남길 수도 있음)
             continue
         if len(hits) >= topk_files:
             break
@@ -4093,57 +4093,84 @@ def m094_ltm_build_index(topic: str, topk_files: int = 200) -> str:
         "topic": topic,
         "matched": len(hits),
         "generated_at": int(time.time()),
+        "elapsed_sec": round(time.time() - t0, 3),
         "items": hits
     }
-    safe = re.sub(r"[^0-9A-Za-z가-힣_-]+", "_", topic)[:64] or "topic"
+    safe = _safe_name(topic)
     outp = os.path.join(LTM_IDX_DIR, f"idx_{safe}.json")
     with open(outp, "w", encoding="utf-8") as f:
         json.dump(idx, f, ensure_ascii=False, indent=2)
-    return outp
+    return outp, idx
 
-with st.expander("📁 094. LTM 토픽 인덱스", expanded=False):
-    tp = m092_text("토픽(키워드)", value="증거")
-    col1, col2 = st.columns([1,1])
+with st.expander("📁 094-FULL. LTM 토픽 인덱스(확장판)", expanded=False):
+    col1, col2 = st.columns([2,1])
     with col1:
-        if m092_button("인덱스 생성/저장"):
-            path = m094_ltm_build_index(tp, 200)
+        topic = st.text_input("토픽(키워드)", value="증거", key=_k("topic"))
+        topk = st.number_input("최대 파일 스캔 수", min_value=10, max_value=2000, value=200, step=10, key=_k("topk"))
+        if st.button("인덱스 생성/저장", key=_k("build")):
+            path, idx = m094_scan_and_build(topic, int(topk))
             st.success(f"저장됨: {path}")
-            st.json(json.load(open(path, "r", encoding="utf-8")))
+            st.json(idx)
     with col2:
-        # 최근 인덱스 미리보기
-        idx_files = sorted(glob.glob(os.path.join(LTM_IDX_DIR, "idx_*.json")), reverse=True)[:10]
+        idx_files = sorted(glob.glob(os.path.join(LTM_IDX_DIR, "idx_*.json")), reverse=True)[:20]
         if idx_files:
-            pick = m092_select("최근 인덱스", [os.path.basename(p) for p in idx_files])
-            if m092_button("열기"):
+            pick = st.selectbox("최근 인덱스", [os.path.basename(p) for p in idx_files], key=_k("pick"))
+            if st.button("열기", key=_k("open")):
                 st.json(json.load(open(os.path.join(LTM_IDX_DIR, pick), "r", encoding="utf-8")))
         else:
             st.info("생성된 인덱스가 없습니다. 먼저 '인덱스 생성/저장'을 눌러주세요.")
-            
-            # === 94번: 지식 그래프 시각화 모듈 ===
-import networkx as nx
-import matplotlib.pyplot as plt
 
-def visualize_knowledge_graph(concepts, relations):
-    G = nx.Graph()
-    for c in concepts:
-        G.add_node(c)
-    for rel in relations:
-        G.add_edge(rel[0], rel[1], label=rel[2])
-    fig, ax = plt.subplots()
-    pos = nx.spring_layout(G, seed=42)
-    nx.draw(G, pos, with_labels=True, node_size=3000, node_color="lightblue", ax=ax)
-    nx.draw_networkx_edge_labels(
-        G, pos, edge_labels={(u, v): d["label"] for u, v, d in G.edges(data=True)}, ax=ax
-    )
-    st.pyplot(fig)
+# ================================
+# 095. [회색] 런타임/캐시 진단 패널 (반영/캐시/위젯 상태)
+# ================================
+import sys, platform
 
-# === 95번: 메타인지 피드백 모듈 ===
-def metacognition_feedback(user_thoughts):
-    st.subheader("🧠 메타인지 피드백 시스템")
-    if user_thoughts:
-        st.write("당신이 입력한 생각:", user_thoughts)
-        st.write("→ 시스템 해석: 입력된 사고 과정을 기반으로 패턴을 검토합니다.")
-        if "모름" in user_thoughts or "헷갈" in user_thoughts:
-            st.warning("⚠️ 혼란 신호 감지됨: 추가 학습 또는 설명 필요!")
-        else:
-            st.success("✅ 안정적 사고 패턴: 현재 학습 방향은 올바릅니다.")
+st.write("— 095 모듈 로드됨")  # 도달 체크
+
+def _fp(txt: str) -> str:
+    return hashlib.sha256(txt.encode("utf-8")).hexdigest()[:12]
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+STARTED_AT = st.session_state.get("_m095_started_at_ms")
+if not STARTED_AT:
+    STARTED_AT = _now_ms()
+    st.session_state["_m095_started_at_ms"] = STARTED_AT
+
+with st.expander("🛡️ 095. 런타임/캐시 진단", expanded=False):
+    colA, colB = st.columns(2)
+    with colA:
+        st.markdown("#### 실행/환경")
+        st.write("파일 경로:", __file__)
+        st.write("Python:", sys.version.split()[0])
+        st.write("Platform:", platform.platform())
+        st.write("Streamlit:", st.__version__)
+        st.write("시작 시각(ms):", STARTED_AT)
+        try:
+            with open(__file__, "r", encoding="utf-8") as f:
+                tail = f.read()[-200:]
+            st.write("코드꼬리 해시:", _fp(tail))
+        except Exception as e:
+            st.warning(f"코드 읽기 실패: {e}")
+
+    with colB:
+        st.markdown("#### 캐시/위젯 상태")
+        try:
+            st.button("진단 버튼", key=_k("probe"))
+            st.write("위젯 키 충돌: 없음(샘플)")
+        except Exception as e:
+            st.error(f"위젯 키 충돌 감지: {e}")
+
+        if st.button("세션 캐시 무효화(토글)", key=_k("toggle_cache")):
+            st.session_state["_m095_nonce"] = _fp(str(_now_ms()))
+            st.success("세션 상태 변경됨 → Rerun 시 강제 재계산 유도")
+
+    st.markdown("---")
+    st.markdown("#### 권장 절차")
+    st.write("1) GitHub 커밋이 main으로 들어갔는지 확인")
+    st.write("2) 위 '코드꼬리 해시' 값이 커밋마다 달라지는지 확인")
+    st.write("3) 앱 메뉴에서 **Restart & clear cache** 또는 **Manage app → Reboot app**")
+    st.write("4) 필요 시 **Upload files**로 `streamlit_app.py` 직접 덮어쓰기")
+    
+    
