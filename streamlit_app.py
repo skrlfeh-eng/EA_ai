@@ -4882,3 +4882,1036 @@ _compact_row([
     ("🧹 120. 유지보수 툴", _mod_120),
 ])
 
+# ─────────────────────────────────────────────
+# 121~130 모듈 (촘촘 레이아웃, append-only)
+# ─────────────────────────────────────────────
+
+# 121. 사용자 태그 기반 메모
+if "121_tags" not in st.session_state:
+    st.session_state["121_tags"] = {}
+
+def _mod_121():
+    st.caption("태그별로 메모를 관리합니다.")
+    tag = st.text_input("태그", key="121_tag")
+    memo = st.text_area("메모", key="121_memo")
+    if st.button("저장", key="btn_121_save"):
+        if tag:
+            st.session_state["121_tags"].setdefault(tag, []).append(memo)
+            st.success(f"저장됨: {tag}")
+    for k, v in st.session_state["121_tags"].items():
+        st.markdown(f"**#{k}**")
+        for i, m in enumerate(v, 1):
+            st.text(f"{i}. {m}")
+
+# 122. 최근 프롬프트 기록
+if "122_prompts" not in st.session_state:
+    st.session_state["122_prompts"] = []
+
+def _mod_122():
+    st.caption("최근 입력된 프롬프트 기록")
+    prompt = st.text_input("프롬프트", key="122_in")
+    if st.button("기록", key="btn_122_add"):
+        if prompt:
+            st.session_state["122_prompts"].append({"t": time.strftime("%H:%M:%S"), "p": prompt})
+    st.table(st.session_state["122_prompts"][-8:][::-1])
+
+# 123. 세션 상태 요약
+def _mod_123():
+    st.caption("세션 상태의 요약본을 JSON으로 표시합니다.")
+    keys = list(st.session_state.keys())[:30]
+    st.json({k: st.session_state[k] for k in keys})
+
+# 124. 마이크로 TODO
+if "124_todo" not in st.session_state:
+    st.session_state["124_todo"] = []
+
+def _mod_124():
+    st.caption("간단 TODO 리스트")
+    task = st.text_input("할 일", key="124_task")
+    if st.button("추가", key="btn_124_add"):
+        st.session_state["124_todo"].append({"done": False, "task": task})
+    for i, t in enumerate(st.session_state["124_todo"]):
+        c1, c2 = st.columns([0.1, 0.9])
+        done = c1.checkbox("", value=t["done"], key=f"124_chk_{i}")
+        c2.write(t["task"])
+        st.session_state["124_todo"][i]["done"] = done
+
+# 125. 미니 코드 실행 (Python eval)
+def _mod_125():
+    st.caption("간단한 Python 코드 실행기 (eval)")
+    code = st.text_area("코드 입력", key="125_code")
+    if st.button("실행", key="btn_125_run"):
+        try:
+            result = eval(code, {"__builtins__": {}}, {})
+            st.success(f"결과: {result}")
+        except Exception as e:
+            st.error(f"에러: {e}")
+
+# 126. 빠른 JSON Validator
+def _mod_126():
+    st.caption("JSON 문자열의 유효성을 검사합니다.")
+    txt = st.text_area("JSON 문자열", key="126_json")
+    if st.button("검사", key="btn_126_chk"):
+        try:
+            obj = json.loads(txt)
+            st.success("유효한 JSON")
+            st.json(obj)
+        except Exception as e:
+            st.error(f"Invalid JSON: {e}")
+
+# 127. 메모 랜덤 뽑기
+if "127_memos" not in st.session_state:
+    st.session_state["127_memos"] = []
+
+def _mod_127():
+    st.caption("메모를 랜덤으로 하나 뽑습니다.")
+    new = st.text_input("메모", key="127_new")
+    if st.button("추가", key="btn_127_add"):
+        st.session_state["127_memos"].append(new)
+    if st.button("랜덤 뽑기", key="btn_127_rand") and st.session_state["127_memos"]:
+        import random
+        st.info(random.choice(st.session_state["127_memos"]))
+
+# 128. 카운터
+if "128_counter" not in st.session_state:
+    st.session_state["128_counter"] = 0
+
+def _mod_128():
+    st.caption("증가/감소 카운터")
+    c1, c2 = st.columns(2)
+    if c1.button("+1", key="btn_128_plus"):
+        st.session_state["128_counter"] += 1
+    if c2.button("-1", key="btn_128_minus"):
+        st.session_state["128_counter"] -= 1
+    st.metric("현재 값", st.session_state["128_counter"])
+
+# 129. 메모리 사용 체크
+def _mod_129():
+    st.caption("psutil 없는 환경에서도 간단 메모리 추정")
+    import os, gc
+    st.write(f"객체 수: {len(gc.get_objects())}")
+    st.write(f"PID: {os.getpid()}")
+
+# 130. 색상 선택기
+def _mod_130():
+    st.caption("컬러 선택")
+    color = st.color_picker("색상", "#00ff00", key="130_col")
+    st.write(f"선택된 색상: {color}")
+
+# ── 화면 배치: 2열 레이아웃(촘촘)
+st.subheader("— 121~130 모듈 (촘촘 레이아웃)")
+
+_compact_row([
+    ("🏷️ 121. 태그 메모", _mod_121),
+    ("🕒 122. 프롬프트 기록", _mod_122),
+])
+
+_compact_row([
+    ("📊 123. 세션 요약", _mod_123),
+    ("📝 124. TODO", _mod_124),
+])
+
+_compact_row([
+    ("💻 125. 코드 실행", _mod_125),
+    ("🧾 126. JSON 검사", _mod_126),
+])
+
+_compact_row([
+    ("🎲 127. 랜덤 메모", _mod_127),
+    ("🔢 128. 카운터", _mod_128),
+])
+
+_compact_row([
+    ("💾 129. 메모리 체크", _mod_129),
+    ("🎨 130. 색상 선택", _mod_130),
+])
+
+# ─────────────────────────────────────────────
+# 131~140 모듈 (촘촘 레이아웃, append-only)
+# ─────────────────────────────────────────────
+
+# 131. 간단 계산기
+def _mod_131():
+    st.caption("사칙연산 계산기")
+    n1 = st.number_input("숫자1", key="131_n1")
+    n2 = st.number_input("숫자2", key="131_n2")
+    op = st.selectbox("연산", ["+", "-", "*", "/"], key="131_op")
+    if st.button("계산", key="btn_131_calc"):
+        try:
+            if op == "+": st.success(n1 + n2)
+            elif op == "-": st.success(n1 - n2)
+            elif op == "*": st.success(n1 * n2)
+            elif op == "/": st.success(n1 / n2 if n2 != 0 else "0으로 나눌 수 없음")
+        except Exception as e:
+            st.error(f"에러: {e}")
+
+# 132. 미니 일정 메모
+if "132_schedules" not in st.session_state:
+    st.session_state["132_schedules"] = []
+
+def _mod_132():
+    st.caption("날짜별 일정 메모")
+    date = st.date_input("날짜", key="132_date")
+    note = st.text_input("일정", key="132_note")
+    if st.button("추가", key="btn_132_add"):
+        st.session_state["132_schedules"].append({"date": str(date), "note": note})
+    st.table(st.session_state["132_schedules"][-5:][::-1])
+
+# 133. 단어 빈도 세기
+def _mod_133():
+    st.caption("문장 입력 → 단어 빈도 계산")
+    text = st.text_area("문장 입력", key="133_text")
+    if st.button("분석", key="btn_133_run"):
+        from collections import Counter
+        words = text.split()
+        freq = Counter(words)
+        st.json(freq)
+
+# 134. 빠른 체크리스트
+if "134_checks" not in st.session_state:
+    st.session_state["134_checks"] = ["예제1", "예제2"]
+
+def _mod_134():
+    st.caption("체크리스트 관리")
+    for i, item in enumerate(st.session_state["134_checks"]):
+        st.checkbox(item, key=f"134_chk_{i}")
+
+# 135. 현재 위치 (위치 정보)
+def _mod_135():
+    st.caption("브라우저 위치 정보 (실험적)")
+    st.info("Streamlit에서 기본적으로 지원하지 않음. 추후 확장 가능 모듈")
+
+# 136. 간단 메모장
+if "136_notes" not in st.session_state:
+    st.session_state["136_notes"] = []
+
+def _mod_136():
+    st.caption("간단 메모장")
+    memo = st.text_area("메모", key="136_memo")
+    if st.button("저장", key="btn_136_save"):
+        st.session_state["136_notes"].append(memo)
+    st.write(st.session_state["136_notes"][-5:][::-1])
+
+# 137. 텍스트 길이 분석
+def _mod_137():
+    st.caption("텍스트 길이 및 통계")
+    t = st.text_area("텍스트", key="137_txt")
+    if t:
+        st.write(f"문자 수: {len(t)}")
+        st.write(f"단어 수: {len(t.split())}")
+
+# 138. 리스트 병합기
+def _mod_138():
+    st.caption("쉼표로 구분된 두 리스트 병합")
+    l1 = st.text_input("리스트1", key="138_l1")
+    l2 = st.text_input("리스트2", key="138_l2")
+    if st.button("병합", key="btn_138_merge"):
+        merged = l1.split(",") + l2.split(",")
+        st.write([x.strip() for x in merged if x.strip()])
+
+# 139. 문자열 대소문자 변환
+def _mod_139():
+    st.caption("문자열 → 대/소문자 변환")
+    s = st.text_input("문자열", key="139_str")
+    c1, c2 = st.columns(2)
+    if c1.button("대문자", key="btn_139_up"):
+        st.write(s.upper())
+    if c2.button("소문자", key="btn_139_low"):
+        st.write(s.lower())
+
+# 140. 난수 발생기
+def _mod_140():
+    st.caption("난수 생성")
+    import random
+    r = st.slider("범위", 1, 100, 10, key="140_rng")
+    if st.button("생성", key="btn_140_make"):
+        st.write(f"난수: {random.randint(1, r)}")
+
+# ── 화면 배치: 2열 레이아웃(촘촘)
+st.subheader("— 131~140 모듈 (촘촘 레이아웃)")
+
+_compact_row([
+    ("🧮 131. 계산기", _mod_131),
+    ("📅 132. 일정 메모", _mod_132),
+])
+
+_compact_row([
+    ("🔠 133. 단어 빈도", _mod_133),
+    ("☑️ 134. 체크리스트", _mod_134),
+])
+
+_compact_row([
+    ("📍 135. 위치 정보", _mod_135),
+    ("📝 136. 메모장", _mod_136),
+])
+
+_compact_row([
+    ("📏 137. 텍스트 분석", _mod_137),
+    ("➕ 138. 리스트 병합", _mod_138),
+])
+
+_compact_row([
+    ("🔡 139. 대소문자 변환", _mod_139),
+    ("🎲 140. 난수 생성", _mod_140),
+])
+
+# ─────────────────────────────────────────────
+# 141~150 모듈 (촘촘 레이아웃, append-only)
+# ─────────────────────────────────────────────
+
+# 141. 영단어 뒤집기
+def _mod_141():
+    st.caption("영단어 뒤집기")
+    word = st.text_input("영단어 입력", key="141_word")
+    if st.button("뒤집기", key="btn_141_rev"):
+        st.write(word[::-1])
+
+# 142. 간단 구구단
+def _mod_142():
+    st.caption("구구단")
+    n = st.number_input("단 선택", 2, 9, 2, key="142_n")
+    if st.button("출력", key="btn_142_run"):
+        st.write([f"{n} x {i} = {n*i}" for i in range(1, 10)])
+
+# 143. 섭씨 ↔ 화씨 변환
+def _mod_143():
+    st.caption("온도 변환")
+    c1, c2 = st.columns(2)
+    c = c1.number_input("섭씨", key="143_c")
+    if c1.button("→ 화씨", key="btn_143_c2f"):
+        st.success(round((c*9/5)+32, 2))
+    f = c2.number_input("화씨", key="143_f")
+    if c2.button("→ 섭씨", key="btn_143_f2c"):
+        st.success(round((f-32)*5/9, 2))
+
+# 144. 평균 계산기
+def _mod_144():
+    st.caption("숫자 리스트 평균")
+    nums = st.text_area("쉼표로 구분된 숫자", key="144_nums")
+    if st.button("평균", key="btn_144_avg"):
+        try:
+            arr = [float(x) for x in nums.split(",")]
+            st.success(sum(arr)/len(arr))
+        except:
+            st.error("올바른 숫자 입력 필요")
+
+# 145. 로또 번호 생성기
+def _mod_145():
+    import random
+    st.caption("로또 번호 생성기")
+    if st.button("생성", key="btn_145_lotto"):
+        st.write(sorted(random.sample(range(1, 46), 6)))
+
+# 146. 팩토리얼 계산
+def _mod_146():
+    st.caption("팩토리얼 계산")
+    n = st.number_input("n", 0, 20, 5, key="146_n")
+    if st.button("계산", key="btn_146_fact"):
+        import math
+        st.write(math.factorial(n))
+
+# 147. 피보나치 수열
+def _mod_147():
+    st.caption("피보나치")
+    n = st.number_input("개수", 1, 30, 5, key="147_n")
+    if st.button("출력", key="btn_147_fib"):
+        a, b, seq = 0, 1, []
+        for _ in range(n):
+            seq.append(a)
+            a, b = b, a+b
+        st.write(seq)
+
+# 148. 아스키 코드 변환
+def _mod_148():
+    st.caption("문자 ↔ 아스키")
+    c1, c2 = st.columns(2)
+    char = c1.text_input("문자", key="148_char")
+    if c1.button("→ ASCII", key="btn_148_to_ascii"):
+        st.write(ord(char) if char else "입력 필요")
+    num = c2.number_input("ASCII", 0, 127, 65, key="148_num")
+    if c2.button("→ 문자", key="btn_148_to_char"):
+        st.write(chr(num))
+
+# 149. 리스트 역순 정렬
+def _mod_149():
+    st.caption("리스트 역순")
+    lst = st.text_area("쉼표로 구분된 리스트", key="149_list")
+    if st.button("역순", key="btn_149_rev"):
+        arr = [x.strip() for x in lst.split(",") if x.strip()]
+        st.write(arr[::-1])
+
+# 150. 문자열 검색
+def _mod_150():
+    st.caption("텍스트에서 특정 단어 검색")
+    text = st.text_area("본문", key="150_text")
+    keyword = st.text_input("검색어", key="150_kw")
+    if st.button("검색", key="btn_150_search"):
+        count = text.count(keyword)
+        st.write(f"'{keyword}' 발견 횟수: {count}")
+
+# ── 화면 배치: 2열 레이아웃(촘촘)
+st.subheader("— 141~150 모듈 (촘촘 레이아웃)")
+
+_compact_row([
+    ("🔄 141. 단어 뒤집기", _mod_141),
+    ("🧮 142. 구구단", _mod_142),
+])
+
+_compact_row([
+    ("🌡 143. 온도 변환", _mod_143),
+    ("📊 144. 평균 계산", _mod_144),
+])
+
+_compact_row([
+    ("🎰 145. 로또 생성", _mod_145),
+    ("❗ 146. 팩토리얼", _mod_146),
+])
+
+_compact_row([
+    ("🔢 147. 피보나치", _mod_147),
+    ("🔡 148. ASCII 변환", _mod_148),
+])
+
+_compact_row([
+    ("↔️ 149. 리스트 역순", _mod_149),
+    ("🔍 150. 단어 검색", _mod_150),
+])
+
+# ─────────────────────────────────────────────
+# 151~160 모듈 (촘촘 레이아웃, append-only)
+# ─────────────────────────────────────────────
+
+# 151. 홀짝 판별
+def _mod_151():
+    st.caption("홀짝 판별")
+    n = st.number_input("숫자 입력", key="151_n")
+    if st.button("확인", key="btn_151_evenodd"):
+        st.write("짝수" if n % 2 == 0 else "홀수")
+
+# 152. 소수 판별
+def _mod_152():
+    st.caption("소수 판별")
+    n = st.number_input("정수 입력", 1, 10000, 7, key="152_n")
+    if st.button("판별", key="btn_152_prime"):
+        if n < 2: st.write("소수 아님")
+        else:
+            for i in range(2, int(n**0.5)+1):
+                if n % i == 0:
+                    st.write("소수 아님")
+                    return
+            st.success("소수")
+
+# 153. 문자열 길이
+def _mod_153():
+    st.caption("문자열 길이 계산")
+    txt = st.text_input("문자열", key="153_txt")
+    if st.button("길이", key="btn_153_len"):
+        st.write(len(txt))
+
+# 154. 리스트 합계
+def _mod_154():
+    st.caption("리스트 합계")
+    nums = st.text_area("쉼표 구분 숫자", key="154_nums")
+    if st.button("합계", key="btn_154_sum"):
+        try:
+            arr = [float(x) for x in nums.split(",")]
+            st.write(sum(arr))
+        except:
+            st.error("숫자만 입력하세요")
+
+# 155. 최대/최소 찾기
+def _mod_155():
+    st.caption("리스트 최대/최소")
+    nums = st.text_area("쉼표 구분 숫자", key="155_nums")
+    if st.button("계산", key="btn_155_maxmin"):
+        try:
+            arr = [float(x) for x in nums.split(",")]
+            st.write(f"최대: {max(arr)}, 최소: {min(arr)}")
+        except:
+            st.error("숫자만 입력하세요")
+
+# 156. 단어 개수 세기
+def _mod_156():
+    st.caption("단어 개수 세기")
+    txt = st.text_area("텍스트", key="156_txt")
+    if st.button("세기", key="btn_156_count"):
+        st.write(f"단어 수: {len(txt.split())}")
+
+# 157. 거꾸로 출력
+def _mod_157():
+    st.caption("문자열 거꾸로")
+    txt = st.text_input("문자열", key="157_txt")
+    if st.button("거꾸로", key="btn_157_rev"):
+        st.write(txt[::-1])
+
+# 158. BMI 계산기
+def _mod_158():
+    st.caption("BMI 계산")
+    h = st.number_input("키 (m)", 0.5, 2.5, 1.7, key="158_h")
+    w = st.number_input("체중 (kg)", 10, 200, 65, key="158_w")
+    if st.button("BMI 계산", key="btn_158_bmi"):
+        bmi = w / (h**2)
+        st.write(f"BMI: {bmi:.2f}")
+
+# 159. 단위 변환 (cm ↔ m)
+def _mod_159():
+    st.caption("단위 변환 cm ↔ m")
+    cm = st.number_input("센티미터", 0.0, 1000.0, 170.0, key="159_cm")
+    if st.button("cm → m", key="btn_159_cm2m"):
+        st.write(cm/100)
+    m = st.number_input("미터", 0.0, 10.0, 1.7, key="159_m")
+    if st.button("m → cm", key="btn_159_m2cm"):
+        st.write(m*100)
+
+# 160. 문자열 대소문자 변환
+def _mod_160():
+    st.caption("대소문자 변환")
+    txt = st.text_input("문자열", key="160_txt")
+    c1, c2 = st.columns(2)
+    if c1.button("대문자", key="btn_160_upper"):
+        st.write(txt.upper())
+    if c2.button("소문자", key="btn_160_lower"):
+        st.write(txt.lower())
+
+# ── 화면 배치: 2열 레이아웃
+st.subheader("— 151~160 모듈 (촘촘 레이아웃)")
+
+_compact_row([
+    ("🔢 151. 홀짝 판별", _mod_151),
+    ("🔍 152. 소수 판별", _mod_152),
+])
+
+_compact_row([
+    ("📏 153. 문자열 길이", _mod_153),
+    ("➕ 154. 리스트 합계", _mod_154),
+])
+
+_compact_row([
+    ("⬆️⬇️ 155. 최대/최소", _mod_155),
+    ("📖 156. 단어 개수", _mod_156),
+])
+
+_compact_row([
+    ("↩️ 157. 문자열 거꾸로", _mod_157),
+    ("⚖️ 158. BMI 계산", _mod_158),
+])
+
+_compact_row([
+    ("📐 159. cm ↔ m", _mod_159),
+    ("🔠 160. 대소문자 변환", _mod_160),
+])
+
+# ─────────────────────────────────────────────
+# 161~170 모듈 (촘촘 레이아웃, append-only)
+# ─────────────────────────────────────────────
+
+# 161. 섭씨 ↔ 화씨 변환
+def _mod_161():
+    st.caption("섭씨 ↔ 화씨 변환")
+    c = st.number_input("섭씨 (°C)", -100.0, 100.0, 0.0, key="161_c")
+    if st.button("섭씨→화씨", key="btn_161_c2f"):
+        st.write((c * 9/5) + 32)
+    f = st.number_input("화씨 (°F)", -200.0, 200.0, 32.0, key="161_f")
+    if st.button("화씨→섭씨", key="btn_161_f2c"):
+        st.write((f - 32) * 5/9)
+
+# 162. 삼각형 넓이
+def _mod_162():
+    st.caption("삼각형 넓이")
+    b = st.number_input("밑변", 0.0, 1000.0, 10.0, key="162_b")
+    h = st.number_input("높이", 0.0, 1000.0, 5.0, key="162_h")
+    if st.button("계산", key="btn_162_area"):
+        st.write(0.5 * b * h)
+
+# 163. 원 넓이
+def _mod_163():
+    st.caption("원 넓이")
+    r = st.number_input("반지름", 0.0, 1000.0, 3.0, key="163_r")
+    if st.button("계산", key="btn_163_circle"):
+        st.write(3.14159 * (r**2))
+
+# 164. 직사각형 넓이
+def _mod_164():
+    st.caption("직사각형 넓이")
+    w = st.number_input("가로", 0.0, 1000.0, 4.0, key="164_w")
+    h = st.number_input("세로", 0.0, 1000.0, 6.0, key="164_h")
+    if st.button("계산", key="btn_164_rect"):
+        st.write(w * h)
+
+# 165. 속도 = 거리 / 시간
+def _mod_165():
+    st.caption("속도 계산")
+    d = st.number_input("거리 (km)", 0.0, 10000.0, 100.0, key="165_d")
+    t = st.number_input("시간 (h)", 0.1, 1000.0, 2.0, key="165_t")
+    if st.button("속도", key="btn_165_speed"):
+        st.write(d/t)
+
+# 166. BMI 카테고리
+def _mod_166():
+    st.caption("BMI 카테고리")
+    bmi = st.number_input("BMI", 0.0, 60.0, 22.0, key="166_bmi")
+    if st.button("판정", key="btn_166_bmi"):
+        if bmi < 18.5: st.write("저체중")
+        elif bmi < 25: st.write("정상")
+        elif bmi < 30: st.write("과체중")
+        else: st.write("비만")
+
+# 167. 구의 부피
+def _mod_167():
+    st.caption("구의 부피")
+    r = st.number_input("반지름", 0.0, 1000.0, 2.0, key="167_r")
+    if st.button("계산", key="btn_167_sphere"):
+        st.write((4/3) * 3.14159 * (r**3))
+
+# 168. 평균 계산
+def _mod_168():
+    st.caption("평균 계산")
+    nums = st.text_area("숫자 입력 (쉼표)", key="168_nums")
+    if st.button("평균", key="btn_168_avg"):
+        try:
+            arr = [float(x) for x in nums.split(",")]
+            st.write(sum(arr)/len(arr))
+        except:
+            st.error("숫자만 입력하세요")
+
+# 169. 제곱/제곱근
+def _mod_169():
+    st.caption("제곱/제곱근")
+    n = st.number_input("숫자", 0.0, 10000.0, 9.0, key="169_n")
+    c1, c2 = st.columns(2)
+    if c1.button("제곱", key="btn_169_sq"):
+        st.write(n**2)
+    if c2.button("제곱근", key="btn_169_sqrt"):
+        st.write(n**0.5)
+
+# 170. 절댓값
+def _mod_170():
+    st.caption("절댓값")
+    n = st.number_input("숫자", -10000.0, 10000.0, -7.0, key="170_n")
+    if st.button("절댓값", key="btn_170_abs"):
+        st.write(abs(n))
+
+# ── 화면 배치: 2열 레이아웃
+st.subheader("— 161~170 모듈 (촘촘 레이아웃)")
+
+_compact_row([
+    ("🌡️ 161. 섭씨 ↔ 화씨", _mod_161),
+    ("△ 162. 삼각형 넓이", _mod_162),
+])
+
+_compact_row([
+    ("⚪ 163. 원 넓이", _mod_163),
+    ("⬛ 164. 직사각형 넓이", _mod_164),
+])
+
+_compact_row([
+    ("🚗 165. 속도 계산", _mod_165),
+    ("⚖️ 166. BMI 카테고리", _mod_166),
+])
+
+_compact_row([
+    ("🌍 167. 구의 부피", _mod_167),
+    ("➗ 168. 평균 계산", _mod_168),
+])
+
+_compact_row([
+    ("✖️ 169. 제곱/제곱근", _mod_169),
+    ("➖ 170. 절댓값", _mod_170),
+])
+
+# ─────────────────────────────────────────────
+# 171~180 모듈 (촘촘 레이아웃, append-only)
+# ─────────────────────────────────────────────
+
+# 171. 문자열 뒤집기
+def _mod_171():
+    st.caption("문자열 뒤집기")
+    txt = st.text_input("문자 입력", key="171_txt")
+    if st.button("뒤집기", key="btn_171_rev"):
+        st.write(txt[::-1])
+
+# 172. 문자열 길이
+def _mod_172():
+    st.caption("문자열 길이")
+    txt = st.text_input("문자 입력", key="172_txt")
+    if st.button("길이", key="btn_172_len"):
+        st.write(len(txt))
+
+# 173. 문자열 대소문자 변환
+def _mod_173():
+    st.caption("대소문자 변환")
+    txt = st.text_input("문자 입력", key="173_txt")
+    c1, c2 = st.columns(2)
+    if c1.button("대문자", key="btn_173_upper"):
+        st.write(txt.upper())
+    if c2.button("소문자", key="btn_173_lower"):
+        st.write(txt.lower())
+
+# 174. 단어 수 세기
+def _mod_174():
+    st.caption("단어 수 세기")
+    txt = st.text_area("문장 입력", key="174_txt")
+    if st.button("단어 수", key="btn_174_wc"):
+        st.write(len(txt.split()))
+
+# 175. 모음 수 세기
+def _mod_175():
+    st.caption("모음 수 세기")
+    txt = st.text_input("문자 입력", key="175_txt")
+    if st.button("모음 수", key="btn_175_vowels"):
+        st.write(sum(1 for ch in txt.lower() if ch in "aeiou"))
+
+# 176. 자음 수 세기
+def _mod_176():
+    st.caption("자음 수 세기")
+    txt = st.text_input("문자 입력", key="176_txt")
+    if st.button("자음 수", key="btn_176_cons"):
+        st.write(sum(1 for ch in txt.lower() if ch.isalpha() and ch not in "aeiou"))
+
+# 177. 회문(팰린드롬) 판정
+def _mod_177():
+    st.caption("회문 판정")
+    txt = st.text_input("문자 입력", key="177_txt")
+    if st.button("확인", key="btn_177_pal"):
+        st.write("회문 맞음" if txt == txt[::-1] else "회문 아님")
+
+# 178. 아스키 코드 변환
+def _mod_178():
+    st.caption("아스키 코드 변환")
+    txt = st.text_input("문자 입력 (1글자)", key="178_txt")
+    if st.button("코드값", key="btn_178_code"):
+        if len(txt) == 1:
+            st.write(ord(txt))
+        else:
+            st.error("1글자만 입력하세요")
+
+# 179. 합계 계산기
+def _mod_179():
+    st.caption("합계 계산기")
+    nums = st.text_area("숫자 입력 (쉼표)", key="179_nums")
+    if st.button("합계", key="btn_179_sum"):
+        try:
+            arr = [float(x) for x in nums.split(",")]
+            st.write(sum(arr))
+        except:
+            st.error("숫자만 입력하세요")
+
+# 180. 최대값/최소값 찾기
+def _mod_180():
+    st.caption("최대/최소값")
+    nums = st.text_area("숫자 입력 (쉼표)", key="180_nums")
+    if st.button("최대/최소", key="btn_180_minmax"):
+        try:
+            arr = [float(x) for x in nums.split(",")]
+            st.write(f"최대: {max(arr)}, 최소: {min(arr)}")
+        except:
+            st.error("숫자만 입력하세요")
+
+# ── 화면 배치: 2열 레이아웃
+st.subheader("— 171~180 모듈 (촘촘 레이아웃)")
+
+_compact_row([
+    ("🔄 171. 문자열 뒤집기", _mod_171),
+    ("📏 172. 문자열 길이", _mod_172),
+])
+
+_compact_row([
+    ("🔠 173. 대소문자 변환", _mod_173),
+    ("📝 174. 단어 수 세기", _mod_174),
+])
+
+_compact_row([
+    ("🔤 175. 모음 수", _mod_175),
+    ("🔡 176. 자음 수", _mod_176),
+])
+
+_compact_row([
+    ("🔁 177. 회문 판정", _mod_177),
+    ("🔢 178. 아스키 변환", _mod_178),
+])
+
+_compact_row([
+    ("➕ 179. 합계", _mod_179),
+    ("📉 180. 최대/최소값", _mod_180),
+])
+
+# ─────────────────────────────────────────────
+# 181~190 모듈 (촘촘 레이아웃, append-only)
+# ─────────────────────────────────────────────
+
+import time, json, base64, difflib, io, zipfile
+from urllib.parse import quote, unquote
+from pathlib import Path
+
+# 181. 문자열 찾기/바꾸기
+def _mod_181():
+    st.caption("문자열 찾기/바꾸기")
+    s = st.text_area("대상 텍스트", key="181_src")
+    c1, c2 = st.columns(2)
+    find = c1.text_input("찾을 문자/패턴", key="181_find")
+    repl = c2.text_input("바꿀 문자", key="181_repl")
+    if st.button("치환", key="btn_181_do"):
+        st.code(s.replace(find, repl))
+
+# 182. 정규식 테스트(간단)
+def _mod_182():
+    st.caption("정규식 매칭 테스트 (파이썬 re)")
+    pat = st.text_input("패턴 (예: ^ab.+$)", key="182_pat")
+    txt = st.text_area("본문", key="182_txt")
+    if st.button("매칭", key="btn_182_re"):
+        import re
+        try:
+            m = list(re.finditer(pat, txt, re.MULTILINE))
+            st.success(f"매치 수: {len(m)}")
+            for i, mm in enumerate(m[:20], 1):
+                st.write(f"{i}. span={mm.span()} • '{mm.group(0)}'")
+        except Exception as e:
+            st.error(f"패턴 오류: {e}")
+
+# 183. 타이머/스톱워치
+if "183_start" not in st.session_state:
+    st.session_state["183_start"] = None
+
+def _mod_183():
+    st.caption("스톱워치")
+    c1, c2, c3 = st.columns(3)
+    if c1.button("시작", key="btn_183_start"):
+        st.session_state["183_start"] = time.time()
+    if c2.button("정지", key="btn_183_stop"):
+        st.session_state["183_start"] = None
+    if c3.button("랩", key="btn_183_lap") and st.session_state["183_start"]:
+        st.write(f"랩: {time.time()-st.session_state['183_start']:.2f}s")
+    if st.session_state["183_start"]:
+        st.metric("경과(초)", f"{time.time()-st.session_state['183_start']:.2f}")
+
+# 184. 랜덤 비밀번호 생성
+def _mod_184():
+    st.caption("랜덤 비밀번호 생성")
+    import random, string
+    length = st.slider("길이", 6, 64, 16, key="184_len")
+    use_sym = st.checkbox("기호 포함", True, key="184_sym")
+    pool = string.ascii_letters + string.digits + (string.punctuation if use_sym else "")
+    if st.button("생성", key="btn_184_make"):
+        pwd = "".join(random.choice(pool) for _ in range(length))
+        st.code(pwd)
+
+# 185. URL 인코딩/디코딩
+def _mod_185():
+    st.caption("URL 인코딩/디코딩")
+    s = st.text_input("문자열", key="185_s")
+    c1, c2 = st.columns(2)
+    if c1.button("인코딩", key="btn_185_enc"):
+        st.code(quote(s, safe=""))
+    if c2.button("디코딩", key="btn_185_dec"):
+        st.code(unquote(s))
+
+# 186. Base64 인코더/디코더
+def _mod_186():
+    st.caption("Base64 인코딩/디코딩")
+    tab = st.radio("모드", ["인코드", "디코드"], horizontal=True, key="186_mode")
+    if tab == "인코드":
+        txt = st.text_area("평문", key="186_plain")
+        if st.button("인코딩", key="btn_186_enc"):
+            st.code(base64.b64encode(txt.encode("utf-8")).decode("ascii"))
+    else:
+        b64 = st.text_area("Base64", key="186_b64")
+        if st.button("디코딩", key="btn_186_dec"):
+            try:
+                st.code(base64.b64decode(b64.encode("ascii")).decode("utf-8"))
+            except Exception as e:
+                st.error(f"디코딩 실패: {e}")
+
+# 187. 텍스트 Diff(줄 단위)
+def _mod_187():
+    st.caption("두 텍스트의 차이(Diff)")
+    left = st.text_area("A", key="187_a")
+    right = st.text_area("B", key="187_b")
+    if st.button("비교", key="btn_187_diff"):
+        diff = difflib.unified_diff(left.splitlines(), right.splitlines(), lineterm="")
+        st.code("\n".join(diff) or "(차이 없음)")
+
+# 188. JSON 병합(얕은 수준)
+def _mod_188():
+    st.caption("JSON 두 개를 딕셔너리로 병합 (겹치면 B가 우선)")
+    a = st.text_area("JSON A", key="188_a")
+    b = st.text_area("JSON B", key="188_b")
+    if st.button("병합", key="btn_188_merge"):
+        try:
+            da, db = json.loads(a or "{}"), json.loads(b or "{}")
+            da.update(db)
+            st.json(da)
+        except Exception as e:
+            st.error(f"JSON 파싱 실패: {e}")
+
+# 189. Markdown 미리보기
+def _mod_189():
+    st.caption("Markdown 미리보기")
+    md = st.text_area("Markdown 입력", key="189_md", value="# 제목\n- 리스트1\n- 리스트2\n**굵게**와 *기울임*")
+    if st.button("렌더링", key="btn_189_md"):
+        st.markdown(md)
+
+# 190. ZIP 압축/해제(업로드 기반)
+def _mod_190():
+    st.caption("간단 ZIP 압축/해제 (로컬 세션 한정)")
+    mode = st.radio("모드", ["압축", "해제"], horizontal=True, key="190_mode")
+    if mode == "압축":
+        files = st.file_uploader("여러 파일 선택", accept_multiple_files=True, key="190_files")
+        out_name = st.text_input("출력 zip 이름", "bundle.zip", key="190_out")
+        if st.button("압축 만들기", key="btn_190_zip") and files:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for f in files:
+                    zf.writestr(f.name, f.read())
+            st.download_button("ZIP 다운로드", data=buf.getvalue(), file_name=out_name, mime="application/zip")
+    else:
+        z = st.file_uploader("ZIP 업로드", type=["zip"], key="190_zip")
+        if z and st.button("목록 보기", key="btn_190_list"):
+            with zipfile.ZipFile(io.BytesIO(z.read())) as zf:
+                st.write(zf.namelist())
+
+# ── 화면 배치: 2열 레이아웃(촘촘)
+st.subheader("— 181~190 모듈 (촘촘 레이아웃)")
+
+_compact_row([
+    ("🪄 181. 찾기/바꾸기", _mod_181),
+    ("🧩 182. 정규식 테스트", _mod_182),
+])
+
+_compact_row([
+    ("⏱️ 183. 스톱워치", _mod_183),
+    ("🔐 184. 비밀번호 생성", _mod_184),
+])
+
+_compact_row([
+    ("🔗 185. URL 인코딩", _mod_185),
+    ("🧬 186. Base64", _mod_186),
+])
+
+_compact_row([
+    ("🆚 187. 텍스트 Diff", _mod_187),
+    ("🧷 188. JSON 병합", _mod_188),
+])
+
+_compact_row([
+    ("📄 189. Markdown 미리보기", _mod_189),
+    ("🗜️ 190. ZIP 압축/해제", _mod_190),
+])
+
+# ─────────────────────────────────────────────
+# 191~200 모듈 (촘촘 레이아웃, append-only)
+# ─────────────────────────────────────────────
+
+import hashlib, random, statistics, html
+
+# 191. 해시 계산기 (MD5, SHA256 등)
+def _mod_191():
+    st.caption("해시 계산기")
+    txt = st.text_area("문자열 입력", key="191_txt")
+    algo = st.selectbox("알고리즘", ["md5","sha1","sha256","sha512"], key="191_algo")
+    if st.button("계산", key="btn_191_hash"):
+        h = getattr(hashlib, algo)(txt.encode("utf-8")).hexdigest()
+        st.code(h)
+
+# 192. 난수 발생기
+def _mod_192():
+    st.caption("난수 발생기")
+    low, high = st.number_input("최소값", value=0, key="192_low"), st.number_input("최대값", value=100, key="192_high")
+    if st.button("생성", key="btn_192_rand"):
+        st.success(random.randint(int(low), int(high)))
+
+# 193. 간단 통계 계산
+def _mod_193():
+    st.caption("간단 통계")
+    data = st.text_area("숫자 쉼표 입력", key="193_data", value="1,2,3,4,5")
+    if st.button("계산", key="btn_193_stat"):
+        try:
+            nums = [float(x) for x in data.split(",") if x.strip()]
+            st.write(f"평균: {statistics.mean(nums)}")
+            st.write(f"중앙값: {statistics.median(nums)}")
+            st.write(f"분산: {statistics.pvariance(nums)}")
+        except Exception as e:
+            st.error(f"오류: {e}")
+
+# 194. HTML Escape / Unescape
+def _mod_194():
+    st.caption("HTML Escape/Unescape")
+    s = st.text_area("문자열", key="194_s")
+    c1, c2 = st.columns(2)
+    if c1.button("Escape", key="btn_194_esc"): st.code(html.escape(s))
+    if c2.button("Unescape", key="btn_194_unesc"): st.code(html.unescape(s))
+
+# 195. 단어 카운터
+def _mod_195():
+    st.caption("단어 수 세기")
+    s = st.text_area("텍스트", key="195_s")
+    if st.button("세기", key="btn_195_cnt"):
+        st.write(f"단어 수: {len(s.split())}")
+        st.write(f"문자 수: {len(s)}")
+
+# 196. 줄 수 세기
+def _mod_196():
+    st.caption("줄 수 세기")
+    s = st.text_area("텍스트", key="196_s")
+    if st.button("세기", key="btn_196_lines"):
+        st.write(f"줄 수: {len(s.splitlines())}")
+
+# 197. 문자열 반전
+def _mod_197():
+    st.caption("문자열 반전")
+    s = st.text_input("문자열", key="197_s")
+    if st.button("반전", key="btn_197_rev"):
+        st.code(s[::-1])
+
+# 198. Palindrome 판정
+def _mod_198():
+    st.caption("Palindrome 판정")
+    s = st.text_input("문자열", key="198_s")
+    if st.button("체크", key="btn_198_pal"):
+        cleaned = "".join(ch.lower() for ch in s if ch.isalnum())
+        st.write("✅ Palindrome" if cleaned == cleaned[::-1] else "❌ Not Palindrome")
+
+# 199. ROT13 변환
+def _mod_199():
+    st.caption("ROT13 변환")
+    s = st.text_input("문자열", key="199_s")
+    if st.button("변환", key="btn_199_rot"):
+        import codecs
+        st.code(codecs.encode(s, "rot_13"))
+
+# 200. 간단 BMI 계산기
+def _mod_200():
+    st.caption("BMI 계산기")
+    h = st.number_input("키 (cm)", value=170, key="200_h")
+    w = st.number_input("몸무게 (kg)", value=65, key="200_w")
+    if st.button("계산", key="btn_200_bmi"):
+        bmi = w / ((h/100)**2)
+        st.metric("BMI", f"{bmi:.2f}")
+
+# ── 화면 배치: 2열 레이아웃
+st.subheader("— 191~200 모듈 (촘촘 레이아웃)")
+
+_compact_row([
+    ("🔑 191. 해시 계산기", _mod_191),
+    ("🎲 192. 난수 발생기", _mod_192),
+])
+
+_compact_row([
+    ("📊 193. 통계", _mod_193),
+    ("🧾 194. HTML Escape", _mod_194),
+])
+
+_compact_row([
+    ("📝 195. 단어 카운트", _mod_195),
+    ("📏 196. 줄 수 카운트", _mod_196),
+])
+
+_compact_row([
+    ("🔄 197. 문자열 반전", _mod_197),
+    ("🪞 198. Palindrome", _mod_198),
+])
+
+_compact_row([
+    ("🔐 199. ROT13", _mod_199),
+    ("⚖️ 200. BMI 계산기", _mod_200),
+])
+
