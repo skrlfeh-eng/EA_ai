@@ -7543,3 +7543,71 @@ st.caption(f"현재 상태: {'ACTIVE(요청형 자율)' if st.session_state.auto
 # 참고: 이 미니 게이트는 실제 자가수정/실행 권한을 열지 않는다.
 # 나중에 SPX-3(풀 게이트)에서 ARC·샌드박스·2-phase commit 조건을 추가로 검증 후 열어준다.
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# 232 / SPX-3 — 활성화 게이트(풀버전) 특별판
+# 목적: 자율모드 전환 시 5중 조건 체크 → 통과 시만 허용
+import streamlit as st
+from datetime import datetime
+
+# ===== 유틸 =====
+def _bb():
+    bb = st.session_state.get("spx_backbone") or st.session_state.get("bb_backbone")
+    return bb if isinstance(bb, dict) else {}
+def _bb_avg():
+    vals = [v for v in _bb().values()]
+    return int(round(sum(vals)/len(vals))) if vals else 0
+def _policy_block_on():
+    if "spx_policy_block" in st.session_state: return st.session_state.spx_policy_block
+    if "bb_block_flesh" in st.session_state: return st.session_state.bb_block_flesh
+    return True
+
+# ===== 초기화 =====
+if "autonomy_full" not in st.session_state:
+    st.session_state.autonomy_full = False
+if "safety_logs" not in st.session_state:
+    st.session_state.safety_logs = {
+        "validation_score": 0.0,   # 초검증 재현성 (0~1)
+        "arc_events": 0,           # ARC 체인로그 이벤트 수
+        "kill_switch": False,      # 긴급 중지 상태
+    }
+
+# ===== UI =====
+st.markdown("### ⚡ 232 · SPX-3 활성화 게이트(풀버전) — 특별판")
+
+bb_avg = _bb_avg()
+policy_block = _policy_block_on()
+val_score = st.session_state.safety_logs["validation_score"]
+arc_events = st.session_state.safety_logs["arc_events"]
+kill_switch = st.session_state.safety_logs["kill_switch"]
+
+st.write(f"- 척추 평균: **{bb_avg}%**")
+st.write(f"- 정책 상태: **{'BLOCK' if policy_block else 'ALLOW'}**")
+st.write(f"- 재현성 점수: **{val_score:.2f}**")
+st.write(f"- ARC 이벤트 수: **{arc_events}**")
+st.write(f"- 긴급중지: **{'ON' if kill_switch else 'OFF'}**")
+
+want_on = st.toggle("자율 활성화(풀버전 요청)", value=st.session_state.autonomy_full)
+
+# ===== 판정 =====
+if want_on:
+    errors = []
+    if bb_avg < 80: errors.append("척추 평균 < 80%")
+    if policy_block: errors.append("정책 BLOCK")
+    if val_score < 0.93: errors.append("재현성 점수 < 0.93")
+    if arc_events < 1: errors.append("ARC 이벤트 부족")
+    if kill_switch: errors.append("긴급중지 ON")
+    
+    if errors:
+        st.error("⛔ 활성화 거부: " + " · ".join(errors))
+        st.session_state.autonomy_full = False
+    else:
+        st.success("✅ 활성화 허용: 모든 조건 충족.")
+        st.session_state.autonomy_full = True
+else:
+    st.session_state.autonomy_full = False
+    st.info("🔒 비활성화")
+
+# ===== 상태 표시 =====
+st.caption(f"현재 상태: {'ACTIVE(자율 풀모드)' if st.session_state.autonomy_full else 'INACTIVE'} · {datetime.utcnow().isoformat()}Z")
+
+# ───────────────────────────────────────────────
