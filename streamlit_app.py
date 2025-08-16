@@ -4174,94 +4174,95 @@ with st.expander("🛡️ 095. 런타임/캐시 진단", expanded=False):
     st.write("4) 필요 시 **Upload files**로 `streamlit_app.py` 직접 덮어쓰기")
     
   # ———————————————————————————————————————————————————————————
-# 096~100 통합: 런타임/캐시 진단 · 성능 측정 · 리포트 · 의존성 점검 · 안전모드
-# (psutil 없으면 우회, 있으면 고급 지표 표시)
+# 096~100 v3: 섹션 헤더 분리 + 번호 포함 expander (키 충돌 없음)
 # ———————————————————————————————————————————————————————————
 import os, sys, time, json, platform, traceback
+import streamlit as st
 try:
-    import psutil  # 선택: 없으면 None 유지
+    import psutil
 except Exception:
     psutil = None
-
-import tracemalloc
 try:
-    import resource  # Linux/Unix 표준 라이브러리
+    import tracemalloc
+except Exception:
+    tracemalloc = None
+try:
+    import resource
 except Exception:
     resource = None
 
-def _mem_bytes():
-    """현재 프로세스 메모리 사용량(RSS) 바이트"""
+def _mem_bytes_v3():
     try:
         if psutil:
             return psutil.Process(os.getpid()).memory_info().rss
         if resource:
-            # Linux: ru_maxrss는 KB, macOS는 bytes. Linux 기준으로 1024 곱.
             mult = 1024 if platform.system() != "Darwin" else 1
             return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * mult
     except Exception:
         pass
     return None
 
-def _fmt_mb(b):
+def _fmt_mb_v3(b):
     return f"{b/1024/1024:.2f} MB" if b is not None else "N/A"
 
-# 096. 런타임/캐시 진단
+# ===== 096 =====
+st.divider()
+st.markdown("— **096 모듈 로드됨**")
 with st.expander("096. 런타임/캐시 진단 (psutil 없어도 동작)", expanded=False):
-    st.caption("의존성 없이 동작합니다. psutil 설치 시 더 많은 지표가 열립니다.")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Python", sys.version.split()[0])
-    col2.metric("OS", f"{platform.system()} {platform.release()}")
-    col3.metric("PID", os.getpid())
+    st.caption("의존성 없어도 동작. psutil 있으면 지표 확장.")
+    c0, c1, c2 = st.columns(3)
+    c0.metric("Python", sys.version.split()[0])
+    c1.metric("OS", f"{platform.system()} {platform.release()}")
+    c2.metric("PID", os.getpid())
 
-    mem = _mem_bytes()
+    mem = _mem_bytes_v3()
     cpu = (psutil.cpu_percent(interval=0.2) if psutil else None)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("메모리(RSS)", _fmt_mb(mem))
-    c2.metric("CPU%", f"{cpu:.1f}%" if cpu is not None else "N/A")
-    c3.metric("psutil", "OK" if psutil else "미설치")
+    d0, d1, d2 = st.columns(3)
+    d0.metric("메모리(RSS)", _fmt_mb_v3(mem))
+    d1.metric("CPU%", f"{cpu:.1f}%" if cpu is not None else "N/A")
+    d2.metric("psutil", "OK" if psutil else "미설치")
 
     b1, b2, b3, b4 = st.columns(4)
-    if b1.button("캐시 비우기", key="m096v2_btn_clear"):
+    if b1.button("캐시 비우기", key="m096v3_clear"):
         st.cache_data.clear(); st.cache_resource.clear()
         st.success("캐시 삭제 완료")
-
-    if b2.button("세션 초기화", key="m096v2_btn_reset"):
+    if b2.button("세션 초기화", key="m096v3_reset"):
         st.session_state.clear()
         st.success("세션 초기화 완료")
-
-    if b3.button("스냅샷 시작", key="m096v2_btn_snap_start"):
-        if not tracemalloc.is_tracing():
-            tracemalloc.start()
-            st.info("tracemalloc 시작")
+    if b3.button("스냅샷 시작", key="m096v3_snap_start"):
+        if tracemalloc and not tracemalloc.is_tracing():
+            tracemalloc.start(); st.info("tracemalloc 시작")
         else:
-            st.warning("이미 실행 중")
-
-    if b4.button("스냅샷 보기/정지", key="m096v2_btn_snap_show"):
-        if tracemalloc.is_tracing():
+            st.warning("tracemalloc 사용 불가 또는 이미 실행 중")
+    if b4.button("스냅샷 보기/정지", key="m096v3_snap_show"):
+        if tracemalloc and tracemalloc.is_tracing():
             snap = tracemalloc.take_snapshot()
             top = snap.statistics("lineno")[:5]
-            st.write("\n".join([f"{i+1}. {stat}" for i, stat in enumerate(top)]))
+            st.code("\n".join([f"{i+1}. {stat}" for i, stat in enumerate(top)]))
             tracemalloc.stop()
         else:
             st.info("스냅샷이 켜져있지 않음")
 
-# 097. 3초 간이 성능 측정
+# ===== 097 =====
+st.divider()
+st.markdown("— **097 모듈 로드됨**")
 with st.expander("097. 3초 간이 성능 측정", expanded=False):
-    if st.button("측정 실행", key="m097v2_run"):
+    if st.button("측정 실행", key="m097v3_run"):
         t0 = time.time(); cnt = 0
         while time.time() - t0 < 3.0:
             cnt += 1
-        ips = cnt / 3.0
-        st.write(f"루프/초: **{ips:,.0f}**")
+        st.write(f"루프/초: **{cnt/3.0:,.0f}**")
 
-# 098. 상태 리포트 JSON
+# ===== 098 =====
+st.divider()
+st.markdown("— **098 모듈 로드됨**")
 with st.expander("098. 상태 리포트 JSON", expanded=False):
     report = {
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "python": sys.version,
         "platform": {"system": platform.system(), "release": platform.release()},
         "pid": os.getpid(),
-        "mem_rss_bytes": _mem_bytes(),
+        "mem_rss_bytes": _mem_bytes_v3(),
         "cpu_percent": (psutil.cpu_percent(interval=0.1) if psutil else None),
         "psutil": bool(psutil),
     }
@@ -4270,9 +4271,11 @@ with st.expander("098. 상태 리포트 JSON", expanded=False):
         data=json.dumps(report, ensure_ascii=False, indent=2),
         file_name="gea_runtime_report.json",
         mime="application/json",
-        key="m098v2_dl")
+        key="m098v3_dl")
 
-# 099. 권장 의존성 점검
+# ===== 099 =====
+st.divider()
+st.markdown("— **099 모듈 로드됨**")
 with st.expander("099. 권장 의존성 점검", expanded=False):
     missing = []
     if psutil is None:
@@ -4283,9 +4286,11 @@ with st.expander("099. 권장 의존성 점검", expanded=False):
     else:
         st.success("필수/권장 의존성 OK")
 
-# 100. 안전모드 토글
+# ===== 100 =====
+st.divider()
+st.markdown("— **100 모듈 로드됨**")
 with st.expander("100. 안전모드 토글", expanded=False):
-    safe = st.toggle("안전모드(무거운 계산 비활성화)", key="m100v2_safe", value=False)
+    safe = st.toggle("안전모드(무거운 계산 비활성화)", key="m100v3_safe", value=False)
     st.session_state["GEA_SAFE_MODE"] = safe
     st.write("현재:", "ON" if safe else "OFF")
     
