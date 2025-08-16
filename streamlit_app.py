@@ -4494,4 +4494,133 @@ with st.expander("105. 활성/비활성 & 자가진화(시뮬)", expanded=False)
     if st.button("진화 로그 확인", key="m105_show"):
         st.json(_load_jsonl("data/evolution.jsonl"))
         
-        
+        # ─────────────────────────────────────────────
+# 106~108 촘촘 레이아웃(2 columns) 모듈 추가 (append-only)
+# ─────────────────────────────────────────────
+
+import re, json, time, platform, sys, hashlib
+from datetime import datetime
+from pathlib import Path
+
+def _compact_row(expanders):
+    """expanders = [("제목", callable), ("제목", callable), ...]  길이 1~2"""
+    cols = st.columns(2)
+    for i, item in enumerate(expanders):
+        if i >= 2:  # 한 줄에 2개만
+            st.write("")  # 남는 건 무시
+            continue
+        title, render = item
+        with cols[i]:
+            with st.expander(title, expanded=False):
+                render()
+
+# ── 106. 실험 스냅샷 & 재현(환경/버전/설정 저장)
+def _mod_106():
+    st.caption("실행 환경/버전/설정 스냅샷을 JSON으로 저장하고 재현에 도움을 줍니다.")
+    snap_dir = Path(".gea_snaps"); snap_dir.mkdir(exist_ok=True)
+    default_name = f"snap_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    name = st.text_input("스냅샷 파일명", value=default_name, key="106_name")
+    include_ss = st.checkbox("Session State 포함", value=True, key="106_ss")
+    if st.button("스냅샷 생성/저장", key="btn_106_save"):
+        snapshot = {
+            "timestamp": datetime.now().isoformat(),
+            "python": sys.version,
+            "platform": platform.platform(),
+            "argv": sys.argv,
+            "installed": sorted(list(sys.modules.keys()))[:300],  # 가벼운 요약
+        }
+        if include_ss:
+            try:
+                # 세션 상태를 덤프 가능 형태로 변환
+                ss = {k: v if isinstance(v, (str,int,float,bool,list,dict,type(None))) else str(v)
+                      for k,v in st.session_state.items()}
+                snapshot["session_state"] = ss
+            except Exception as e:
+                snapshot["session_state_error"] = str(e)
+        (snap_dir / name).write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+        st.success(f"스냅샷 저장 완료: {snap_dir / name}")
+
+    files = sorted(snap_dir.glob("*.json"))
+    if files:
+        sel = st.selectbox("스냅샷 열람", [f.name for f in files], key="106_sel")
+        if st.button("열기", key="btn_106_open"):
+            data = json.loads((snap_dir/sel).read_text(encoding="utf-8"))
+            st.json(data)
+    else:
+        st.info("아직 저장된 스냅샷이 없습니다.")
+
+# ── 107. 로그 필터 & 익명화(PII 마스킹)
+_PII_PATTERNS = [
+    (re.compile(r"\b\d{3}-\d{2}-\d{5}\b"), "SSN"),         # 예시: 123-45-67890
+    (re.compile(r"\b\d{3}-\d{3,4}-\d{4}\b"), "PHONE"),     # 한국 전화
+    (re.compile(r"\b[0-9A-Za-z._%+-]+@[0-9A-Za-z.-]+\.[A-Za-z]{2,}\b"), "EMAIL"),
+]
+
+def _mask_pii(text: str) -> str:
+    masked = text
+    for pat, tag in _PII_PATTERNS:
+        masked = pat.sub(lambda m: f"<{tag}:{hashlib.sha1(m.group(0).encode()).hexdigest()[:8]}>", masked)
+    return masked
+
+def _mod_107():
+    st.caption("로그 내 개인식별정보(PII)를 간단히 마스킹합니다.")
+    raw = st.text_area("원본 로그/텍스트", height=150, key="107_raw",
+                       placeholder="예: 에메일 a@b.com, 전화 010-1234-5678 ...")
+    if st.button("마스킹 실행", key="btn_107_mask"):
+        st.code(_mask_pii(raw))
+    st.checkbox("마스킹 결과를 이벤트 로그에 기록", key="107_log_toggle", value=False)
+    if st.session_state.get("107_log_toggle") and raw:
+        # 093 모듈의 로거가 있다면 거기로 연동할 수도 있음. 여기선 간단 출력.
+        st.info("※ 실제 로거 연동 지점: 마스킹된 텍스트를 안전 로그로 전송")
+
+# ── 108. 헬스체크 & 간이 알림(지연/오류 카운터)
+if "108_stats" not in st.session_state:
+    st.session_state["108_stats"] = {"runs": 0, "slow": 0, "errors": 0, "avg_ms": 0.0}
+
+def _mod_108():
+    st.caption("간단한 지연/오류 모니터링과 경고 표시")
+    warn_ms = st.number_input("지연 경고 임계(ms)", min_value=50, max_value=5000, value=800, step=50, key="108_thr")
+    if st.button("헬스체크 실행", key="btn_108_run"):
+        t0 = time.perf_counter()
+        try:
+            # 가벼운 작업 시뮬레이션
+            _ = sum(i*i for i in range(10000))
+            ok = True
+        except Exception:
+            ok = False
+        dt = (time.perf_counter() - t0) * 1000.0
+
+        s = st.session_state["108_stats"]
+        s["runs"] += 1
+        if not ok:
+            s["errors"] += 1
+        if dt > warn_ms:
+            s["slow"] += 1
+        # 이동 평균
+        s["avg_ms"] = (s["avg_ms"]*0.9) + (dt*0.1)
+
+        if not ok:
+            st.error(f"실패 감지 (실행 {s['runs']}회, 오류 {s['errors']}회)")
+        elif dt > warn_ms:
+            st.warning(f"지연 경고: {dt:.1f} ms (> {warn_ms} ms)")
+        else:
+            st.success(f"정상: {dt:.1f} ms")
+
+    s = st.session_state["108_stats"]
+    st.metric("실행 수", s["runs"])
+    st.metric("지연 경고 수", s["slow"])
+    st.metric("오류 수", s["errors"])
+    st.metric("평균 지연(ms)", f"{s['avg_ms']:.1f}")
+
+# ── 화면 배치: 두 칼럼으로 촘촘히
+st.subheader("— 106–108 모듈 (촘촘 레이아웃)")
+
+_compact_row([
+    ("🧩 106. 스냅샷 & 재현", _mod_106),
+    ("🛡️ 107. 로그 PII 마스킹", _mod_107),
+])
+
+_compact_row([
+    ("📈 108. 헬스체크/알림", _mod_108),
+])
+
