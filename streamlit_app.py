@@ -6068,3 +6068,290 @@ def _once(flag: str) -> bool:
         return False
     st.session_state[flag] = True
     return True
+    
+    
+    # ─────────────────────────────────────────────────────────────
+# 211. CORE 에코 & 타임 (기본 툴 세트)
+# 기능: 문자열 에코, 현재 시각/유닉스 타임 반환
+# ─────────────────────────────────────────────────────────────
+if _once("m211_loaded"):
+    def tool_echo(text: str) -> str:
+        return str(text)
+
+    def tool_now() -> dict:
+        t = time.time()
+        return {
+            "iso": datetime.utcnow().isoformat() + "Z",
+            "unix": t,
+        }
+
+    safe_register("echo", tool_echo, "core")
+    safe_register("now", tool_now, "core")
+
+with st.expander("🧩 211. CORE 에코/타임", expanded=False):
+    s = st.text_input("에코 입력", key="m211_echo_in")
+    if st.button("에코 실행", key="m211_btn_echo"):
+        st.write(_ensure_tool_registry()["core/echo"](s))
+    if st.button("현재 시각", key="m211_btn_now"):
+        st.json(_ensure_tool_registry()["core/now"]())
+        
+      # ─────────────────────────────────────────────────────────────
+# 212. 텍스트 유틸 (소문자화, 슬러그, 트리밍)
+# 기능: 간단 텍스트 전처리
+# ─────────────────────────────────────────────────────────────
+if _once("m212_loaded"):
+    def tool_lower(text: str) -> str:
+        return (text or "").lower()
+
+    def tool_slug(text: str) -> str:
+        t = re.sub(r"[^0-9a-zA-Z가-힣]+", "-", text or "").strip("-")
+        return re.sub(r"-{2,}", "-", t)
+
+    def tool_trim(text: str) -> str:
+        return (text or "").strip()
+
+    safe_register("text/lower", tool_lower, "utils")
+    safe_register("text/slug", tool_slug, "utils")
+    safe_register("text/trim", tool_trim, "utils")
+
+with st.expander("🧩 212. 텍스트 유틸", expanded=False):
+    txt = st.text_input("문자열", key="m212_txt")
+    c1, c2, c3 = st.columns(3)
+    if c1.button("lower", key="m212_b1"):
+        st.write(_ensure_tool_registry()["utils/text/lower"](txt))
+    if c2.button("slug", key="m212_b2"):
+        st.write(_ensure_tool_registry()["utils/text/slug"](txt))
+    if c3.button("trim", key="m212_b3"):
+        st.write(_ensure_tool_registry()["utils/text/trim"](txt))
+        
+        
+        # ─────────────────────────────────────────────────────────────
+# 213. 세션 메모리 (키-값 저장/조회)
+# 기능: 간단 장면/값 저장소(세션 한정)
+# ─────────────────────────────────────────────────────────────
+if _once("m213_loaded"):
+    if "kv_store" not in st.session_state:
+        st.session_state.kv_store = {}
+
+    def tool_mem_set(key: str, value):
+        st.session_state.kv_store[str(key)] = value
+        return {"ok": True, "size": len(st.session_state.kv_store)}
+
+    def tool_mem_get(key: str, default=None):
+        return st.session_state.kv_store.get(str(key), default)
+
+    def tool_mem_dump():
+        return dict(st.session_state.kv_store)
+
+    safe_register("mem/set", tool_mem_set, "store")
+    safe_register("mem/get", tool_mem_get, "store")
+    safe_register("mem/dump", tool_mem_dump, "store")
+
+with st.expander("🧩 213. 세션 메모리", expanded=False):
+    k = st.text_input("키", key="m213_k")
+    v = st.text_input("값(JSON 가능)", key="m213_v")
+    c1, c2, c3 = st.columns(3)
+    if c1.button("SET", key="m213_b1"):
+        try:
+            val = json.loads(v)
+        except Exception:
+            val = v
+        st.json(_ensure_tool_registry()["store/mem/set"](k, val))
+    if c2.button("GET", key="m213_b2"):
+        st.write(_ensure_tool_registry()["store/mem/get"](k))
+    if c3.button("DUMP", key="m213_b3"):
+        st.json(_ensure_tool_registry()["store/mem/dump"]())
+        
+        # ─────────────────────────────────────────────────────────────
+# 214. 헬스체크 (핑/퐁, 앱 버전)
+# 기능: 가벼운 상태 점검
+# ─────────────────────────────────────────────────────────────
+if _once("m214_loaded"):
+    APP_VERSION = st.secrets.get("APP_VERSION", "dev")
+
+    def tool_ping():
+        return {"pong": True, "at": datetime.utcnow().isoformat()+"Z", "ver": APP_VERSION}
+
+    safe_register("ping", tool_ping, "health")
+
+with st.expander("🧩 214. 헬스체크", expanded=False):
+    if st.button("PING", key="m214_b1"):
+        st.json(_ensure_tool_registry()["health/ping"]())
+        
+        # ─────────────────────────────────────────────────────────────
+# 215. 미니 계산기 (안전 사칙연산)
+# 기능: add/sub/mul/div (문자 eval 금지)
+# ─────────────────────────────────────────────────────────────
+if _once("m215_loaded"):
+    def _num(x): 
+        return float(x)
+
+    def tool_add(a, b): return _num(a) + _num(b)
+    def tool_sub(a, b): return _num(a) - _num(b)
+    def tool_mul(a, b): return _num(a) * _num(b)
+    def tool_div(a, b): 
+        b = _num(b)
+        if b == 0: return None
+        return _num(a) / b
+
+    safe_register("calc/add", tool_add, "math")
+    safe_register("calc/sub", tool_sub, "math")
+    safe_register("calc/mul", tool_mul, "math")
+    safe_register("calc/div", tool_div, "math")
+
+with st.expander("🧩 215. 미니 계산기", expanded=False):
+    a = st.text_input("a", key="m215_a")
+    b = st.text_input("b", key="m215_b")
+    c1, c2, c3, c4 = st.columns(4)
+    if c1.button("add", key="m215_b1"): st.write(_ensure_tool_registry()["math/calc/add"](a,b))
+    if c2.button("sub", key="m215_b2"): st.write(_ensure_tool_registry()["math/calc/sub"](a,b))
+    if c3.button("mul", key="m215_b3"): st.write(_ensure_tool_registry()["math/calc/mul"](a,b))
+    if c4.button("div", key="m215_b4"): st.write(_ensure_tool_registry()["math/calc/div"](a,b))
+    
+    # ─────────────────────────────────────────────────────────────
+# 216. 랜덤/UUID
+# 기능: uuid4, 정수/샘플
+# ─────────────────────────────────────────────────────────────
+if _once("m216_loaded"):
+    def tool_uuid(): return str(uuid.uuid4())
+    def tool_randint(lo=0, hi=100): return random.randint(int(lo), int(hi))
+    def tool_sample(items, k=1):
+        try:
+            arr = json.loads(items) if isinstance(items, str) else items
+        except Exception:
+            arr = [str(items)]
+        k = max(1, int(k))
+        if not isinstance(arr, list): arr = [arr]
+        k = min(k, len(arr)) if arr else 0
+        return random.sample(arr, k) if k else []
+
+    safe_register("uuid4", tool_uuid, "random")
+    safe_register("randint", tool_randint, "random")
+    safe_register("sample", tool_sample, "random")
+
+with st.expander("🧩 216. 랜덤/UUID", expanded=False):
+    c1, c2 = st.columns(2)
+    if c1.button("uuid4", key="m216_b1"):
+        st.write(_ensure_tool_registry()["random/uuid4"]())
+    lo = st.number_input("lo", 0, 999999, 0, key="m216_lo")
+    hi = st.number_input("hi", 1, 1000000, 10, key="m216_hi")
+    if c2.button("randint", key="m216_b2"):
+        st.write(_ensure_tool_registry()["random/randint"](lo, hi))
+    items = st.text_area("샘플 대상(list JSON 또는 콤마구분)", "['a','b','c']", key="m216_items")
+    k = st.number_input("k", 1, 10, 1, key="m216_k")
+    if st.button("sample", key="m216_b3"):
+        st.write(_ensure_tool_registry()["random/sample"](items, k))
+        
+        # ─────────────────────────────────────────────────────────────
+# 217. 이벤트 로그 (메모리)
+# 기능: 메시지/메타 기록, 덤프
+# ─────────────────────────────────────────────────────────────
+if _once("m217_loaded"):
+    if "event_log" not in st.session_state:
+        st.session_state.event_log = []
+
+    def tool_log(msg: str, level="INFO", **meta):
+        rec = {
+            "ts": datetime.utcnow().isoformat()+"Z",
+            "level": level,
+            "msg": str(msg),
+            "meta": meta or {}
+        }
+        st.session_state.event_log.append(rec)
+        return {"ok": True, "size": len(st.session_state.event_log)}
+
+    def tool_log_dump(limit=100):
+        return st.session_state.event_log[-int(limit):]
+
+    safe_register("log/add", tool_log, "obs")
+    safe_register("log/dump", tool_log_dump, "obs")
+
+with st.expander("🧩 217. 이벤트 로그", expanded=False):
+    m = st.text_input("메시지", key="m217_msg")
+    if st.button("기록", key="m217_b1"):
+        st.json(_ensure_tool_registry()["obs/log/add"](m))
+    if st.button("최근 20개", key="m217_b2"):
+        st.json(_ensure_tool_registry())
+        
+        # ─────────────────────────────────────────────────────────────
+# 218. JSON 유효성 검사
+# 기능: JSON 파싱/검증, 경로 추출 (간단)
+# ─────────────────────────────────────────────────────────────
+if _once("m218_loaded"):
+    def tool_json_parse(text: str):
+        try:
+            return {"ok": True, "data": json.loads(text)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def tool_json_get(text: str, path: str):
+        """
+        path 예) a.b.0.c  (dict/list 혼합 접근)
+        """
+        try:
+            obj = json.loads(text)
+            cur = obj
+            if path.strip():
+                for p in path.split("."):
+                    if isinstance(cur, list):
+                        cur = cur[int(p)]
+                    else:
+                        cur = cur[p]
+            return {"ok": True, "value": cur}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    safe_register("json/parse", tool_json_parse, "utils")
+    safe_register("json/get", tool_json_get, "utils")
+
+with st.expander("🧩 218. JSON 유효성", expanded=False):
+    jt = st.text_area("JSON 텍스트", '{"a":{"b":[{"c":1}]}}', key="m218_txt")
+    if st.button("파싱", key="m218_b1"):
+        st.json(_ensure_tool_registry()["utils/json/parse"](jt))
+    p = st.text_input("경로(a.b.0.c)", "a.b.0.c", key="m218_path")
+    if st.button("경로값", key="m218_b2"):
+        st.json(_ensure_tool_registry()["utils/json/get"](jt, p))
+        
+        # ─────────────────────────────────────────────────────────────
+# 219. 간이 레이트리미터 (세션 단위)
+# 기능: 주어진 키에 대해 최소 간격 보장
+# ─────────────────────────────────────────────────────────────
+if _once("m219_loaded"):
+    if "ratelimit" not in st.session_state:
+        st.session_state.ratelimit = {}   # {key: last_ts}
+
+    def tool_allow(key: str, min_interval_sec: float = 1.0):
+        now = time.time()
+        last = st.session_state.ratelimit.get(key, 0.0)
+        allow = (now - last) >= float(min_interval_sec)
+        if allow:
+            st.session_state.ratelimit[key] = now
+        return {"allow": allow, "since": now - last}
+
+    safe_register("allow", tool_allow, "rl")
+
+with st.expander("🧩 219. 레이트리미터", expanded=False):
+    rk = st.text_input("키", "action:generate", key="m219_k")
+    gap = st.number_input("최소간격(sec)", 0.1, 10.0, 1.0, 0.1, key="m219_gap")
+    if st.button("허용여부", key="m219_b1"):
+        st.json(_ensure_tool_registry()["rl/allow"](rk, gap))
+        
+        # ─────────────────────────────────────────────────────────────
+# 220. 툴 디스커버리 (현재 등록 툴 목록)
+# 기능: tool_registry 나열/검색
+# ─────────────────────────────────────────────────────────────
+if _once("m220_loaded"):
+    def tool_list(prefix: str = ""):
+        reg = _ensure_tool_registry()
+        if prefix:
+            return sorted([k for k in reg.keys() if k.startswith(prefix)])
+        return sorted(reg.keys())
+
+    safe_register("list", tool_list, "tools")
+
+with st.expander("🧩 220. 툴 디스커버리", expanded=False):
+    px = st.text_input("prefix(예: core/)", "", key="m220_px")
+    if st.button("목록 조회", key="m220_b1"):
+        st.write(_ensure_tool_registry()["tools/list"](px))
+        
+        
