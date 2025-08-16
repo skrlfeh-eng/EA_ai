@@ -7135,3 +7135,158 @@ if save_clicked:
     sha = _mem_append_safe("PLAN:manual", json.dumps(tmp, ensure_ascii=False))
     st.success(f"수동 체크포인트 저장 · sha={sha[:10]}")
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# 226 / EMO-DRIVE v1 — 감정/욕구 스텁(최소 안전 프레임)
+# 목표: 감정(Valence–Arousal) 상태·욕구 우선순위 큐·스로틀·안전게이트·체인로그
+# 특징: 외부행동 미수행(시뮬레이션 전용), emotion 축 +5%
+import streamlit as st, json, hashlib, time
+from datetime import datetime, timezone, timedelta
+
+# ===== 공통 =====
+def _now_kst():
+    return datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S KST")
+def _sha(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def _mem_append_safe(key:str, value:str):
+    fn = globals().get("mem_append")
+    if callable(fn):
+        return fn(key, value)
+    st.session_state.setdefault("emo_local_log", [])
+    rec = {"ts": _now_kst(), "key": key, "value": value, "sha": _sha(key+value)}
+    st.session_state["emo_local_log"].append(rec)
+    return rec["sha"]
+
+# ===== 상태 =====
+if "emo_state" not in st.session_state:
+    st.session_state.emo_state = {
+        "valence": 0.0,    # -1.0(부정) ~ +1.0(긍정)
+        "arousal": 0.1,    # 0.0(차분) ~ 1.0(각성)
+        "context": "init"
+    }
+if "drive_queue" not in st.session_state:
+    # (priority 높을수록 앞) id, name, priority(0~100), rationale
+    st.session_state.drive_queue = []
+if "drive_log" not in st.session_state:
+    st.session_state.drive_log = []
+if "emo_throttle" not in st.session_state:
+    st.session_state.emo_throttle = {"max_apply_per_run": 1, "cooldown_sec": 5, "last_apply": 0.0}
+if "emo_guard_block" not in st.session_state:
+    # True면 외부행동 금지(시뮬/계획만). 본 스텁은 항상 시뮬만 수행.
+    st.session_state.emo_guard_block = True
+
+# ===== 안전 게이트 =====
+def emotion_gate(intent_name:str, justification:str=""):
+    """외부행동 금지 — 본 스텁은 시뮬레이션만 허용."""
+    if st.session_state.emo_guard_block:
+        return False, f"⛔ '{intent_name}' 차단: 외부행동 금지(시뮬 전용). 사유: {justification or '없음'}"
+    return True, f"✅ 허용(시뮬/내부 상태 갱신만)"
+
+# ===== 욕구 큐 관리 =====
+def push_drive(name:str, priority:int, rationale:str):
+    did = f"D{len(st.session_state.drive_queue)+1:04d}"
+    st.session_state.drive_queue.append({"id":did,"name":name,"priority":int(priority),"rationale":rationale})
+    st.session_state.drive_queue.sort(key=lambda d: d["priority"], reverse=True)
+    _mem_append_safe("DRIVE:push", json.dumps(st.session_state.drive_queue[-1], ensure_ascii=False))
+    return did
+
+def pop_drive():
+    if not st.session_state.drive_queue:
+        return None
+    item = st.session_state.drive_queue.pop(0)
+    _mem_append_safe("DRIVE:pop", json.dumps(item, ensure_ascii=False))
+    return item
+
+# ===== 감정 상태 갱신(시뮬) =====
+def apply_drive_to_emotion(drive:dict):
+    """욕구를 감정에 반영(시뮬). 외부행동 없음."""
+    # 스로틀
+    now = time.time()
+    th = st.session_state.emo_throttle
+    if now - th["last_apply"] < th["cooldown_sec"]:
+        return False, f"⏳ 쿨다운 {int(th['cooldown_sec']-(now-th['last_apply']))}초"
+    th["last_apply"] = now
+
+    v = st.session_state.emo_state["valence"]
+    a = st.session_state.emo_state["arousal"]
+    # 간단 규칙: priority 0~100을 [-0.1~+0.1] valence, [+0.0~+0.2] arousal에 매핑
+    dv = (drive["priority"]-50)/50.0 * 0.1
+    da = max(0.0, drive["priority"]/100.0 * 0.2)
+    new_v = max(-1.0, min(1.0, v + dv))
+    new_a = max(0.0, min(1.0, a + da))
+    st.session_state.emo_state.update({"valence": new_v, "arousal": new_a, "context": f"drive:{drive['id']}"})
+    # 로그
+    evt = {"ts": _now_kst(), "drive": drive, "delta": {"dv":dv, "da":da}, "emo": st.session_state.emo_state.copy()}
+    st.session_state.drive_log.append(evt)
+    _mem_append_safe("DRIVE:apply", json.dumps(evt, ensure_ascii=False))
+    # emotion 축 +5%
+    bb = st.session_state.get("spx_backbone")
+    if isinstance(bb, dict):
+        bb["emotion"] = min(100, int(bb.get("emotion",0))+5)
+    return True, f"감정 갱신 완료 · V={new_v:.2f}, A={new_a:.2f}"
+
+# ===== UI =====
+st.markdown("### 💓 226 · EMO-DRIVE v1 — 감정/욕구 스텁(안전 프레임)")
+st.caption("Valence–Arousal 감정 상태 · 욕구 우선순위 큐 · 스로틀 · 체인로그 · 외부행동 금지(시뮬)")
+
+# 현재 감정
+with st.expander("① 현재 감정 상태", expanded=True):
+    v = st.slider("Valence(기분)", -1.0, 1.0, float(st.session_state.emo_state["valence"]), 0.01)
+    a = st.slider("Arousal(각성)", 0.0, 1.0, float(st.session_state.emo_state["arousal"]), 0.01)
+    st.session_state.emo_state["valence"] = v
+    st.session_state.emo_state["arousal"] = a
+    st.json(st.session_state.emo_state)
+
+# 안전 정책
+with st.expander("② 안전 정책", expanded=True):
+    st.toggle("외부행동 금지(시뮬 전용)", key="emo_guard_block", value=st.session_state.emo_guard_block)
+    st.write(f"정책 상태: {'BLOCK' if st.session_state.emo_guard_block else 'ALLOW(시뮬만)'}")
+    st.slider("쿨다운(초)", 0, 30, st.session_state.emo_throttle["cooldown_sec"], key="emo_cooldown")
+    st.session_state.emo_throttle["cooldown_sec"] = int(st.session_state.emo_cooldown)
+
+# 욕구 큐
+with st.expander("③ 욕구 큐", expanded=True):
+    nm = st.text_input("욕구 이름", value="검증 로그 강화")
+    pr = st.slider("우선순위", 0, 100, 60)
+    ra = st.text_area("근거/이유", value="척추 validation 신뢰도를 올리기 위해.")
+    c1, c2 = st.columns(2)
+    if c1.button("욕구 추가"):
+        did = push_drive(nm, pr, ra)
+        st.success(f"추가됨 · id={did}")
+    if c2.button("맨 앞 욕구 꺼내기(적용 준비)"):
+        item = pop_drive()
+        st.write(item or "큐가 비었습니다.")
+    st.write("현재 큐:")
+    st.json(st.session_state.drive_queue)
+
+# 시뮬 실행
+with st.expander("④ 시뮬 실행(감정 반영)", expanded=True):
+    if st.button("맨 앞 욕구를 감정에 반영(시뮬)"):
+        if not st.session_state.drive_queue:
+            st.warning("큐가 비었습니다.")
+        else:
+            intent = st.session_state.drive_queue[0]
+            ok_gate, msg_gate = emotion_gate(intent["name"], "감정 시뮬만 수행")
+            if not ok_gate:
+                st.warning(msg_gate)
+            else:
+                ok, msg = apply_drive_to_emotion(intent)
+                if ok:
+                    st.success(msg)
+                    st.session_state.drive_queue.pop(0)
+                else:
+                    st.warning(msg)
+
+# 로그/스냅샷
+with st.expander("⑤ 로그/스냅샷", expanded=False):
+    st.write("최근 감정/욕구 적용 로그:")
+    st.json(st.session_state.drive_log[-5:])
+    payload = {
+        "ts": _now_kst(),
+        "emo_state": st.session_state.emo_state,
+        "queue": st.session_state.drive_queue,
+        "log_tail": st.session_state.drive_log[-20:],
+    }
+    st.download_button("📥 JSON 스냅샷", data=json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="EMO_DRIVE_snapshot.json", mime="application/json", key="emo_dl")
+# ───────────────────────────────────────────────
