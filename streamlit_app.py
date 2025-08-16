@@ -7699,3 +7699,164 @@ if st.session_state.val_reports:
     with st.expander("📜 누적 리포트 보기"):
         st.json(st.session_state.val_reports)
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [233] 리페어 루프 v1 — 자동 수정 제안 + 재검증 (SELF-CONTAINED)
+# 목적: 232의 검증 결과(반례·재현성)를 바탕으로 자동 수정안을 제안하고 재검증 리포트 생성
+# 설치: 파일 맨 아래 통째로 붙여넣기 → 저장 → 새로고침
+import streamlit as st
+from datetime import datetime
+import hashlib
+import difflib
+
+# (안전가드) 상단 대시보드 헬퍼가 없더라도 문제없게 더미 정의
+if "register_module" not in globals():
+    def register_module(num, name, desc): pass
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle):
+        st.markdown(f"**[{num}] {title}** — {subtitle}")
+
+register_module("233", "리페어 루프 v1", "자동 수정 제안 + 재검증")
+gray_line("233", "리페어 루프", "반례 기반 수정안 생성 → 재검증 보고")
+
+# === 232의 유틸이 없더라도 자체 수행 가능한 스텁 제공 ===
+def _fallback_collect_counterexamples(output: str):
+    counters = []
+    if "있다" in output: counters.append(output.replace("있다","없다"))
+    if "없다" in output: counters.append(output.replace("없다","있다"))
+    if "성공" in output: counters.append(output.replace("성공","실패"))
+    if "실패" in output: counters.append(output.replace("실패","성공"))
+    if not counters: counters.append("반례 후보 없음(스텁)")
+    # 중복 제거
+    return list(dict.fromkeys(counters))
+
+def _fallback_repro_sig(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+# 232 모듈에서 제공하는 함수가 있으면 사용, 없으면 폴백 사용
+collect_counterexamples = globals().get("collect_counterexamples", _fallback_collect_counterexamples)
+reproducibility_signature = globals().get("reproducibility_signature", _fallback_repro_sig)
+
+# === 세션 상태 초기화 ===
+if "val_reports" not in st.session_state:
+    st.session_state.val_reports = []  # 232가 없더라도 여기서 기록 가능
+if "repair_history_233" not in st.session_state:
+    st.session_state.repair_history_233 = []
+
+# === 수정 전략(간단 규칙 기반) ===
+def propose_repairs(output: str, counters: list[str]) -> list[str]:
+    """
+    간단 리페어 전략:
+    1) 절대단정 → 조건부/범위화 (예: '항상/절대' → '관측 범위에서/현재 데이터 기준')
+    2) 반례 키워드 중 '없다/실패'가 나타나면 근거 요구 문장 삽입
+    3) 단위/정의 불명확 시, '정의/단위 명시' 프롬프트 추가
+    """
+    repairs = []
+    base = output
+
+    # 1) 절대 단정 완화
+    softened = (base.replace("항상", "관측 범위에서")
+                     .replace("반드시", "일반적으로")
+                     .replace("절대", "원칙적으로"))
+    if softened != base:
+        repairs.append(softened)
+        base = softened
+
+    # 2) 반례 힌트 반영
+    if any(("없다" in c or "실패" in c) for c in counters):
+        with_evidence = base
+        if "근거:" not in base:
+            with_evidence += " 근거: 공개 데이터/문헌 인용 및 재현성 로그를 첨부할 것."
+        repairs.append(with_evidence)
+        base = with_evidence
+
+    # 3) 단위/정의 보강 힌트
+    if ("%" in base or "수치" in base or "값" in base) and ("단위" not in base):
+        clarified = base + " (단위 및 산출식 명시 필요)"
+        repairs.append(clarified)
+        base = clarified
+
+    # 최소 1안은 보장
+    if not repairs:
+        repairs = [output + " (검증 주석: 추가 근거/단위 보강 필요)"]
+    # 중복 제거
+    return list(dict.fromkeys(repairs))
+
+# === 재검증 보고 생성 ===
+def revalidate_report(original: str, patched: str):
+    counters = collect_counterexamples(patched)
+    sig = reproducibility_signature(patched)
+    return {
+        "timestamp_utc": datetime.utcnow().isoformat() + "Z",
+        "original": original,
+        "patched": patched,
+        "patched_repro_sig": sig,
+        "patched_counters": counters,
+        "notes": "233 v1: 규칙기반 리페어 + 간이 재검증"
+    }
+
+# === UI ===
+st.subheader("🛠️ [233] 리페어 루프 v1")
+
+mode = st.radio("입력 방식 선택", ["최근 232 리포트 불러오기", "직접 텍스트 입력"], horizontal=True, key="repair_mode_233")
+
+original_text = ""
+if mode == "최근 232 리포트 불러오기":
+    if st.session_state.val_reports:
+        last = st.session_state.val_reports[-1]
+        original_text = last.get("output", "")
+        with st.expander("최근 232 리포트 확인"):
+            st.json(last)
+    else:
+        st.info("232 리포트가 아직 없습니다. 아래 '직접 텍스트 입력'을 사용하세요.")
+else:
+    original_text = st.text_area("원문 텍스트 입력", placeholder="예: A는 가능하다. 항상 성공한다.", height=120, key="repair_input_233")
+
+col1, col2 = st.columns([1,1])
+with col1:
+    if st.button("수정안 제안", key="btn_propose_233"):
+        if original_text.strip():
+            counters = collect_counterexamples(original_text)
+            proposals = propose_repairs(original_text.strip(), counters)
+            st.session_state.repair_history_233.append({
+                "timestamp_utc": datetime.utcnow().isoformat() + "Z",
+                "original": original_text.strip(),
+                "counters": counters,
+                "proposals": proposals
+            })
+            st.success("수정안 제안 완료")
+        else:
+            st.warning("원문을 입력하거나 232 리포트를 불러오세요.")
+
+with col2:
+    if st.button("리페어 적용 + 재검증", key="btn_apply_233"):
+        if st.session_state.repair_history_233:
+            last = st.session_state.repair_history_233[-1]
+            orig = last["original"]
+            # 첫 번째 제안을 기본 패치로 적용
+            patched = last["proposals"][0]
+            report = revalidate_report(orig, patched)
+            # 232 리포트 로그와도 호환되게 저장(선택)
+            st.session_state.val_reports.append({
+                "timestamp_utc": report["timestamp_utc"],
+                "output": report["patched"],
+                "counterexamples": report["patched_counters"],
+                "reproducibility_sig": report["patched_repro_sig"],
+                "notes": "from 233 re-validate"
+            })
+            # 화면 출력
+            st.success("리페어 적용 및 재검증 완료")
+            st.markdown("**DIFF (원문 → 수정안)**")
+            diff = difflib.unified_diff(
+                orig.splitlines(), patched.splitlines(),
+                fromfile="original", tofile="patched", lineterm=""
+            )
+            st.code("\n".join(diff))
+            st.json(report)
+        else:
+            st.warning("먼저 '수정안 제안'을 실행하세요.")
+
+# 누적 보기
+if st.session_state.repair_history_233:
+    with st.expander("🧾 리페어 히스토리(누적)", expanded=False):
+        st.json(st.session_state.repair_history_233)
+# ───────────────────────────────────────────────
