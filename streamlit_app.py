@@ -4294,4 +4294,92 @@ with st.expander("100. 안전모드 토글", expanded=False):
     st.session_state["GEA_SAFE_MODE"] = safe
     st.write("현재:", "ON" if safe else "OFF")
     
-    
+    # ===== [CORE: 설계 목차 나침반 & 모듈 등록/검증] =====
+import re, time, streamlit as st
+
+if "GEA_TOC" not in st.session_state:
+    st.session_state.GEA_TOC = {}   # {"096": {"name": "...", "desc": "...", "order": 96}}
+
+MOD_ID_RE = re.compile(r"^\d{3}(\-\d{3})*$")  # 095 또는 095-001-002 …
+
+def register_module(mod_id: str, name: str, desc: str = ""):
+    """번호/이름 규칙 검증 + 목차 등록(중복 방지)."""
+    # 규칙 검사
+    if not MOD_ID_RE.match(mod_id):
+        raise ValueError(f"[규칙 위반] 모듈 번호 형식 오류: {mod_id}")
+    if not name or len(name.strip()) == 0:
+        raise ValueError(f"[규칙 위반] 모듈 이름 누락: {mod_id}")
+    # 중복 검사
+    if mod_id in st.session_state.GEA_TOC:
+        # 같은 ID 재등록은 허용하되 이름/설명 불일치 시 경고
+        old = st.session_state.GEA_TOC[mod_id]
+        if old["name"] != name:
+            st.warning(f"모듈 이름 변경 감지: {mod_id} '{old['name']}' → '{name}'")
+    # 등록
+    st.session_state.GEA_TOC[mod_id] = {
+        "name": name.strip(),
+        "desc": desc.strip(),
+        "order": tuple(int(x) for x in mod_id.split("-"))
+    }
+
+class module_block:
+    """규칙 위반 시 렌더 금지. 제목은 일관된 형식으로 출력."""
+    def __init__(self, mod_id: str, name: str):
+        self.mod_id = mod_id
+        self.name = name
+        self._ctx = None
+    def __enter__(self):
+        # 고유 키 부여(충돌 방지)
+        header = f"— **{self.mod_id} {self.name}**"
+        st.divider()
+        st.markdown(header)
+        self._ctx = st.expander(f"{self.mod_id}. {self.name}", expanded=False)
+        self._ctx.__enter__()
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        self._ctx.__exit__(exc_type, exc, tb)
+
+def render_toc():
+    """상단 설계 목차 자동 갱신."""
+    st.sidebar.subheader("📚 설계 목차 나침반")
+    if not st.session_state.GEA_TOC:
+        st.sidebar.info("등록된 모듈이 없습니다.")
+        return
+    items = sorted(st.session_state.GEA_TOC.items(),
+                   key=lambda kv: kv[1]["order"])
+    for mod_id, meta in items:
+        st.sidebar.write(f"- **{mod_id}** {meta['name']}")
+
+# ===== [예: 096~100을 새 규칙으로 재등록] =====
+register_module("096", "런타임/캐시 진단", "psutil 없어도 동작하는 런타임 점검")
+with module_block("096", "런타임/캐시 진단"):
+    st.caption("의존성 없이도 기본 지표 제공. psutil 있으면 더 풍부.")
+    c0, c1 = st.columns(2)
+    c0.write("세션키 수:", len(st.session_state))
+    if st.button("캐시 비우기", key="m096_clear"):
+        st.cache_data.clear(); st.cache_resource.clear(); st.success("캐시 삭제 완료")
+
+register_module("097", "3초 간이 성능 측정", "루프/초 대략 측정")
+with module_block("097", "3초 간이 성능 측정"):
+    if st.button("측정 실행", key="m097_run"):
+        t0=time.time(); n=0
+        while time.time()-t0<3: n+=1
+        st.metric("루프/초", f"{n/3:,.0f}")
+
+register_module("098", "상태 리포트 JSON", "환경 상태를 JSON으로 다운로드")
+with module_block("098", "상태 리포트 JSON"):
+    payload = {"time": time.strftime("%F %T")}
+    st.json(payload)
+    st.download_button("JSON 저장", str(payload), "report.json", key="m098_dl")
+
+register_module("099", "권장 의존성 점검", "requirements.txt 안내")
+with module_block("099", "권장 의존성 점검"):
+    st.write("권장 패키지: `psutil>=5.9.8`")
+
+register_module("100", "안전모드 토글", "무거운 계산 비활성화")
+with module_block("100", "안전모드 토글"):
+    safe = st.toggle("안전모드", key="m100_safe", value=False)
+    st.write("현재:", "ON" if safe else "OFF")
+
+# ===== [항상 맨 끝: 목차 렌더] =====
+render_toc()
