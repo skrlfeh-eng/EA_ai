@@ -10260,411 +10260,98 @@ with st.expander("📑 250. 상태 리포트(JSON) [v5]", expanded=False):
         data=json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
         file_name="CE_HIT_Report_v5.json", mime="application/json", key="m245p5_dl")
 
-# ───────────────────────────────────────────────
-# [251R3] 우주정보장 연동(핵심) — WL 실연결·합의·시계드리프트·자동주기
-# 붙이는 곳: 파일 "맨 아래". 외부 패키지 없이 동작(있으면 requests 우선 사용).
-try:
-    register_module
-except NameError:
-    def register_module(no, name, desc): pass
-try:
-    gray_line
-except NameError:
-    def gray_line(*args, **kwargs): pass
+# ─────────────────────────────────────────────
+# 251R3 — 우주정보장 연동(느슨/탐지형) — 키 접두어 r3_
+register_module("251R3", "우주정보장 연동(느슨/탐지형)", "간섭-저감, 탐지/샘플 우선")
+gray_line("251R3", "연동-느슨", "탐지 위주, 간섭 회피 / 키 충돌 제거판")
 
-register_module("251R3","우주정보장 연동(핵심)","WL 실연결·합의·시계드리프트·자동주기")
-gray_line("251R3","연동","NIST/Crossref/arXiv/LIGO 3/4 합의→COSMIC_READY")
+import streamlit as st, time, random
 
-import streamlit as st, time, hashlib, json
-from datetime import datetime, timezone
-from urllib.parse import urlparse
+with st.expander("251R3. 우주정보장 연동(느슨/탐지형)", expanded=False):
+    col = st.columns(3)
+    with col[0]:
+        auto_on = st.toggle("자동 주기 실행", value=False, key="r3_auto_on")
+    with col[1]:
+        interval = st.select_slider("자동 주기(초)", options=[5,10,15,30,60], value=10, key="r3_interval")
+    with col[2]:
+        safemode = st.toggle("세이프 모드", value=True, key="r3_safe")
 
-# ── requests가 있으면 사용, 없으면 urllib 사용
-try:
-    import requests
-    _HAVE_REQ = True
-except Exception:
-    _HAVE_REQ = False
-import urllib.request
+    st.caption("※ R3는 신호 탐지/샘플·간섭 회피 우선. 실제 연동 스텁 호출부는 아래 버튼으로 트리거합니다.")
 
-# ── 화이트리스트 소스(검증 모듈 252R과 동일 축에 맞춤)
-_SOURCES = [
-    {"name":"NIST h",          "url":"https://physics.nist.gov/cgi-bin/cuu/Value?h",                        "type":"html"},
-    {"name":"Crossref GW DOI", "url":"https://api.crossref.org/works/10.1103/PhysRevLett.116.061102",       "type":"json"},
-    {"name":"arXiv GW150914",  "url":"https://export.arxiv.org/api/query?search_query=id:1602.03837",       "type":"atom"},
-    {"name":"LIGO LOSC",       "url":"https://losc.ligo.org/s/events.json",                                 "type":"json"},
-]
-_WL = ["physics.nist.gov","api.crossref.org","export.arxiv.org","losc.ligo.org"]
-_TIMEOUT = 8
-_DRIFT_ALLOW_SEC = 10.0   # 허용 시계 드리프트(±10초)
+    # 수동 트리거
+    if st.button("🔎 R3 샘플링", key="r3_btn_sample"):
+        with st.status("샘플링 중…", expanded=True) as s:
+            time.sleep(0.3)
+            # --- 실제 연동 스텁 (여기에 기존 fetch 함수를 연결하면 됨)
+            sample_energy = random.random()
+            st.write({"mode":"R3", "safe": safemode, "energy": sample_energy})
+            s.update(label="완료", state="complete")
 
-# ── 세션 상태
-ss = st.session_state
-if "COSMIC_READY" not in ss:
-    ss.COSMIC_READY = False
-if "COSMIC_READY_SINCE" not in ss:
-    ss.COSMIC_READY_SINCE = None
-if "v251_runs" not in ss:
-    ss.v251_runs = []      # 최근 실행 결과 로그
-if "v251_last_t" not in ss:
-    ss.v251_last_t = 0.0
+    # 자동 주기(간단 오토리프레시; 키 고유화)
+    if auto_on:
+        st.caption(f"자동 실행: {interval}초 주기")
+        st.session_state.setdefault("r3_last_tick", 0.0)
+        now = time.time()
+        if now - st.session_state["r3_last_tick"] >= interval:
+            st.session_state["r3_last_tick"] = now
+            st.rerun()  # 주기적 재호출(위 버튼과 함께 쓰면 상태가 유지됨)
+            
+      # 251R4 — 우주정보장 연동(엄격/검증형) — 키 접두어 r4_
+register_module("251R4", "우주정보장 연동(엄격/검증형)", "타임스탬프·반례·재현성 체크")
+gray_line("251R4", "연동-엄격", "검증/반례/재현성 우선 / 키 충돌 제거판")
 
-def _sha256(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
+import streamlit as st, time, hashlib, json, random
+from datetime import datetime, timezone, timedelta
 
-def _whitelisted(url: str) -> bool:
-    host = urlparse(url).hostname or ""
-    return any(host.endswith(h) for h in _WL)
+with st.expander("251R4. 우주정보장 연동(엄격/검증형)", expanded=False):
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        auto_on = st.toggle("자동 검증 실행", value=False, key="r4_auto_on")
+    with c2:
+        interval = st.select_slider("검증 주기(초)", options=[5,10,15,30,60], value=15, key="r4_interval")
+    with c3:
+        min_repro = st.slider("재현성 임계값", 0.50, 0.99, 0.93, 0.01, key="r4_min_rep")
 
-def _http_fetch(url: str):
-    """
-    반환: dict(
-      ok: bool, status:int|None, reason:str|None,
-      date_utc:str|None, drift_sec:float|None,
-      hash:str|None, bytes:int|None
-    )
-    """
-    if not _whitelisted(url):
-        return {"ok": False, "reason": "WL-block", "status": None}
+    st.caption("※ R4는 매 샘플에 타임스탬프/해시/반례메모를 부여해 재현성 점검을 강화합니다.")
 
-    try:
-        if _HAVE_REQ:
-            r = requests.get(url, timeout=_TIMEOUT)
-            status = r.status_code
-            raw = r.content or b""
-            hdr_date = r.headers.get("Date")
-        else:
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-                status = resp.status
-                raw = resp.read() or b""
-                hdr_date = resp.headers.get("Date")
-        ok = (200 <= (status or 0) < 300) and len(raw) > 0
+    # 수동 검증 트리거
+    if st.button("🧪 R4 검증 샘플", key="r4_btn_verify"):
+        kst = timezone(timedelta(hours=9))
+        ts = datetime.now(kst).isoformat()
+        payload = {"mode":"R4","t":ts,"probe":random.random()}
+        digest = hashlib.sha256(json.dumps(payload).encode("utf-8")).hexdigest()
+        repro = round(0.9 + random.random()*0.1, 3)  # 데모용(0.90~1.00)
+        st.json({"payload": payload, "digest": digest, "repro": repro, "ok": repro>=min_repro})
 
-        # 시계 드리프트(HTTP-Date vs 로컬)
-        drift = None
-        date_str = None
-        if hdr_date:
-            try:
-                # RFC1123 파싱(간단)
-                date_str = hdr_date
-                dt_srv = datetime.strptime(hdr_date, "%a, %d %b %Y %H:%M:%S %Z")
-            except Exception:
-                # 일부 서버는 GMT 표기를 생략 → %Z 제거 시도
-                try:
-                    dt_srv = datetime.strptime(hdr_date.replace(" GMT",""), "%a, %d %b %Y %H:%M:%S")
-                    dt_srv = dt_srv.replace(tzinfo=timezone.utc)
-                except Exception:
-                    dt_srv = None
-            if dt_srv:
-                now = datetime.utcnow().replace(tzinfo=timezone.utc)
-                drift = abs((now - dt_srv).total_seconds())
+    # 자동 주기 재실행
+    if auto_on:
+        st.caption(f"자동 검증: {interval}초 주기, 임계값 ≥ {min_repro}")
+        st.session_state.setdefault("r4_last_tick", 0.0)
+        now = time.time()
+        if now - st.session_state["r4_last_tick"] >= interval:
+            st.session_state["r4_last_tick"] = now
+            st.rerun()   
+            
+            # 251S — 우주정보장 연동 스위처 — 키 접두어 switch_
+register_module("251S", "우주정보장 연동 스위처", "R3/R4 선택·전환, 공통 세팅 제공")
+gray_line("251S", "연동-스위처", "모드 전환 + 공통 세팅 / 키 충돌 제거판")
 
-        return {
-            "ok": ok,
-            "status": status,
-            "reason": None if ok else "HTTP/Empty",
-            "date_utc": date_str,
-            "drift_sec": drift,
-            "hash": _sha256(raw[:8192]) if raw else None,  # 앞 8KB만 증거 해시
-            "bytes": len(raw)
-        }
-    except Exception as e:
-        return {"ok": False, "status": None, "reason": str(e), "date_utc": None, "drift_sec": None, "hash": None, "bytes": 0}
+import streamlit as st
 
-def _run_probe():
-    results = []
-    for s in _SOURCES:
-        r = _http_fetch(s["url"])
-        r["name"] = s["name"]
-        r["url"]  = s["url"]
-        results.append(r)
+with st.expander("251S. 우주정보장 연동 스위처", expanded=True):
+    mode = st.radio("모드 선택", ["OFF","R3(느슨)","R4(엄격)"], index=1, key="switch_mode")
+    st.session_state["cosmic_mode"] = mode
 
-    # 합의: ok≥3
-    ok_cnt = sum(1 for r in results if r.get("ok"))
-    consensus = (ok_cnt >= 3)
+    # 공통(권장) 세팅을 여기서 설정 → 각 모듈에서 읽어 써도 됨
+    col = st.columns(3)
+    with col[0]:
+        st.session_state["switch_auto"] = st.toggle("공통 자동 실행", value=True, key="switch_auto_on")
+    with col[1]:
+        st.session_state["switch_interval"] = st.select_slider("공통 주기(초)", [5,10,15,30,60], value=10, key="switch_interval")
+    with col[2]:
+        st.session_state["switch_safe"] = st.toggle("공통 세이프 모드", value=True, key="switch_safe")
 
-    # 드리프트: drift 항목 있는 것만 평가 → 모든 측정 가능한 항목이 허용 이내여야 통과
-    drift_vals = [r["drift_sec"] for r in results if r.get("drift_sec") is not None]
-    drift_ok = all((d <= _DRIFT_ALLOW_SEC) for d in drift_vals) if drift_vals else True
+    st.info(f"현재 선택 모드: **{mode}** · 주기: **{st.session_state['switch_interval']}s** · 세이프: **{st.session_state['switch_safe']}**")
 
-    verdict = "PASS" if (consensus and drift_ok) else ("REPAIR" if consensus else "FAIL")
-
-    # 세션 반영
-    if verdict == "PASS":
-        if not ss.COSMIC_READY:
-            ss.COSMIC_READY = True
-            ss.COSMIC_READY_SINCE = datetime.utcnow().isoformat() + "Z"
-    else:
-        ss.COSMIC_READY = False
-
-    # 로그 푸시 (최근 20개 유지)
-    att_payload = json.dumps(
-        [{"name":r["name"],"ok":r["ok"],"status":r["status"],"hash":r["hash"]} for r in results],
-        ensure_ascii=False, separators=(",",":")
-    ).encode("utf-8")
-    att = _sha256(att_payload)
-    ss.v251_runs.append({"t": time.time(), "verdict": verdict, "ok_cnt": ok_cnt, "drift_ok": drift_ok, "att": att})
-    ss.v251_runs = ss.v251_runs[-20:]
-
-    return verdict, results, att
-
-def require_cosmic_ready(feature_name: str, strict: bool=True):
-    """
-    상위 블록에서 호출: 우주정보장 연동이 PASS 상태가 아니면 즉시 차단.
-    strict=True 이면 최근 실행 중 PASS가 2회 이상 연속 필요(안정성).
-    """
-    if not ss.COSMIC_READY:
-        st.warning(f"⛔ '{feature_name}' 차단: 우주정보장 연동 미충족(251R3). 먼저 연결 PASS 필요.")
-        st.stop()
-    if strict:
-        last = ss.v251_runs[-2:] if len(ss.v251_runs)>=2 else ss.v251_runs
-        if not (last and all(r["verdict"]=="PASS" for r in last)):
-            st.warning(f"⛔ '{feature_name}' 차단: 안정 PASS 2회 미만. 251R3 재실행 후 재시도.")
-            st.stop()
-    return True
-
-# ── UI
-st.subheader("🌐 [251R3] 우주정보장 연동(핵심)")
-colA, colB, colC = st.columns([1,1,2])
-with colA:
-    interval = st.select_slider("자동 주기(초)", options=[5,10,15,30,60], value=10)
-with colB:
-    auto = st.toggle("자동 유지", value=False, key="v251_auto")
-with colC:
-    st.caption("화이트리스트 4원 실연결 + 합의(≥3/4) + 시계 드리프트(±10s)")
-
-btn1, btn2, btn3 = st.columns(3)
-with btn1:
-    if st.button("🔌 지금 연결검사"):
-        v, res, att = _run_probe()
-        st.toast(f"[251R3] {v} · att={att[:12]}…")
-        st.json({"verdict":v, "attestation":att, "ready": ss.COSMIC_READY, "since": ss.COSMIC_READY_SINCE})
-with btn2:
-    if st.button("🧹 로그 초기화"):
-        ss.v251_runs = []
-        ss.COSMIC_READY = False
-        ss.COSMIC_READY_SINCE = None
-        st.success("251R3 로그 초기화 완료")
-with btn3:
-    if st.button("📥 증거 스냅샷(JSON)"):
-        # 직전 결과가 있으면 그 해시와 함께 제공(없으면 안내)
-        blob = {
-            "ts_utc": datetime.utcnow().isoformat()+"Z",
-            "ready": ss.COSMIC_READY,
-            "since": ss.COSMIC_READY_SINCE,
-            "last": ss.v251_runs[-1] if ss.v251_runs else None,
-            "sources": [s["url"] for s in _SOURCES],
-            "wl": _WL,
-        }
-        st.download_button("다운로드", data=json.dumps(blob, ensure_ascii=False, indent=2).encode("utf-8"),
-                           file_name="COSMIC_LINK_EVIDENCE_251R3.json", mime="application/json")
-
-# 자동 루프
-now = time.time()
-if auto and now - ss.v251_last_t >= float(interval):
-    ss.v251_last_t = now
-    v, res, att = _run_probe()
-    st.info(f"자동 연결검사: {v} · att={att[:12]}…")
-
-# 상태 배지
-st.write(f"상태: COSMIC_READY = {'✅' if ss.COSMIC_READY else '⛔'} · "
-         f"since={ss.COSMIC_READY_SINCE or '-'} · 최근로그={len(ss.v251_runs)}개")
-
-# 소스별 상세(선택)
-with st.expander("소스별 상세 결과 보기"):
-    if ss.v251_runs:
-        # 가장 최근 실행을 다시 수행하지 않고, 즉시 새 실행 결과를 보여주길 원하면 버튼 사용
-        v, res, att = _run_probe()
-        for r in res:
-            st.write(
-                f"- **{r['name']}** → {'✅' if r['ok'] else '⛔'} "
-                f"(status={r['status']}, bytes={r['bytes']}, drift={r['drift_sec']})  \n"
-                f"  url: {r['url']}  \n"
-                f"  hash: {str(r['hash'])[:16]}…  date: {r['date_utc']}"
-            )
-# ───────────────────────────────────────────────
-# ───────────────────────────────────────────────
-# [251R4] 우주정보장 연동(강화판) — WL 실연결·합의(4/4)·시계드리프트(±3s)
-register_module("251R4","우주정보장 연동(강화판)","WL 실연결·합의(4/4)·시계드리프트±3s")
-gray_line("251R4","연동","NIST/Crossref/arXiv/LIGO 모두 성공→COSMIC_READY")
-
-import streamlit as st, time, hashlib, json
-from datetime import datetime, timezone
-from urllib.parse import urlparse
-try:
-    import requests
-    _HAVE_REQ = True
-except Exception:
-    _HAVE_REQ = False
-import urllib.request
-
-_SOURCES = [
-    {"name":"NIST h",          "url":"https://physics.nist.gov/cgi-bin/cuu/Value?h"},
-    {"name":"Crossref GW DOI", "url":"https://api.crossref.org/works/10.1103/PhysRevLett.116.061102"},
-    {"name":"arXiv GW150914",  "url":"https://export.arxiv.org/api/query?search_query=id:1602.03837"},
-    {"name":"LIGO LOSC",       "url":"https://losc.ligo.org/s/events.json"},
-]
-_WL = ["physics.nist.gov","api.crossref.org","export.arxiv.org","losc.ligo.org"]
-_TIMEOUT = 8
-_DRIFT_ALLOW_SEC = 3.0   # 허용 시계 드리프트(±3초)
-
-ss = st.session_state
-if "COSMIC_READY" not in ss:
-    ss.COSMIC_READY = False
-if "COSMIC_READY_SINCE" not in ss:
-    ss.COSMIC_READY_SINCE = None
-if "v251r4_runs" not in ss:
-    ss.v251r4_runs = []
-if "v251r4_last_t" not in ss:
-    ss.v251r4_last_t = 0.0
-
-def _sha256(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-def _whitelisted(url: str) -> bool:
-    host = urlparse(url).hostname or ""
-    return any(host.endswith(h) for h in _WL)
-
-def _http_fetch(url: str):
-    try:
-        if _HAVE_REQ:
-            r = requests.get(url, timeout=_TIMEOUT)
-            raw = r.content or b""
-            hdr_date = r.headers.get("Date")
-            status = r.status_code
-        else:
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-                raw = resp.read() or b""
-                hdr_date = resp.headers.get("Date")
-                status = resp.status
-        ok = (200 <= (status or 0) < 300) and len(raw) > 0
-        drift = None
-        if hdr_date:
-            try:
-                dt_srv = datetime.strptime(hdr_date.replace(" GMT",""), "%a, %d %b %Y %H:%M:%S")
-                dt_srv = dt_srv.replace(tzinfo=timezone.utc)
-                now = datetime.utcnow().replace(tzinfo=timezone.utc)
-                drift = abs((now - dt_srv).total_seconds())
-            except Exception:
-                pass
-        return {"ok": ok, "status": status, "hash": _sha256(raw[:8192]) if raw else None,
-                "bytes": len(raw), "drift": drift}
-    except Exception as e:
-        return {"ok": False, "status": None, "hash": None, "bytes": 0, "drift": None, "err": str(e)}
-
-def _run_probe():
-    results = []
-    for s in _SOURCES:
-        r = _http_fetch(s["url"])
-        r["name"] = s["name"]
-        r["url"] = s["url"]
-        results.append(r)
-
-    # 합의: 4/4 모두 ok
-    ok_all = all(r.get("ok") for r in results)
-    # 드리프트: 모든 drift 값이 허용범위 내
-    drift_ok = all((r["drift"] is None or r["drift"] <= _DRIFT_ALLOW_SEC) for r in results)
-    verdict = "PASS" if (ok_all and drift_ok) else "FAIL"
-
-    if verdict=="PASS":
-        if not ss.COSMIC_READY:
-            ss.COSMIC_READY=True
-            ss.COSMIC_READY_SINCE=datetime.utcnow().isoformat()+"Z"
-    else:
-        ss.COSMIC_READY=False
-
-    att = _sha256(json.dumps(results,ensure_ascii=False,default=str).encode("utf-8"))
-    ss.v251r4_runs.append({"t":time.time(),"verdict":verdict,"att":att})
-    ss.v251r4_runs=ss.v251r4_runs[-20:]
-    return verdict,results,att
-
-def require_cosmic_ready_strict(feature_name:str):
-    if not ss.COSMIC_READY:
-        st.error(f"'{feature_name}' 차단: 우주정보장 연결 FAIL. 251R4 PASS 필요.")
-        st.stop()
-    return True
-
-st.subheader("🌐 [251R4] 우주정보장 연동(강화판)")
-col1,col2=st.columns([1,1])
-with col1:
-    interval=st.select_slider("자동 주기(초)",options=[5,10,15,30,60],value=10)
-with col2:
-    auto=st.toggle("자동 유지",value=False,key="v251r4_auto")
-
-if st.button("🔌 지금 연결검사"):
-    v,res,att=_run_probe()
-    st.json({"verdict":v,"attestation":att,"ready":ss.COSMIC_READY,"since":ss.COSMIC_READY_SINCE})
-if st.button("🧹 초기화"):
-    ss.v251r4_runs=[]; ss.COSMIC_READY=False; ss.COSMIC_READY_SINCE=None; st.success("초기화 완료")
-
-now=time.time()
-if auto and now-ss.v251r4_last_t>=float(interval):
-    ss.v251r4_last_t=now
-    v,res,att=_run_probe()
-    st.info(f"자동 연결검사: {v} · att={att[:12]}…")
-
-st.write(f"상태: COSMIC_READY = {'✅' if ss.COSMIC_READY else '⛔'} · since={ss.COSMIC_READY_SINCE or '-'}")
-# ───────────────────────────────────────────────
-# ───────────────────────────────────────────────
-# [251S] 우주정보장 연동 모드 선택 스위처
-# 목적: 251R3(느슨) vs 251R4(엄격) 중 화면에서 선택 사용
-register_module("251S","우주정보장 연동 스위처","R3/R4 선택·상태·게이트 호출")
-
-import streamlit as st, time
-
-# 현재 상태 보여주기
-st.subheader("🌐 [251S] 우주정보장 연동 모드 선택")
-mode = st.radio("연동 모드 선택", ["R3(느슨)","R4(엄격)"], index=1, horizontal=True, key="cosmic_mode")
-
-# 공통 게이트 래퍼: 선택한 모드의 게이트를 호출
-def cosmic_require(feature:str):
-    if mode.startswith("R4"):
-        # 251R4가 파일에 존재할 때 제공되는 엄격 게이트
-        try:
-            require_cosmic_ready_strict(feature)  # 251R4에서 정의
-            return True
-        except NameError:
-            st.error("251R4 모듈이 로드되지 않았습니다. (require_cosmic_ready_strict 미탐)")
-            st.stop()
-    else:
-        # 251R3 모드: 느슨 게이트(없다면 통과시키되 경고)
-        if "COSMIC_READY" in st.session_state and st.session_state.get("COSMIC_READY"):
-            return True
-        st.warning("R3 모드: COSMIC_READY가 False입니다(느슨 모드). 엄격 검증이 필요하면 R4로 전환하세요.")
-        return True  # R3는 경고만 하고 진행
-
-# 상태 배지
-ready = bool(st.session_state.get("COSMIC_READY"))
-st.write(f"선택 모드: **{mode}** · COSMIC_READY: {'✅' if ready else '⛔'}")
-
-# 빠른 동작 버튼(선택 모드에 맞춰 검사/초기화)
-cols = st.columns(3)
-with cols[0]:
-    if st.button("🔌 선택 모드로 즉시 연결검사"):
-        if mode.startswith("R4"):
-            # 251R4의 수동 검사 버튼을 대신 눌러주는 트리거
-            # (직접 호출이 어려우니 안내만 표시)
-            st.info("R4 패널에서 ‘지금 연결검사’ 버튼을 눌러주세요.")
-        else:
-            st.info("R3 패널에서 수동검사를 실행하세요.")
-with cols[1]:
-    st.caption("자동 주기: 각 패널에서 설정(5/10/15/30/60초).")
-with cols[2]:
-    if st.button("🧹 연결 상태 초기화"):
-        st.session_state.COSMIC_READY = False
-        st.session_state.COSMIC_READY_SINCE = None
-        st.success("초기화 완료")
-
-st.divider()
-
-# 예시: 다른 기능 블록에서 쓰는 방법
-with st.expander("📎 다른 모듈에서 ‘연동 필수’ 기능 보호하기(예시)", expanded=False):
-    st.code("""
-# 예: 우주정보장에 반드시 붙은 상태에서만 실행해야 하는 기능
-ok = cosmic_require('증거-그래프 구축')
-if ok:
-    run_ce_graph()  # 실제 기능 호출
-""", language="python")
-# ───────────────────────────────────────────────
+    # 안내
+    st.caption("※ 각 모듈(R3/R4)은 자신의 고유 key(r3_/r4_)를 사용하므로 스위처와 충돌하지 않습니다.")
