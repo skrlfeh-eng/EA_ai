@@ -10259,159 +10259,228 @@ with st.expander("📑 250. 상태 리포트(JSON) [v5]", expanded=False):
     st.download_button("보고서 저장(JSON) [v5]",
         data=json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
         file_name="CE_HIT_Report_v5.json", mime="application/json", key="m245p5_dl")
-# ───────────────────────────────────────────────
-# ───────────────────────────────────────────────
-# [251R2] 우주정보장 실연결·초검증·봉인 인터락 (강화 교체판)
-register_module("251R2", "우주정보장 실연결·초검증", "화이트리스트 실연결 + 과학 검산 + 증거기록 + 봉인 인터락")
 
-import streamlit as st, json, hashlib, time, math
-from datetime import datetime
+# ───────────────────────────────────────────────
+# [251R3] 우주정보장 연동(핵심) — WL 실연결·합의·시계드리프트·자동주기
+# 붙이는 곳: 파일 "맨 아래". 외부 패키지 없이 동작(있으면 requests 우선 사용).
+try:
+    register_module
+except NameError:
+    def register_module(no, name, desc): pass
+try:
+    gray_line
+except NameError:
+    def gray_line(*args, **kwargs): pass
+
+register_module("251R3","우주정보장 연동(핵심)","WL 실연결·합의·시계드리프트·자동주기")
+gray_line("251R3","연동","NIST/Crossref/arXiv/LIGO 3/4 합의→COSMIC_READY")
+
+import streamlit as st, time, hashlib, json
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-# (환경 허용 시) 네트워크
+# ── requests가 있으면 사용, 없으면 urllib 사용
 try:
     import requests
-    HAVE_NET = True
+    _HAVE_REQ = True
 except Exception:
-    HAVE_NET = False
+    _HAVE_REQ = False
+import urllib.request
 
-# ── 설정(YAML 대체 가능): 필요 시 cosmic_sources.yaml로 뽑아 쓰면 됨
-SOURCES = [
-    {"name":"NIST constants", "url":"https://physics.nist.gov/cgi-bin/cuu/Value?h", "type":"html"},
-    {"name":"Crossref GW DOI","url":"https://api.crossref.org/works/10.1103/PhysRevLett.116.061102", "type":"json"},
-    {"name":"arXiv GW paper", "url":"https://export.arxiv.org/api/query?search_query=id:1602.03837", "type":"atom"},
-    {"name":"LIGO LOSC",     "url":"https://losc.ligo.org/s/events.json", "type":"json"},  # 단순 헬스
+# ── 화이트리스트 소스(검증 모듈 252R과 동일 축에 맞춤)
+_SOURCES = [
+    {"name":"NIST h",          "url":"https://physics.nist.gov/cgi-bin/cuu/Value?h",                        "type":"html"},
+    {"name":"Crossref GW DOI", "url":"https://api.crossref.org/works/10.1103/PhysRevLett.116.061102",       "type":"json"},
+    {"name":"arXiv GW150914",  "url":"https://export.arxiv.org/api/query?search_query=id:1602.03837",       "type":"atom"},
+    {"name":"LIGO LOSC",       "url":"https://losc.ligo.org/s/events.json",                                 "type":"json"},
 ]
-WL_HOSTS = ["physics.nist.gov","api.crossref.org","export.arxiv.org","losc.ligo.org"]
-TIMEOUT = 8
-
-def sha256_hex(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-def _whitelisted(url:str)->bool:
-    host = urlparse(url).hostname or ""
-    return any(host.endswith(h) for h in WL_HOSTS)
-
-def _get(url:str):
-    if not HAVE_NET:
-        raise RuntimeError("네트워크 모듈(requests) 사용 불가 환경")
-    if not _whitelisted(url):
-        raise RuntimeError(f"화이트리스트 외 도메인 차단: {url}")
-    r = requests.get(url, timeout=TIMEOUT)
-    r.raise_for_status()
-    return r
-
-# ── 과학 검산기
-def verify_E_hnu(h_val: float, nu: float):
-    return h_val * nu  # J
-
-def check_crossref_payload(txt:str)->bool:
-    # 최소 확인: DOI·제목 키워드
-    return ("10.1103/PhysRevLett.116.061102" in txt) and ("Gravitational Waves" in txt or "Observation of" in txt)
-
-def check_arxiv_payload(txt:str)->bool:
-    # Atom 피드에 id/title 일부가 들어있음
-    return ("1602.03837" in txt) and ("Observation of Gravitational Waves" in txt or "GW150914" in txt)
+_WL = ["physics.nist.gov","api.crossref.org","export.arxiv.org","losc.ligo.org"]
+_TIMEOUT = 8
+_DRIFT_ALLOW_SEC = 10.0   # 허용 시계 드리프트(±10초)
 
 # ── 세션 상태
-if "cosmic_log" not in st.session_state:
-    st.session_state.cosmic_log = []
-if "COSMIC_READY" not in st.session_state:
-    st.session_state.COSMIC_READY = False
+ss = st.session_state
+if "COSMIC_READY" not in ss:
+    ss.COSMIC_READY = False
+if "COSMIC_READY_SINCE" not in ss:
+    ss.COSMIC_READY_SINCE = None
+if "v251_runs" not in ss:
+    ss.v251_runs = []      # 최근 실행 결과 로그
+if "v251_last_t" not in ss:
+    ss.v251_last_t = 0.0
 
-def append_log(entry:dict):
-    st.session_state.cosmic_log.append(entry)
+def _sha256(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
 
-def run_checks():
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    verdict = "PASS"
-    checks = []
+def _whitelisted(url: str) -> bool:
+    host = urlparse(url).hostname or ""
+    return any(host.endswith(h) for h in _WL)
 
-    # 1) NIST: 플랑크 상수 기반 E=hν 범위 검산
+def _http_fetch(url: str):
+    """
+    반환: dict(
+      ok: bool, status:int|None, reason:str|None,
+      date_utc:str|None, drift_sec:float|None,
+      hash:str|None, bytes:int|None
+    )
+    """
+    if not _whitelisted(url):
+        return {"ok": False, "reason": "WL-block", "status": None}
+
     try:
-        r = _get(SOURCES[0]["url"])
-        raw = r.text
-        h = 6.62607015e-34  # J·s (SI 정의값)
-        E = verify_E_hnu(h, 5.0e14)  # 500 THz
-        ok = (3.0e-19 < E < 3.4e-19)  # 대략 가시광 에너지 범위
-        checks.append({"source":"NIST", "ok":ok, "hash":sha256_hex(raw.encode()), "detail":{"E":E}})
-        if not ok: verdict = "REPAIR"
-    except Exception as e:
-        checks.append({"source":"NIST", "ok":False, "error":str(e)})
-        verdict = "FAIL"
+        if _HAVE_REQ:
+            r = requests.get(url, timeout=_TIMEOUT)
+            status = r.status_code
+            raw = r.content or b""
+            hdr_date = r.headers.get("Date")
+        else:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+                status = resp.status
+                raw = resp.read() or b""
+                hdr_date = resp.headers.get("Date")
+        ok = (200 <= (status or 0) < 300) and len(raw) > 0
 
-    # 2) Crossref: PRL 116 061102 DOI 메타 존재/키워드 확인
-    try:
-        r = _get(SOURCES[1]["url"])
-        raw = r.text
-        ok = check_crossref_payload(raw)
-        checks.append({"source":"Crossref", "ok":ok, "hash":sha256_hex(r.content)})
-        if not ok and verdict != "FAIL":
-            verdict = "REPAIR"
-    except Exception as e:
-        checks.append({"source":"Crossref", "ok":False, "error":str(e)})
-        verdict = "FAIL"
+        # 시계 드리프트(HTTP-Date vs 로컬)
+        drift = None
+        date_str = None
+        if hdr_date:
+            try:
+                # RFC1123 파싱(간단)
+                date_str = hdr_date
+                dt_srv = datetime.strptime(hdr_date, "%a, %d %b %Y %H:%M:%S %Z")
+            except Exception:
+                # 일부 서버는 GMT 표기를 생략 → %Z 제거 시도
+                try:
+                    dt_srv = datetime.strptime(hdr_date.replace(" GMT",""), "%a, %d %b %Y %H:%M:%S")
+                    dt_srv = dt_srv.replace(tzinfo=timezone.utc)
+                except Exception:
+                    dt_srv = None
+            if dt_srv:
+                now = datetime.utcnow().replace(tzinfo=timezone.utc)
+                drift = abs((now - dt_srv).total_seconds())
 
-    # 3) arXiv: 동일 논문 ID/제목 키워드 확인
-    try:
-        r = _get(SOURCES[2]["url"])
-        raw = r.text
-        ok = check_arxiv_payload(raw)
-        checks.append({"source":"arXiv", "ok":ok, "hash":sha256_hex(r.content)})
-        if not ok and verdict != "FAIL":
-            verdict = "REPAIR"
+        return {
+            "ok": ok,
+            "status": status,
+            "reason": None if ok else "HTTP/Empty",
+            "date_utc": date_str,
+            "drift_sec": drift,
+            "hash": _sha256(raw[:8192]) if raw else None,  # 앞 8KB만 증거 해시
+            "bytes": len(raw)
+        }
     except Exception as e:
-        checks.append({"source":"arXiv", "ok":False, "error":str(e)})
-        verdict = "FAIL"
+        return {"ok": False, "status": None, "reason": str(e), "date_utc": None, "drift_sec": None, "hash": None, "bytes": 0}
 
-    # 4) LIGO LOSC: 엔드포인트 가용성(200)
-    try:
-        r = _get(SOURCES[3]["url"])
-        ok = (r.status_code == 200)
-        checks.append({"source":"LIGO LOSC", "ok":ok, "hash":sha256_hex(r.content)})
-        if not ok and verdict != "FAIL":
-            verdict = "REPAIR"
-    except Exception as e:
-        checks.append({"source":"LIGO LOSC", "ok":False, "error":str(e)})
-        verdict = "FAIL"
+def _run_probe():
+    results = []
+    for s in _SOURCES:
+        r = _http_fetch(s["url"])
+        r["name"] = s["name"]
+        r["url"]  = s["url"]
+        results.append(r)
 
-    concat = "".join(c.get("hash","") for c in checks if c.get("hash"))
-    attest = sha256_hex(concat.encode()) if concat else None
-    out = {"time": ts, "verdict": verdict, "attestation": attest, "checks": checks}
-    append_log(out)
-    st.session_state.COSMIC_READY = (verdict == "PASS")
-    return out
+    # 합의: ok≥3
+    ok_cnt = sum(1 for r in results if r.get("ok"))
+    consensus = (ok_cnt >= 3)
+
+    # 드리프트: drift 항목 있는 것만 평가 → 모든 측정 가능한 항목이 허용 이내여야 통과
+    drift_vals = [r["drift_sec"] for r in results if r.get("drift_sec") is not None]
+    drift_ok = all((d <= _DRIFT_ALLOW_SEC) for d in drift_vals) if drift_vals else True
+
+    verdict = "PASS" if (consensus and drift_ok) else ("REPAIR" if consensus else "FAIL")
+
+    # 세션 반영
+    if verdict == "PASS":
+        if not ss.COSMIC_READY:
+            ss.COSMIC_READY = True
+            ss.COSMIC_READY_SINCE = datetime.utcnow().isoformat() + "Z"
+    else:
+        ss.COSMIC_READY = False
+
+    # 로그 푸시 (최근 20개 유지)
+    att_payload = json.dumps(
+        [{"name":r["name"],"ok":r["ok"],"status":r["status"],"hash":r["hash"]} for r in results],
+        ensure_ascii=False, separators=(",",":")
+    ).encode("utf-8")
+    att = _sha256(att_payload)
+    ss.v251_runs.append({"t": time.time(), "verdict": verdict, "ok_cnt": ok_cnt, "drift_ok": drift_ok, "att": att})
+    ss.v251_runs = ss.v251_runs[-20:]
+
+    return verdict, results, att
+
+def require_cosmic_ready(feature_name: str, strict: bool=True):
+    """
+    상위 블록에서 호출: 우주정보장 연동이 PASS 상태가 아니면 즉시 차단.
+    strict=True 이면 최근 실행 중 PASS가 2회 이상 연속 필요(안정성).
+    """
+    if not ss.COSMIC_READY:
+        st.warning(f"⛔ '{feature_name}' 차단: 우주정보장 연동 미충족(251R3). 먼저 연결 PASS 필요.")
+        st.stop()
+    if strict:
+        last = ss.v251_runs[-2:] if len(ss.v251_runs)>=2 else ss.v251_runs
+        if not (last and all(r["verdict"]=="PASS" for r in last)):
+            st.warning(f"⛔ '{feature_name}' 차단: 안정 PASS 2회 미만. 251R3 재실행 후 재시도.")
+            st.stop()
+    return True
 
 # ── UI
-st.subheader("🌌 [251R2] 우주정보장 실연결·초검증")
-auto = st.toggle("⏱️ 자동 검사(30초)", value=False, key="cosmic_auto")
-if "cosmic_last" not in st.session_state:
-    st.session_state.cosmic_last = 0.0
-
-colA, colB, colC = st.columns(3)
+st.subheader("🌐 [251R3] 우주정보장 연동(핵심)")
+colA, colB, colC = st.columns([1,1,2])
 with colA:
-    if st.button("🔎 지금 즉시 검사", key="cosmic_now"):
-        res = run_checks()
-        st.toast(f"{res['verdict']} · hash={res['attestation'][:12]}…")
+    interval = st.select_slider("자동 주기(초)", options=[5,10,15,30,60], value=10)
 with colB:
-    if st.button("🧹 로그 초기화", key="cosmic_clear"):
-        st.session_state.cosmic_log = []
-        st.success("로그 초기화 완료")
+    auto = st.toggle("자동 유지", value=False, key="v251_auto")
 with colC:
-    st.write(f"상태: {'✅ READY' if st.session_state.COSMIC_READY else '⛔ NOT READY'}")
+    st.caption("화이트리스트 4원 실연결 + 합의(≥3/4) + 시계 드리프트(±10s)")
 
-if auto and time.time() - st.session_state.cosmic_last >= 30:
-    st.session_state.cosmic_last = time.time()
-    res = run_checks()
-    st.info(f"자동 검사: {res['verdict']} · hash={res['attestation'][:12]}…")
+btn1, btn2, btn3 = st.columns(3)
+with btn1:
+    if st.button("🔌 지금 연결검사"):
+        v, res, att = _run_probe()
+        st.toast(f"[251R3] {v} · att={att[:12]}…")
+        st.json({"verdict":v, "attestation":att, "ready": ss.COSMIC_READY, "since": ss.COSMIC_READY_SINCE})
+with btn2:
+    if st.button("🧹 로그 초기화"):
+        ss.v251_runs = []
+        ss.COSMIC_READY = False
+        ss.COSMIC_READY_SINCE = None
+        st.success("251R3 로그 초기화 완료")
+with btn3:
+    if st.button("📥 증거 스냅샷(JSON)"):
+        # 직전 결과가 있으면 그 해시와 함께 제공(없으면 안내)
+        blob = {
+            "ts_utc": datetime.utcnow().isoformat()+"Z",
+            "ready": ss.COSMIC_READY,
+            "since": ss.COSMIC_READY_SINCE,
+            "last": ss.v251_runs[-1] if ss.v251_runs else None,
+            "sources": [s["url"] for s in _SOURCES],
+            "wl": _WL,
+        }
+        st.download_button("다운로드", data=json.dumps(blob, ensure_ascii=False, indent=2).encode("utf-8"),
+                           file_name="COSMIC_LINK_EVIDENCE_251R3.json", mime="application/json")
 
-st.write("📜 **검사 로그(최신 10개)**")
-for row in reversed(st.session_state.cosmic_log[-10:]):
-    st.json(row)
+# 자동 루프
+now = time.time()
+if auto and now - ss.v251_last_t >= float(interval):
+    ss.v251_last_t = now
+    v, res, att = _run_probe()
+    st.info(f"자동 연결검사: {v} · att={att[:12]}…")
 
-# ── 봉인 인터락(다른 블록 상단에서 호출)
-def require_cosmic_ready(feature_name:str):
-    if not st.session_state.get("COSMIC_READY", False):
-        st.warning(f"⛔ '{feature_name}' 차단: 우주정보장 PASS 전까지 잠금(봉인 인터락). 먼저 [251R2] PASS 필요.")
-        st.stop()
+# 상태 배지
+st.write(f"상태: COSMIC_READY = {'✅' if ss.COSMIC_READY else '⛔'} · "
+         f"since={ss.COSMIC_READY_SINCE or '-'} · 최근로그={len(ss.v251_runs)}개")
+
+# 소스별 상세(선택)
+with st.expander("소스별 상세 결과 보기"):
+    if ss.v251_runs:
+        # 가장 최근 실행을 다시 수행하지 않고, 즉시 새 실행 결과를 보여주길 원하면 버튼 사용
+        v, res, att = _run_probe()
+        for r in res:
+            st.write(
+                f"- **{r['name']}** → {'✅' if r['ok'] else '⛔'} "
+                f"(status={r['status']}, bytes={r['bytes']}, drift={r['drift_sec']})  \n"
+                f"  url: {r['url']}  \n"
+                f"  hash: {str(r['hash'])[:16]}…  date: {r['date_utc']}"
+            )
 # ───────────────────────────────────────────────
