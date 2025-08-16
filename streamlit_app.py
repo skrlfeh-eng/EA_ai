@@ -10394,9 +10394,11 @@ if st.button("리페어 실행", key="rep245_run"):
     st.caption(f"Gate: {msg}")
 
 # ───────────────────────────────────────────────
-# [246-HOTFIX] CE-HIT Builder v2 (Unique Keys)
-# 목적: PASS/FAIL 제약 수·증거 등을 입력해 HIT(검증 단위)를 큐에 적재
-# 변경점: 모든 위젯에 고유 key 부여 -> StreamlitDuplicateElementId 방지
+# ───────────────────────────────────────────────
+# [246C] CE-HIT 통합 스위트 v3 (No-Dup-Key Edition)
+# 포함: 246(HIT작성) + 247(큐미리보기) + 248(그래프반영 Stub)
+#     + 249(검증 Stub) + 250(리포트)
+# 모든 위젯 key = m246c_*  → StreamlitDuplicateElementId 원천 차단
 import streamlit as st, time, json, hashlib
 from datetime import datetime
 
@@ -10406,494 +10408,103 @@ if "gray_line" not in globals():
     def gray_line(num,title,subtitle):
         st.markdown(f"**[{num}] {title}** — {subtitle}")
 
-register_module("246-HOTFIX","CE-HIT Builder v2","위젯 키 고유화(충돌 방지)")
-gray_line("246-HOTFIX","HIT 생성/적재","중복키 방지 버전")
+register_module("246C","CE-HIT 통합 스위트 v3","246~250 통합/키충돌 차단")
+gray_line("246C","CE-HIT 통합","작성→미리보기→그래프반영→검증→리포트")
 
-# 세션 큐 키 선택(기존 이름과 호환)
+# 공용 큐 (기존 이름과 호환)
 _qkey = "hit_queue" if "hit_queue" in st.session_state else ("ce_hit_queue" if "ce_hit_queue" in st.session_state else "hit_queue")
 if _qkey not in st.session_state:
     st.session_state[_qkey] = []
 
-# 입력 위젯 (모두 unique key)
-with st.expander("🧱 HIT 입력 (PASS/FAIL 제약 · 증거 · 신뢰도)", expanded=True):
-    claim = st.text_area("주장(Claim)", key="m246_claim_txt")
-    evidence = st.text_area("증거 요약(Evidence)", key="m246_evidence_txt")
-    pass_cons = st.number_input("PASS 제약 개수", min_value=0, max_value=999, value=1, step=1, key="m246_pass_n")
-    fail_cons = st.number_input("FAIL 제약 개수", min_value=0, max_value=999, value=0, step=1, key="m246_fail_n")
-    conf = st.slider("신뢰도(0.0~1.0)", 0.0, 1.0, 0.7, 0.01, key="m246_conf")
-    src = st.text_input("출처/근거 링크(선택)", key="m246_src")
-    add_to_graph = st.checkbox("HIT를 CE-Graph에 'contradicts' 간선으로 추가", value=False, key="m246_add_graph")
+# ========== 246: HIT 작성 ==========
+with st.expander("🧱 246. HIT 작성 (PASS/FAIL 제약 · 증거 · 신뢰도)", expanded=True):
+    claim = st.text_area("주장(Claim)", key="m246c_claim")
+    evidence = st.text_area("증거 요약(Evidence)", key="m246c_evi")
+    pass_cons = st.number_input("PASS 제약 개수", 0, 999, 1, 1, key="m246c_pass")
+    fail_cons = st.number_input("FAIL 제약 개수", 0, 999, 0, 1, key="m246c_fail")
+    conf = st.slider("신뢰도(0.0~1.0)", 0.0, 1.0, 0.70, 0.01, key="m246c_conf")
+    src = st.text_input("출처/근거 링크(선택)", key="m246c_src")
+    add_to_graph = st.checkbox("CE-Graph에 'contradicts' 간선 추가", value=False, key="m246c_add")
+    colA,colB = st.columns(2)
+    with colA:
+        if st.button("HIT 큐에 적재", key="m246c_push"):
+            hit = {
+                "id": f"HIT-{int(time.time()*1000)}",
+                "ts": datetime.utcnow().isoformat()+"Z",
+                "claim": (claim or "").strip(),
+                "evidence": (evidence or "").strip(),
+                "pass_cons": int(pass_cons),
+                "fail_cons": int(fail_cons),
+                "confidence": float(conf),
+                "source": (src or "").strip(),
+                "add_to_graph": bool(add_to_graph),
+            }
+            st.session_state[_qkey].append(hit)
+            st.success(f"적재 완료: {_qkey} size = {len(st.session_state[_qkey])}")
+    with colB:
+        if st.button("작성 입력 초기화", key="m246c_reset"):
+            for k in ("m246c_claim","m246c_evi","m246c_pass","m246c_fail","m246c_conf","m246c_src","m246c_add"):
+                if k in st.session_state: del st.session_state[k]
+            st.experimental_rerun()
 
-colA,colB = st.columns([1,1])
-with colA:
-    if st.button("HIT 큐에 적재", key="m246_btn_enqueue"):
-        hit = {
-            "id": f"HIT-{int(time.time()*1000)}",
-            "ts": datetime.utcnow().isoformat()+"Z",
-            "claim": claim.strip(),
-            "evidence": evidence.strip(),
-            "pass_cons": int(pass_cons),
-            "fail_cons": int(fail_cons),
-            "confidence": float(conf),
-            "source": src.strip(),
-            "add_to_graph": bool(add_to_graph),
-        }
-        st.session_state[_qkey].append(hit)
-        st.success(f"적재 완료: {_qkey} size = {len(st.session_state[_qkey])}")
-with colB:
-    if st.button("큐 비우기", key="m246_btn_clear"):
-        st.session_state[_qkey].clear()
-        st.info("큐를 비웠습니다.")
+# ========== 247: 큐 미리보기 ==========
+with st.expander("👀 247. 큐 미리보기 / 관리", expanded=False):
+    st.caption(f"큐 크기: {len(st.session_state[_qkey])}")
+    if st.session_state[_qkey]:
+        st.json(st.session_state[_qkey][-1], expanded=False)
+        c1,c2 = st.columns(2)
+        with c1:
+            if st.button("큐 전체 보기", key="m246c_view_all"):
+                st.json(st.session_state[_qkey], expanded=False)
+        with c2:
+            if st.button("큐 비우기", key="m246c_clear"):
+                st.session_state[_qkey].clear()
+                st.info("큐를 비웠습니다.")
 
-# 미리보기
-if st.session_state[_qkey]:
-    st.caption("현재 큐")
-    st.json(st.session_state[_qkey][-1])
+# ========== 248: 그래프 반영(Stub) ==========
+with st.expander("🕸️ 248. CE-Graph 반영(Stub)", expanded=False):
+    st.caption("실환경 그래프 엔진 연결 전까지는 로그만 남김.")
+    if st.button("그래프에 반영 시뮬레이트", key="m246c_graph_apply"):
+        applied = [h for h in st.session_state[_qkey] if h.get("add_to_graph")]
+        st.write(f"'contradicts' 간선 후보: {len(applied)}개")
+        st.code(json.dumps(applied, ensure_ascii=False, indent=2))
+        st.success("반영 시뮬레이션 완료(Stub)")
 
-# 게이트(있으면) 로그
+# ========== 249: 검증 러너(Stub) ==========
+with st.expander("🧪 249. 검증 러너(Stub)", expanded=False):
+    st.caption("간단한 규칙 기반 검증 시뮬레이터")
+    th_fail = st.slider("FAIL 허용 상한(개)", 0, 10, 0, key="m246c_th_fail")
+    th_conf = st.slider("최소 신뢰도", 0.0, 1.0, 0.6, 0.01, key="m246c_th_conf")
+    if st.button("검증 실행", key="m246c_run_val"):
+        results = []
+        for h in st.session_state[_qkey]:
+            ok = (h["fail_cons"] <= th_fail) and (h["confidence"] >= th_conf)
+            results.append({**h, "ok": ok})
+        st.session_state["m246c_results"] = results
+        st.success(f"검증 완료: {sum(1 for r in results if r['ok'])}/{len(results)} pass")
+        st.json(results, expanded=False)
+
+# ========== 250: 상태 리포트 ==========
+with st.expander("📑 250. 상태 리포트(JSON)", expanded=False):
+    report = {
+        "ts": datetime.utcnow().isoformat()+"Z",
+        "queue_size": len(st.session_state[_qkey]),
+        "last_hit": (st.session_state[_qkey][-1] if st.session_state[_qkey] else None),
+        "validation": st.session_state.get("m246c_results"),
+    }
+    st.json(report, expanded=False)
+    st.download_button("보고서 저장(JSON)", data=json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="CE_HIT_Report.json", mime="application/json", key="m246c_dl_report")
+
+# 게이트 메시지(있으면)
 try:
     if "backbone_gate" in globals():
-        ok,msg = backbone_gate("CE-HIT Builder v2","② 초검증 루프 전진")
+        ok,msg = backbone_gate("CE-HIT 통합 스위트 v3","② 초검증 루프 고도화")
     elif "spx_backbone_gate" in globals():
-        ok,msg = spx_backbone_gate("CE-HIT Builder v2","② 초검증 루프 전진")
+        ok,msg = spx_backbone_gate("CE-HIT 통합 스위트 v3","② 초검증 루프 고도화")
     else:
         ok,msg = True,"게이트 미사용"
     st.caption(f"Gate: {msg}")
 except Exception:
     pass
-# ───────────────────────────────────────────────
-# ───────────────────────────────────────────────
-# [247] 어댑터 모의 실행기 v1 — 증거 재수집 큐 실행·검증 루프(더미 어댑터)
-# 목적:
-#   - [246] evidence_fetch_queue.json 을 읽어, 어댑터 라우팅에 따라 모의 실행
-#   - 각 claim에 대해 "가짜 증거 items" 생성 → 검증 루프에 전달할 자리표시자
-#   - 척추 ① 현실연동, ② 초검증 강화
-#
-# 입력:
-#   - evidence_fetch_queue.json
-#   - adapter_routes.json
-#
-# 출력:
-#   - simulated_fetch_results.json (claim별 어댑터 결과 리스트)
-#   - summary 테이블(성공/실패/스킵 수)
-#
-import streamlit as st, json, time, random
-from typing import List, Dict, Any
-
-if "register_module" not in globals():
-    def register_module(num,name,desc): pass
-if "gray_line" not in globals():
-    def gray_line(num,title,subtitle):
-        st.markdown(f"**[{num}] {title}** — {subtitle}")
-
-register_module("247","어댑터 모의 실행기 v1","재수집 큐를 더미 어댑터로 실행·검증 루프")
-gray_line("247","Adapter Simulation","재수집 큐 실행 → 증거 더미 생성")
-
-# === 유틸 ===
-def _read_json(up, label:str)->Any:
-    if up is None: return None
-    try: return json.load(up)
-    except Exception as e:
-        st.error(f"{label} 로드 실패: {e}"); return None
-
-def _dummy_fetch(query:str, adapter:str)->List[Dict[str,Any]]:
-    """임시 증거 더미 생성"""
-    items=[]
-    k=random.randint(1,3)
-    for i in range(k):
-        items.append({
-            "title": f"{adapter.upper()} evidence {i+1}",
-            "snippet": f"쿼리 [{query}] 로부터 생성된 모의 증거 {i+1}",
-            "source": f"{adapter}://dummy/{hash(query)%1000+i}"
-        })
-    return items
-
-# === 입력 ===
-st.subheader("📥 입력")
-col1,col2 = st.columns(2)
-with col1:
-    up_queue = st.file_uploader("evidence_fetch_queue.json", type=["json"], key="adap_q")
-with col2:
-    up_routes = st.file_uploader("adapter_routes.json", type=["json"], key="adap_r")
-
-# === 실행 ===
-if st.button("모의 실행 시작", key="adap_run"):
-    qjson = _read_json(up_queue,"큐")
-    rjson = _read_json(up_routes,"라우트")
-    if not qjson or not rjson:
-        st.stop()
-    items = qjson.get("items") or []
-    results=[]
-    succ,fail=0,0
-    for job in items:
-        cid=job.get("claim_id"); adapters=job.get("adapters",[])
-        qs=job.get("queries",[])
-        claim_text=job.get("claim_text","")
-        out=[]
-        for ad in adapters:
-            for q in qs:
-                try:
-                    time.sleep(0.01)
-                    fetched=_dummy_fetch(q,ad)
-                    out.extend(fetched)
-                except Exception:
-                    fail+=1
-        results.append({"claim_id":cid,"claim_text":claim_text,"fetched":out})
-        succ+=1
-    st.subheader("🗂 모의 결과 미리보기")
-    st.json(results[:5] if len(results)>5 else results)
-    st.success(f"총 {len(results)} claim 모의 실행 완료 · succ={succ}, fail={fail}")
-
-    # 다운로드
-    st.download_button("📤 simulated_fetch_results.json 저장",
-        data=json.dumps({"results":results},ensure_ascii=False,indent=2).encode("utf-8"),
-        file_name="simulated_fetch_results.json",mime="application/json",key="adap_dl")
-
-    # 게이트 호출(척추 정책)
-    try:
-        if "backbone_gate" in globals():
-            ok,msg=backbone_gate("Adapter Simulation v1","현실연동·초검증 강화")
-        elif "spx_backbone_gate" in globals():
-            ok,msg=spx_backbone_gate("Adapter Simulation v1","현실연동·초검증 강화")
-        else:
-            ok,msg=True,"게이트 없음(코어 진행)"
-    except Exception:
-        ok,msg=True,"게이트 확인 중 예외"
-    st.caption(f"Gate: {msg}")
-# ───────────────────────────────────────────────
-# ───────────────────────────────────────────────
-# [248] 검증 루프 통합기 v1 — 모의 증거 결과 → CE-Graph 재검증 루프
-# 목적:
-#   - [247] simulated_fetch_results.json 입력
-#   - claim별 fetched 증거를 읽어 "재검증 점수" 생성 (더미)
-#   - CE-Graph 노드에 연결된 것처럼 미리보기
-#   - 척추② 초검증, ① 현실연동 보강
-#
-# 출력:
-#   - validation_results.json (claim_id별 검증 점수)
-#
-import streamlit as st, json, random
-from typing import Any, Dict
-
-if "register_module" not in globals():
-    def register_module(num,name,desc): pass
-if "gray_line" not in globals():
-    def gray_line(num,title,subtitle):
-        st.markdown(f"**[{num}] {title}** — {subtitle}")
-
-register_module("248","검증 루프 통합기 v1","모의 증거→재검증 루프")
-gray_line("248","Validation Loop","증거→재검증 점수→CE-Graph 연결 스텁")
-
-# === 유틸 ===
-def _read_json(up,label:str)->Any:
-    if up is None: return None
-    try: return json.load(up)
-    except Exception as e:
-        st.error(f"{label} 로드 실패: {e}"); return None
-
-def _dummy_validation(fetched:list)->Dict[str,Any]:
-    """모의 증거에 대해 임의의 검증 점수 생성"""
-    return {
-        "support": round(random.uniform(0,1),2),
-        "contradict": round(random.uniform(0,1),2),
-        "neutral": round(random.uniform(0,1),2),
-        "total_evidence": len(fetched)
-    }
-
-# === 입력 ===
-up = st.file_uploader("simulated_fetch_results.json", type=["json"], key="val_in")
-
-if st.button("재검증 실행", key="val_run"):
-    j=_read_json(up,"모의 결과")
-    if not j: st.stop()
-    results=j.get("results",[])
-    out=[]
-    for r in results:
-        cid=r.get("claim_id"); claim_text=r.get("claim_text","")
-        fetched=r.get("fetched",[])
-        score=_dummy_validation(fetched)
-        out.append({
-            "claim_id":cid,
-            "claim_text":claim_text,
-            "validation":score
-        })
-    st.subheader("📊 검증 점수 미리보기")
-    st.json(out[:5] if len(out)>5 else out)
-
-    st.download_button("📤 validation_results.json 저장",
-        data=json.dumps({"validation":out},ensure_ascii=False,indent=2).encode("utf-8"),
-        file_name="validation_results.json",mime="application/json",key="val_dl")
-
-    # 게이트
-    try:
-        if "backbone_gate" in globals():
-            ok,msg=backbone_gate("Validation Loop v1","초검증 강화·CE-Graph 연결")
-        elif "spx_backbone_gate" in globals():
-            ok,msg=spx_backbone_gate("Validation Loop v1","초검증 강화·CE-Graph 연결")
-        else:
-            ok,msg=True,"게이트 없음"
-    except Exception:
-        ok,msg=True,"게이트 확인 중 예외"
-    st.caption(f"Gate: {msg}")
-# ───────────────────────────────────────────────
-# ───────────────────────────────────────────────
-# [249] CE-Graph 노드 업데이트기 v1 — 재검증 점수 → 그래프 가중치 반영
-# 목적:
-#   - [248] validation_results.json 의 claim별 점수를 CE-Graph에 반영
-#   - claim 노드의 메트릭 필드 갱신, evidence→claim 간선 가중치(weight) 재스케일
-#   - 간단 규칙: support↑ → supports 가중↑, contradict↑ → contradicts 가중↑
-# 출력:
-#   - ce_graph.updated.json (갱신본)
-#   - 업데이트 요약 테이블
-import streamlit as st, json, math, time
-from typing import Dict, Any, List
-
-if "register_module" not in globals():
-    def register_module(num,name,desc): pass
-if "gray_line" not in globals():
-    def gray_line(num,title,subtitle):
-        st.markdown(f"**[{num}] {title}** — {subtitle}")
-
-register_module("249","CE-Graph 노드 업데이트기 v1","검증 점수를 그래프 가중치에 반영")
-gray_line("249","CE-Graph Update","validation→노드/간선 가중치 반영")
-
-# ===== 유틸 =====
-def _read_json(up,label:str):
-    if up is None: return None
-    try: return json.load(up)
-    except Exception as e:
-        st.error(f"{label} 로드 실패: {e}"); return None
-
-def _index_nodes(nodes:List[Dict[str,Any]])->Dict[str,Dict[str,Any]]:
-    return {n.get("id"): n for n in nodes if isinstance(n,dict)}
-
-def _safe_float(x, default=0.0):
-    try:
-        return float(x)
-    except Exception:
-        return default
-
-def _rescale_edge_weights(edges:List[Dict[str,Any]], cid:str, support:float, contradict:float):
-    """해당 claim으로 들어오는 간선의 기본 가중을 재스케일"""
-    sup_k = 0.5 + min(1.5, support)   # 0.5~2.0
-    con_k = 0.5 + min(1.5, contradict)
-    for e in edges:
-        if e.get("dst") != cid: 
-            continue
-        rel = e.get("rel")
-        w = _safe_float(e.get("weight", 1.0), 1.0)
-        if rel == "supports":
-            e["weight"] = round(max(0.0, w * sup_k), 4)
-        elif rel == "contradicts":
-            e["weight"] = round(max(0.0, w * con_k), 4)
-
-# ===== 입력 =====
-st.subheader("📥 입력")
-c1,c2 = st.columns(2)
-with c1:
-    up_graph = st.file_uploader("원본 CE-Graph (JSON)", type=["json"], key="cg_up")
-with c2:
-    up_val   = st.file_uploader("validation_results.json", type=["json"], key="vr_up")
-
-if st.button("업데이트 실행", key="cg_run"):
-    g = _read_json(up_graph, "CE-Graph")
-    v = _read_json(up_val,   "validation")
-    if not g or not v:
-        st.stop()
-
-    nodes = list(g.get("nodes") or [])
-    edges = list(g.get("edges") or [])
-    idx   = _index_nodes(nodes)
-    vin   = v.get("validation") or []
-
-    changed = 0
-    summary = []
-    for row in vin:
-        cid   = row.get("claim_id")
-        ctext = row.get("claim_text","")
-        sc    = row.get("validation") or {}
-        sup   = _safe_float(sc.get("support"), 0.0)
-        con   = _safe_float(sc.get("contradict"), 0.0)
-        neu   = _safe_float(sc.get("neutral"), 0.0)
-        tot_e = int(sc.get("total_evidence") or 0)
-
-        n = idx.get(cid)
-        if not n: 
-            summary.append({"claim_id":cid,"status":"SKIP(no-claim-node)"})
-            continue
-
-        # 노드 메트릭 갱신
-        payload = n.get("payload") or {}
-        metrics = payload.get("metrics") or {}
-        metrics.update({
-            "support": round(sup,3),
-            "contradict": round(con,3),
-            "neutral": round(neu,3),
-            "total_evidence": tot_e,
-            "updated_at": int(time.time())
-        })
-        payload["metrics"] = metrics
-        if ctext and not payload.get("text"):
-            payload["text"] = ctext
-        n["payload"] = payload
-
-        # 간선 가중치 재스케일
-        _rescale_edge_weights(edges, cid, sup, con)
-
-        changed += 1
-        summary.append({
-            "claim_id": cid,
-            "support": round(sup,3),
-            "contradict": round(con,3),
-            "neutral": round(neu,3),
-            "total_evidence": tot_e,
-            "status": "UPDATED"
-        })
-
-    out_graph = {
-        "nodes": nodes,
-        "edges": edges,
-        "updated_at": int(time.time()),
-        "update_info": {"changed_claims": changed}
-    }
-
-    st.subheader("📊 업데이트 요약")
-    st.dataframe(summary, use_container_width=True, hide_index=True)
-    st.success(f"업데이트 완료: {changed}개 claim 반영")
-
-    st.download_button("📤 ce_graph.updated.json 저장",
-        data=json.dumps(out_graph, ensure_ascii=False, indent=2).encode("utf-8"),
-        file_name="ce_graph.updated.json", mime="application/json", key="cg_dl")
-
-    # 척추 게이트 로깅
-    try:
-        if "backbone_gate" in globals():
-            ok,msg=backbone_gate("CE-Graph 업데이트 v1","현실연동/초검증 강화")
-        elif "spx_backbone_gate" in globals():
-            ok,msg=spx_backbone_gate("CE-Graph 업데이트 v1","현실연동/초검증 강화")
-        else:
-            ok,msg=True,"게이트 없음"
-    except Exception:
-        ok,msg=True,"게이트 확인 중 예외"
-    st.caption(f"Gate: {msg}")
-# ───────────────────────────────────────────────
-# ───────────────────────────────────────────────
-# [250] Memory Commit & Re-inject v1 — 업데이트 그래프 영구기록(JSONL) + 재주입
-# 목적:
-#   - [249]에서 만든 ce_graph.updated.json 을 append-only 메모리 로그(JSONL)에 커밋
-#   - 세션 상태로 재주입하여 다음 루프(검색/검증/스코어링)에 즉시 활용
-#   - 체크포인트 해시 제공(되돌리기·재개용)
-#
-# 출력:
-#   - memory_log.jsonl (다운로드)
-#   - checkpoint_hash.txt (다운로드)
-#   - 세션 재주입 상태 미리보기
-import streamlit as st, json, hashlib, time
-from typing import Dict, Any
-
-if "register_module" not in globals():
-    def register_module(num,name,desc): pass
-if "gray_line" not in globals():
-    def gray_line(num,title,subtitle):
-        st.markdown(f"**[{num}] {title}** — {subtitle}")
-
-register_module("250","Memory Commit & Re-inject v1","append-only JSONL 커밋 + 세션 재주입")
-gray_line("250","Memory & Re-inject","업데이트 그래프를 영구기록하고 세션에 재주입")
-
-# ====== 유틸 ======
-def _sha256_hex(b: bytes)->str:
-    return hashlib.sha256(b).hexdigest()
-
-def _read_json(up,label:str):
-    if up is None: return None
-    try: return json.load(up)
-    except Exception as e:
-        st.error(f"{label} 로드 실패: {e}"); return None
-
-def _mk_record(graph:Dict[str,Any])->Dict[str,Any]:
-    raw = json.dumps(graph, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    return {
-        "ts": int(time.time()),
-        "type": "ce_graph",
-        "sha256": _sha256_hex(raw),
-        "payload": graph
-    }
-
-# ====== 입력 ======
-st.subheader("📥 입력: 업데이트 그래프 불러오기")
-up_graph = st.file_uploader("ce_graph.updated.json", type=["json"], key="mem_ceg")
-
-# ====== 커밋 (append-only JSONL) ======
-st.subheader("🧷 메모리 커밋(JSONL)")
-st.caption("여기서 생성되는 JSONL은 줄당 하나의 레코드(append-only)입니다.")
-if st.button("메모리에 커밋", key="mem_commit"):
-    g = _read_json(up_graph, "업데이트 그래프")
-    if not g: st.stop()
-    rec = _mk_record(g)
-    # JSONL 한 줄로 직렬화
-    line = (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8")
-    st.download_button("📤 memory_log.jsonl (1레코드)", data=line,
-                       file_name="memory_log.jsonl", mime="application/json",
-                       key="mem_dl_jsonl")
-    st.success(f"커밋 준비 완료 · sha256={rec['sha256']}")
-
-    # 체크포인트 해시 파일
-    st.download_button("🔐 checkpoint_hash.txt",
-                       data=(rec["sha256"]+"\n").encode("utf-8"),
-                       file_name="checkpoint_hash.txt", mime="text/plain",
-                       key="mem_dl_cp")
-
-    # 세션 상태 힌트 저장
-    st.session_state["mem_last_record"] = rec
-    st.caption("세션에 최근 레코드 핸들 저장 완료(mem_last_record).")
-
-# ====== JSONL 누적 병합(선택) ======
-st.subheader("🗂 JSONL 병합(선택)")
-st.caption("이전 memory_log.jsonl 과 이번 커밋을 합쳐 새 JSONL로 내보낼 수 있어요.")
-prev = st.file_uploader("이전 memory_log.jsonl (선택)", type=["json","jsonl"], key="mem_prev")
-if prev and "mem_last_record" in st.session_state:
-    try:
-        # 단순 병합: 이전 파일 원본 바이트 + 새 줄 추가
-        prev_bytes = prev.read()
-        new_line = (json.dumps(st.session_state["mem_last_record"], ensure_ascii=False)+"\n").encode("utf-8")
-        merged = prev_bytes + new_line
-        st.download_button("📦 merged_memory_log.jsonl 내보내기",
-                           data=merged, file_name="merged_memory_log.jsonl",
-                           mime="application/json", key="mem_merge_dl")
-        st.success("병합본 준비 완료")
-    except Exception as e:
-        st.error(f"병합 실패: {e}")
-
-# ====== 세션 재주입 ======
-st.subheader("♻️ 세션 재주입")
-st.caption("메모리에서 가장 최근 그래프를 세션에 재주입해 다음 루프에서 사용합니다.")
-if st.button("세션으로 재주입", key="mem_reinject"):
-    # 우선순위: 방금 커밋한 레코드 → 업로드된 ce_graph.updated.json
-    if "mem_last_record" in st.session_state:
-        graph = st.session_state["mem_last_record"]["payload"]
-    else:
-        graph = _read_json(up_graph, "업데이트 그래프")
-        if not graph: st.stop()
-    st.session_state["ce_graph_current"] = graph
-    st.success("세션 재주입 완료: ce_graph_current")
-    # 미리보기
-    preview = {
-        "nodes": len(graph.get("nodes") or []),
-        "edges": len(graph.get("edges") or []),
-        "updated_at": graph.get("updated_at"),
-        "digest": _sha256_hex(json.dumps(graph, ensure_ascii=False, sort_keys=True).encode("utf-8"))
-    }
-    st.json(preview)
-
-    # 척추 게이트 로깅
-    try:
-        if "backbone_gate" in globals():
-            ok,msg=backbone_gate("Memory Commit & Re-inject v1","③ 기억·자가진화 축 전진")
-        elif "spx_backbone_gate" in globals():
-            ok,msg=spx_backbone_gate("Memory Commit & Re-inject v1","③ 기억·자가진화 축 전진")
-        else:
-            ok,msg=True,"게이트 없음"
-    except Exception:
-        ok,msg=True,"게이트 확인 중 예외"
-    st.caption(f"Gate: {msg}")
 # ───────────────────────────────────────────────
