@@ -7290,3 +7290,76 @@ with st.expander("⑤ 로그/스냅샷", expanded=False):
     st.download_button("📥 JSON 스냅샷", data=json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
                        file_name="EMO_DRIVE_snapshot.json", mime="application/json", key="emo_dl")
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# 227 / CE-Graph v1 — 현실연동 스코어링 스텁
+# 목표: 입력 데이터→증거 노드 기록→신뢰도 점수 부여→체인로그
+# 특징: 외부 호출 없음, reality 축 +5%
+import streamlit as st, json, hashlib
+from datetime import datetime, timezone, timedelta
+
+# ===== 공통 =====
+def _now_kst():
+    return datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S KST")
+def _sha(s:str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+def _mem_append_safe(key:str, value:str):
+    fn = globals().get("mem_append")
+    if callable(fn):
+        return fn(key, value)
+    st.session_state.setdefault("ce_local_log", [])
+    rec = {"ts": _now_kst(), "key": key, "value": value, "sha": _sha(key+value)}
+    st.session_state["ce_local_log"].append(rec)
+    return rec["sha"]
+
+# ===== 상태 =====
+if "ce_graph" not in st.session_state:
+    st.session_state.ce_graph = []  # [{id, content, source, trust, ts, sha}]
+if "ce_chainlog" not in st.session_state:
+    st.session_state.ce_chainlog = []
+
+# ===== 노드 추가 =====
+def add_evidence_node(content:str, source:str, trust:float):
+    nid = f"N{len(st.session_state.ce_graph)+1:04d}"
+    ts = _now_kst()
+    node = {"id":nid,"content":content,"source":source,"trust":round(trust,3),"ts":ts}
+    node["sha"] = _sha(json.dumps(node,ensure_ascii=False))
+    st.session_state.ce_graph.append(node)
+    _mem_append_safe("CE:add", json.dumps(node,ensure_ascii=False))
+    # 체인로그
+    prev_sha = st.session_state.ce_chainlog[-1]["sha"] if st.session_state.ce_chainlog else "GENESIS"
+    entry = {"ts":ts,"node":nid,"sha":node["sha"],"prev":prev_sha}
+    entry["sha"] = _sha(json.dumps(entry,ensure_ascii=False))
+    st.session_state.ce_chainlog.append(entry)
+    # reality 축 +5%
+    bb = st.session_state.get("spx_backbone")
+    if isinstance(bb, dict):
+        bb["reality"] = min(100, int(bb.get("reality",0))+5)
+    return nid
+
+# ===== UI =====
+st.markdown("### 🌐 227 · CE-Graph v1 — 현실연동 스코어링 스텁")
+st.caption("증거 입력→신뢰도 점수→노드 기록→체인로그")
+
+with st.expander("① 증거 노드 추가", expanded=True):
+    txt = st.text_area("증거 내용", value="실험 A 결과: 정확도 92%")
+    src = st.text_input("출처", value="Lab A Report")
+    trust = st.slider("신뢰도", 0.0, 1.0, 0.7, 0.01)
+    if st.button("노드 추가"):
+        nid = add_evidence_node(txt, src, trust)
+        st.success(f"노드 {nid} 추가됨")
+
+with st.expander("② 현재 CE-Graph", expanded=True):
+    st.json(st.session_state.ce_graph[-5:])
+
+with st.expander("③ 체인로그", expanded=False):
+    st.json(st.session_state.ce_chainlog[-5:])
+
+with st.expander("④ 스냅샷", expanded=False):
+    payload = {
+        "ts": _now_kst(),
+        "graph_tail": st.session_state.ce_graph[-20:],
+        "chain_tail": st.session_state.ce_chainlog[-20:],
+    }
+    st.download_button("📥 JSON 스냅샷", data=json.dumps(payload,ensure_ascii=False,indent=2).encode("utf-8"),
+                       file_name="CE_Graph_snapshot.json", mime="application/json", key="ce_dl")
+# ───────────────────────────────────────────────
