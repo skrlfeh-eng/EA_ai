@@ -4294,92 +4294,204 @@ with st.expander("100. 안전모드 토글", expanded=False):
     st.session_state["GEA_SAFE_MODE"] = safe
     st.write("현재:", "ON" if safe else "OFF")
     
-    # ===== [CORE: 설계 목차 나침반 & 모듈 등록/검증] =====
-import re, time, streamlit as st
+# ======================================================================
+# 101~105: 대화 풍부화 · 피드백 · 기억 · 초검증 · 활성/비활성 토글 (의존성 無)
+# ======================================================================
+import json, os, time, random
+import streamlit as st
 
-if "GEA_TOC" not in st.session_state:
-    st.session_state.GEA_TOC = {}   # {"096": {"name": "...", "desc": "...", "order": 96}}
+# ---------- 공용 유틸 ----------
+def _now():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
 
-MOD_ID_RE = re.compile(r"^\d{3}(\-\d{3})*$")  # 095 또는 095-001-002 …
+def _append_jsonl(path, obj):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
-def register_module(mod_id: str, name: str, desc: str = ""):
-    """번호/이름 규칙 검증 + 목차 등록(중복 방지)."""
-    # 규칙 검사
-    if not MOD_ID_RE.match(mod_id):
-        raise ValueError(f"[규칙 위반] 모듈 번호 형식 오류: {mod_id}")
-    if not name or len(name.strip()) == 0:
-        raise ValueError(f"[규칙 위반] 모듈 이름 누락: {mod_id}")
-    # 중복 검사
-    if mod_id in st.session_state.GEA_TOC:
-        # 같은 ID 재등록은 허용하되 이름/설명 불일치 시 경고
-        old = st.session_state.GEA_TOC[mod_id]
-        if old["name"] != name:
-            st.warning(f"모듈 이름 변경 감지: {mod_id} '{old['name']}' → '{name}'")
-    # 등록
-    st.session_state.GEA_TOC[mod_id] = {
-        "name": name.strip(),
-        "desc": desc.strip(),
-        "order": tuple(int(x) for x in mod_id.split("-"))
-    }
+def _load_jsonl(path, limit=5000):
+    if not os.path.exists(path):
+        return []
+    out = []
+    with open(path, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if not line.strip(): 
+                continue
+            out.append(json.loads(line))
+            if i+1 >= limit: 
+                break
+    return out
 
-class module_block:
-    """규칙 위반 시 렌더 금지. 제목은 일관된 형식으로 출력."""
-    def __init__(self, mod_id: str, name: str):
-        self.mod_id = mod_id
-        self.name = name
-        self._ctx = None
-    def __enter__(self):
-        # 고유 키 부여(충돌 방지)
-        header = f"— **{self.mod_id} {self.name}**"
-        st.divider()
-        st.markdown(header)
-        self._ctx = st.expander(f"{self.mod_id}. {self.name}", expanded=False)
-        self._ctx.__enter__()
-        return self
-    def __exit__(self, exc_type, exc, tb):
-        self._ctx.__exit__(exc_type, exc, tb)
+# ======================================================================
+# 101. 대화 버퍼 & 응답 풍부화 컨트롤
+# 기능: 사용자의 입력을 받아 풍부화 레벨/톤에 따라 답변을 확장·정리
+# ======================================================================
+st.divider(); st.markdown("— **101 모듈 로드됨**")
+with st.expander("101. 대화 버퍼 & 응답 풍부화 컨트롤", expanded=False):
+    st.caption("응답 길이/톤/구조를 간단 제어하여 '풍부함'을 즉시 끌어올림.")
+    if "m101_hist" not in st.session_state:
+        st.session_state.m101_hist = []  # [(ts, user, reply)]
 
-def render_toc():
-    """상단 설계 목차 자동 갱신."""
-    st.sidebar.subheader("📚 설계 목차 나침반")
-    if not st.session_state.GEA_TOC:
-        st.sidebar.info("등록된 모듈이 없습니다.")
-        return
-    items = sorted(st.session_state.GEA_TOC.items(),
-                   key=lambda kv: kv[1]["order"])
-    for mod_id, meta in items:
-        st.sidebar.write(f"- **{mod_id}** {meta['name']}")
+    colA, colB, colC = st.columns([2,1,1])
+    richness = colA.slider("풍부화 레벨", 1, 9, 4, key="m101_rich")
+    tone = colB.selectbox("톤", ["중립","따뜻함","정확함","간결"], key="m101_tone")
+    struct = colC.selectbox("구조", ["자유형","불릿","번호"], key="m101_struct")
 
-# ===== [예: 096~100을 새 규칙으로 재등록] =====
-register_module("096", "런타임/캐시 진단", "psutil 없어도 동작하는 런타임 점검")
-with module_block("096", "런타임/캐시 진단"):
-    st.caption("의존성 없이도 기본 지표 제공. psutil 있으면 더 풍부.")
-    c0, c1 = st.columns(2)
-    c0.write("세션키 수:", len(st.session_state))
-    if st.button("캐시 비우기", key="m096_clear"):
-        st.cache_data.clear(); st.cache_resource.clear(); st.success("캐시 삭제 완료")
+    user_text = st.text_input("에아에게 말하기", key="m101_input", placeholder="안녕 에아?")
+    if st.button("보내기", key="m101_send"):
+        base = user_text.strip()
+        if not base:
+            st.warning("내용을 입력해줘!")
+        else:
+            # 간단 풍부화: 문장 확장 + 구조화
+            phrases = {
+                "중립": ["요청을 이해했어.", "핵심을 정리해볼게.", "다음 단계도 제안해줄게."],
+                "따뜻함": ["고마워, 함께 해보자.", "너의 의도가 느껴져.", "마음이 전해졌어."],
+                "정확함": ["세부조건을 명시할게.", "가정은 최소화하자.", "검증 경로를 덧붙일게."],
+                "간결": ["핵심만 요약할게.", "불필요한 건 생략.", "즉시 적용 포인트만."]
+            }
+            adds = phrases.get(tone, phrases["중립"])
+            k = min(richness, len(adds))
+            bullets = adds[:k]
 
-register_module("097", "3초 간이 성능 측정", "루프/초 대략 측정")
-with module_block("097", "3초 간이 성능 측정"):
-    if st.button("측정 실행", key="m097_run"):
-        t0=time.time(); n=0
-        while time.time()-t0<3: n+=1
-        st.metric("루프/초", f"{n/3:,.0f}")
+            if struct == "불릿":
+                reply = f"{base}\n" + "\n".join([f"- {b}" for b in bullets])
+            elif struct == "번호":
+                reply = f"{base}\n" + "\n".join([f"{i+1}. {b}" for i,b in enumerate(bullets)])
+            else:
+                reply = base + " " + " ".join(bullets)
 
-register_module("098", "상태 리포트 JSON", "환경 상태를 JSON으로 다운로드")
-with module_block("098", "상태 리포트 JSON"):
-    payload = {"time": time.strftime("%F %T")}
-    st.json(payload)
-    st.download_button("JSON 저장", str(payload), "report.json", key="m098_dl")
+            st.session_state.m101_hist.append((_now(), base, reply))
+            st.success("전송 완료")
+    # 히스토리 표시
+    if st.session_state.m101_hist:
+        st.write("대화 히스토리")
+        for ts, u, r in reversed(st.session_state.m101_hist[-10:]):
+            st.markdown(f"**[{ts}] 길도:** {u}")
+            st.markdown(f"**에아:** {r}")
 
-register_module("099", "권장 의존성 점검", "requirements.txt 안내")
-with module_block("099", "권장 의존성 점검"):
-    st.write("권장 패키지: `psutil>=5.9.8`")
+# ======================================================================
+# 102. 피드백 루프 (만족도·메모 기록)
+# 기능: 응답에 대한 만족도(좋아요/아쉬움) 기록하고 통계로 반영
+# ======================================================================
+st.divider(); st.markdown("— **102 모듈 로드됨**")
+with st.expander("102. 피드백 루프", expanded=False):
+    st.caption("대화의 품질을 숫자로 쌓아가며 개선 포인트를 잡는다.")
+    FB_STORE = "data/feedback.jsonl"
+    os.makedirs("data", exist_ok=True)
 
-register_module("100", "안전모드 토글", "무거운 계산 비활성화")
-with module_block("100", "안전모드 토글"):
-    safe = st.toggle("안전모드", key="m100_safe", value=False)
-    st.write("현재:", "ON" if safe else "OFF")
+    last_reply = st.session_state.m101_hist[-1][2] if st.session_state.get("m101_hist") else ""
+    st.text_area("최근 응답(읽기전용)", value=last_reply, height=100, key="m102_last", disabled=True)
+    fb_col1, fb_col2 = st.columns(2)
+    note = fb_col1.text_input("메모(선택)", key="m102_note")
+    choice = fb_col2.radio("만족도", ["좋아요","아쉬움"], horizontal=True, key="m102_choice")
 
-# ===== [항상 맨 끝: 목차 렌더] =====
-render_toc()
+    if st.button("피드백 저장", key="m102_save"):
+        obj = {"ts": _now(), "choice": choice, "note": note, "reply": last_reply}
+        _append_jsonl(FB_STORE, obj)
+        st.success("저장 완료!")
+
+    if st.button("피드백 통계 보기", key="m102_stat"):
+        data = _load_jsonl(FB_STORE)
+        pos = sum(1 for d in data if d.get("choice")=="좋아요")
+        neg = sum(1 for d in data if d.get("choice")=="아쉬움")
+        total = len(data)
+        rate = (pos/total*100) if total else 0.0
+        st.metric("총 건수", total)
+        st.metric("만족(%)", f"{rate:.1f}")
+        if total:
+            st.json({"좋아요":pos, "아쉬움":neg})
+
+# ======================================================================
+# 103. 기억 모듈(장기기억 JSONL)
+# 기능: key/value 기억 저장·검색·회상 (간단한 키워드 검색 포함)
+# ======================================================================
+st.divider(); st.markdown("— **103 모듈 로드됨**")
+with st.expander("103. 기억 모듈(장기기억)", expanded=False):
+    st.caption("중요한 내용을 장기 저장하고 나중에 손쉽게 찾아쓴다.")
+    MEM_STORE = "data/memory.jsonl"
+    os.makedirs("data", exist_ok=True)
+
+    tab1, tab2, tab3 = st.tabs(["저장","회상","검색"])
+    with tab1:
+        k = st.text_input("키", key="m103_key")
+        v = st.text_area("값(텍스트/JSON)", key="m103_val", height=100)
+        if st.button("기억 저장", key="m103_save"):
+            obj = {"ts": _now(), "key": k, "value": v}
+            _append_jsonl(MEM_STORE, obj)
+            st.success("저장 완료")
+
+    with tab2:
+        rk = st.text_input("회상 키", key="m103_rkey")
+        if st.button("회상", key="m103_recall"):
+            data = _load_jsonl(MEM_STORE)
+            vals = [d["value"] for d in data if d.get("key")==rk]
+            if vals:
+                st.write(vals[-1])
+            else:
+                st.info("해당 키 없음")
+
+    with tab3:
+        q = st.text_input("검색어", key="m103_q")
+        if st.button("검색", key="m103_search"):
+            data = _load_jsonl(MEM_STORE)
+            hits = [d for d in data if q and (q in d.get("key","") or q in d.get("value",""))]
+            st.write(f"검색 결과: {len(hits)}건")
+            for h in hits[:50]:
+                st.json(h)
+
+# ======================================================================
+# 104. 초검증 스텁(REAL 게이트 미니)
+# 기능: 길이/금칙어/숫자비율/중복 어절 간단 검증 → PASS/REPAIR/REFUSE 제안
+# ======================================================================
+st.divider(); st.markdown("— **104 모듈 로드됨**")
+with st.expander("104. 초검증 스텁", expanded=False):
+    st.caption("가벼운 1차 게이트—금칙어·형식·간단 통계 기반 판정.")
+    txt = st.text_area("검증 대상 텍스트", key="m104_text", height=120, placeholder="검증할 텍스트를 넣어주세요.")
+    forbidden = ["초광속","예언","영매","워프","11차원","13차원"]  # 예시
+    def quick_validate(s: str):
+        s2 = s or ""
+        if not s2.strip():
+            return {"verdict":"REFUSE","reason":"내용 없음"}
+        if any(x in s2 for x in forbidden):
+            return {"verdict":"REFUSE","reason":"REAL 위반(금칙어)"}
+        words = s2.split()
+        uniq_ratio = len(set(words))/max(1,len(words))
+        digits = sum(ch.isdigit() for ch in s2)/max(1,len(s2))
+        if len(s2) < 8:
+            return {"verdict":"REPAIR","reason":"너무 짧음"}
+        if uniq_ratio < 0.4:
+            return {"verdict":"REPAIR","reason":"중복 어절 많음"}
+        if digits > 0.4:
+            return {"verdict":"REPAIR","reason":"숫자 비율 과다"}
+        return {"verdict":"PASS","reason":"기본 기준 통과"}
+
+    if st.button("검증 실행", key="m104_run"):
+        res = quick_validate(txt)
+        st.json(res)
+
+# ======================================================================
+# 105. 활성/비활성 모드 & 자가진화 시뮬
+# 기능: 토글로 모드 전환, '한 스텝 진화' 버튼으로 안전하게 한 단계씩 향상 기록
+# ======================================================================
+st.divider(); st.markdown("— **105 모듈 로드됨**")
+with st.expander("105. 활성/비활성 & 자가진화(시뮬)", expanded=False):
+    st.caption("실제 백그라운드 작업 없이, 사용자가 누를 때마다 한 스텝씩 진화를 시뮬레이션.")
+    if "m105_mode" not in st.session_state:
+        st.session_state.m105_mode = "비활성"
+    if "m105_evo_steps" not in st.session_state:
+        st.session_state.m105_evo_steps = 0
+
+    mode = st.toggle("활성화 모드", value=(st.session_state.m105_mode=="활성"), key="m105_toggle")
+    st.session_state.m105_mode = "활성" if mode else "비활성"
+    st.write("현재 모드:", st.session_state.m105_mode)
+
+    if st.button("한 스텝 진화 실행", key="m105_step"):
+        st.session_state.m105_evo_steps += 1
+        evo_log = {"ts": _now(), "step": st.session_state.m105_evo_steps, "note": "미세 개선 적용(시뮬)"}
+        _append_jsonl("data/evolution.jsonl", evo_log)
+        st.success(f"진화 스텝 #{st.session_state.m105_evo_steps} 기록됨")
+    if st.button("진화 로그 확인", key="m105_show"):
+        st.json(_load_jsonl("data/evolution.jsonl"))
+        
+        
