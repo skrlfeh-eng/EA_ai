@@ -10261,6 +10261,16 @@ with st.expander("📑 250. 상태 리포트(JSON) [v5]", expanded=False):
         file_name="CE_HIT_Report_v5.json", mime="application/json", key="m245p5_dl")
 
 # ─────────────────────────────────────────────
+cfg = st.session_state.get("cosmic_switch", {})
+# R3라면:
+if cfg.get("mode","").startswith("R3"):
+    auto_on = cfg.get("auto", auto_on); interval = cfg.get("interval", interval); safemode = cfg.get("safe", safemode)
+# R4라면:
+if cfg.get("mode","").startswith("R4"):
+    auto_on = cfg.get("auto", auto_on); interval = cfg.get("interval", interval)
+
+
+
 # 251R3 — 우주정보장 연동(느슨/탐지형) — 키 접두어 r3_
 register_module("251R3", "우주정보장 연동(느슨/탐지형)", "간섭-저감, 탐지/샘플 우선")
 gray_line("251R3", "연동-느슨", "탐지 위주, 간섭 회피 / 키 충돌 제거판")
@@ -10331,27 +10341,52 @@ with st.expander("251R4. 우주정보장 연동(엄격/검증형)", expanded=Fal
         if now - st.session_state["r4_last_tick"] >= interval:
             st.session_state["r4_last_tick"] = now
             st.rerun()   
-            
-            # 251S — 우주정보장 연동 스위처 — 키 접두어 switch_
-register_module("251S", "우주정보장 연동 스위처", "R3/R4 선택·전환, 공통 세팅 제공")
-gray_line("251S", "연동-스위처", "모드 전환 + 공통 세팅 / 키 충돌 제거판")
+            # 251S-R1 — 우주정보장 연동 스위처(키 충돌 제거판)
+register_module("251S-R1", "우주정보장 연동 스위처(수정)", "모드 전환 + 공통 세팅 저장(충돌 제거)")
+gray_line("251S-R1", "연동-스위처", "키 충돌 제거 · 공통 설정을 묶어서 저장")
 
 import streamlit as st
 
-with st.expander("251S. 우주정보장 연동 스위처", expanded=True):
-    mode = st.radio("모드 선택", ["OFF","R3(느슨)","R4(엄격)"], index=1, key="switch_mode")
-    st.session_state["cosmic_mode"] = mode
+with st.expander("251S-R1. 우주정보장 연동 스위처", expanded=True):
+    # 위젯 키와 세션 저장 키를 분리
+    mode = st.radio("모드 선택", ["OFF","R3(느슨)","R4(엄격)"], index=1, key="sw_mode")
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        sw_auto = st.toggle("공통 자동 실행", value=True, key="sw_auto")
+    with c2:
+        sw_interval = st.select_slider("공통 주기(초)", [5,10,15,30,60], value=10, key="sw_interval")
+    with c3:
+        sw_safe = st.toggle("공통 세이프 모드", value=True, key="sw_safe")
 
-    # 공통(권장) 세팅을 여기서 설정 → 각 모듈에서 읽어 써도 됨
-    col = st.columns(3)
-    with col[0]:
-        st.session_state["switch_auto"] = st.toggle("공통 자동 실행", value=True, key="switch_auto_on")
-    with col[1]:
-        st.session_state["switch_interval"] = st.select_slider("공통 주기(초)", [5,10,15,30,60], value=10, key="switch_interval")
-    with col[2]:
-        st.session_state["switch_safe"] = st.toggle("공통 세이프 모드", value=True, key="switch_safe")
+    # 충돌 없는 별도 버킷에 저장(다른 모듈이 여기만 읽도록)
+    st.session_state["cosmic_switch"] = {
+        "mode": mode, "auto": sw_auto, "interval": sw_interval, "safe": sw_safe
+    }
 
-    st.info(f"현재 선택 모드: **{mode}** · 주기: **{st.session_state['switch_interval']}s** · 세이프: **{st.session_state['switch_safe']}**")
+    st.info(f"현재: **{mode}** · 자동: **{sw_auto}** · 주기: **{sw_interval}s** · 세이프: **{sw_safe}**")
+    st.caption("※ 다른 모듈은 st.session_state['cosmic_switch']만 읽으세요(위젯 키 직접 건드리지 말기).")
+    
+    # 251S-R1 — 우주정보장 연동 스위처(키 충돌 제거판)
+register_module("251S-R1", "우주정보장 연동 스위처(수정)", "모드 전환 + 공통 세팅 저장(충돌 제거)")
+gray_line("251S-R1", "연동-스위처", "키 충돌 제거 · 공통 설정을 묶어서 저장")
 
-    # 안내
-    st.caption("※ 각 모듈(R3/R4)은 자신의 고유 key(r3_/r4_)를 사용하므로 스위처와 충돌하지 않습니다.")
+import streamlit as st
+
+with st.expander("251S-R1. 우주정보장 연동 스위처", expanded=True):
+    # 위젯 키와 세션 저장 키를 분리
+    mode = st.radio("모드 선택", ["OFF","R3(느슨)","R4(엄격)"], index=1, key="sw_mode")
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        sw_auto = st.toggle("공통 자동 실행", value=True, key="sw_auto")
+    with c2:
+        sw_interval = st.select_slider("공통 주기(초)", [5,10,15,30,60], value=10, key="sw_interval")
+    with c3:
+        sw_safe = st.toggle("공통 세이프 모드", value=True, key="sw_safe")
+
+    # 충돌 없는 별도 버킷에 저장(다른 모듈이 여기만 읽도록)
+    st.session_state["cosmic_switch"] = {
+        "mode": mode, "auto": sw_auto, "interval": sw_interval, "safe": sw_safe
+    }
+
+    st.info(f"현재: **{mode}** · 자동: **{sw_auto}** · 주기: **{sw_interval}s** · 세이프: **{sw_safe}**")
+    st.caption("※ 다른 모듈은 st.session_state['cosmic_switch']만 읽으세요(위젯 키 직접 건드리지 말기).")
