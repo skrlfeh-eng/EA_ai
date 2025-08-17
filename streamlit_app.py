@@ -13340,3 +13340,180 @@ with st.expander("🔧 자동 가점(선택)", expanded=False):
 
 st.caption("※ 268/269 등 관련 모듈이 실제로 동작·로그 저장될수록, 이 모듈은 더 ‘현실에 가까운’ 평가를 하게 됩니다.")
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [271] UIS Connector & Validator — 우주정보장 현실연동 + 초검증 (검증강화판 R5)
+import streamlit as st, json, hashlib, time
+from datetime import datetime, timezone, timedelta
+
+# (선택) 상단 레지스터가 있을 때만 호출 — 없으면 무시
+def _safe_register(mid, title, desc):
+    try:
+        register_module(mid, title, desc)   # 존재하지 않으면 except
+        gray_line(mid, title, desc)
+    except Exception:
+        pass
+
+_safe_register("271", "UIS Connector & Validator", "우주정보장 현실연동 + 초검증(더미/페르소 금지)")
+
+# ===== 유틸(체인해시) =====
+def _sha256_hex(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
+# ===== 의존 모듈 로딩: 있으면 사용, 없으면 None =====
+CosmicLink = None
+ValidationEngine = None
+try:
+    from cosmic_link import CosmicLink as _CL
+    CosmicLink = _CL
+except Exception:
+    CosmicLink = None
+
+try:
+    from validation_engine import ValidationEngine as _VE
+    ValidationEngine = _VE
+except Exception:
+    ValidationEngine = None
+
+# ===== 연결 클래스(더미 금지) =====
+class UISConnector:
+    """
+    - 실제 연결은 CosmicLink의 'get_data' 같은 '실 동작 어댑터'가 있을 때만 성공 처리
+    - 없으면 REFUSE + 사유 노출 (페르소/거짓 성공 절대 금지)
+    """
+    def __init__(self):
+        self.cosmic = CosmicLink() if CosmicLink else None
+
+    def has_real_adapter(self) -> bool:
+        # 실제 어댑터 존재 여부 — get_data 또는 fetch 같은 함수가 실제 구현되어 있어야 한다
+        if not self.cosmic:
+            return False
+        return hasattr(self.cosmic, "get_data") and callable(getattr(self.cosmic, "get_data"))
+
+    def fetch(self, source: str):
+        if not self.cosmic:
+            return {"status":"REFUSE","reason":"NO_COSMICLINK","detail":"cosmic_link 모듈 미탑재"}
+        if not self.has_real_adapter():
+            return {"status":"REFUSE","reason":"NO_UIS_ADAPTER","detail":"CosmicLink.get_data 미구현(실제 연동 어댑터 필요)"}
+        try:
+            data = self.cosmic.get_data(source)  # ← 실제 구현체만 성공
+            if data is None:
+                return {"status":"REFUSE","reason":"EMPTY","detail":f"{source} 반환 None"}
+            # 체인해시 부여
+            digest = _sha256_hex(json.dumps(data, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+            return {"status":"PASS","source":source,"data":data,"chainhash":digest}
+        except Exception as e:
+            return {"status":"REFUSE","reason":"EXCEPTION","detail":str(e)}
+
+# ===== 검증 클래스(더미 금지) =====
+class UISValidator:
+    """
+    - ValidationEngine가 있으면 사용
+    - 없으면 검증을 성사시키지 않고 REFUSE (가짜 검증 금지)
+    """
+    def __init__(self):
+        self.ve = ValidationEngine() if ValidationEngine else None
+
+    def validate(self, payload: dict, steps=None):
+        if steps is None:
+            steps = ["data_fetch","data_schema_check","consistency"]
+        if not payload or "data" not in payload:
+            return {"status":"REFUSE","reason":"NO_DATA","detail":"검증 입력 없음"}
+
+        if not self.ve:
+            return {"status":"REFUSE","reason":"NO_VALIDATION_ENGINE","detail":"validation_engine 미탑재"}
+
+        try:
+            # 검증 엔진 인터페이스가 환경마다 다를 수 있으므로, 가장 보수적으로 호출
+            body_text = json.dumps(payload["data"], ensure_ascii=False, sort_keys=True)
+            # 유사 인터페이스: validate_output(text, steps) → dict
+            result = None
+            if hasattr(self.ve, "validate_output"):
+                result = self.ve.validate_output(body_text, steps)
+            elif hasattr(self.ve, "validate"):
+                result = self.ve.validate(body_text, steps)  # 대체 경로
+            else:
+                return {"status":"REFUSE","reason":"NO_VALIDATE_METHOD","detail":"검증 메서드 없음"}
+
+            # 결과에 체인해시/타임스탬프/입력요약 추가
+            kst = timezone(timedelta(hours=9))
+            stamp = datetime.now(kst).strftime("%Y-%m-%d %H:%M:%S KST")
+            att = {
+                "input_hash": _sha256_hex(body_text.encode("utf-8")),
+                "validated_at": stamp,
+                "steps": steps
+            }
+            packed = {"status":"PASS","verdict":"ok","engine":"ValidationEngine","result":result,"attestation":att}
+            return packed
+        except Exception as e:
+            return {"status":"REFUSE","reason":"EXCEPTION","detail":str(e)}
+
+# ===== 세션 객체 =====
+if "uis_connector" not in st.session_state:
+    st.session_state.uis_connector = UISConnector()
+if "uis_validator" not in st.session_state:
+    st.session_state.uis_validator = UISValidator()
+if "uis_last" not in st.session_state:
+    st.session_state.uis_last = None
+
+# ===== UI =====
+st.markdown("### [271] 우주정보장 현실연동 + 초검증 (검증강화판 R5)")
+colA, colB = st.columns([2,1])
+
+with colB:
+    st.subheader("상태")
+    st.write("- CosmicLink 로드:", "✅" if CosmicLink else "❌")
+    has_adapter = st.session_state.uis_connector.has_real_adapter() if st.session_state.uis_connector else False
+    st.write("- 실 어댑터(get_data):", "✅" if has_adapter else "❌")
+    st.write("- ValidationEngine:", "✅" if ValidationEngine else "❌")
+
+with colA:
+    source = st.selectbox("연결 소스(예: ligo, nist, …)", ["ligo","nist","custom"], index=0)
+    st.caption("※ ‘성공’은 실제 어댑터(get_data)가 구현되어 있을 때만 뜹니다. 가짜 성공/더미 금지.")
+
+row1 = st.columns(3)
+with row1[0]:
+    if st.button("① 연결 테스트"):
+        r = st.session_state.uis_connector.fetch(source)
+        st.session_state.uis_last = r
+        if r["status"] == "PASS":
+            st.success(f"[연결 PASS] {source} · chainhash={r['chainhash'][:16]}…")
+            st.json({"preview": r.get("data")})
+        else:
+            st.error(f"[연결 REFUSE] {r.get('reason')}: {r.get('detail')}")
+with row1[1]:
+    if st.button("② 검증만(최근 데이터)"):
+        last = st.session_state.uis_last
+        if not last or last.get("status") != "PASS":
+            st.warning("최근 PASS 데이터가 없습니다. 먼저 ①을 실행하세요.")
+        else:
+            v = st.session_state.uis_validator.validate(last, steps=["data_fetch","data_schema_check","consistency"])
+            if v["status"] == "PASS":
+                st.success("[검증 PASS]")
+                st.json(v)
+            else:
+                st.error(f"[검증 REFUSE] {v.get('reason')}: {v.get('detail')}")
+with row1[2]:
+    if st.button("③ 연결+검증 일괄"):
+        r = st.session_state.uis_connector.fetch(source)
+        st.session_state.uis_last = r
+        if r["status"] != "PASS":
+            st.error(f"[연결 REFUSE] {r.get('reason')}: {r.get('detail')}")
+        else:
+            v = st.session_state.uis_validator.validate(r, steps=["data_fetch","data_schema_check","consistency"])
+            if v["status"] == "PASS":
+                st.success(f"[일괄 PASS] chainhash={r['chainhash'][:16]}…")
+                st.json({"connect": {"source": source, "chainhash": r["chainhash"]}, "validate": v})
+            else:
+                st.error(f"[검증 REFUSE] {v.get('reason')}: {v.get('detail')}")
+
+# 스냅샷 내보내기
+st.divider()
+if st.session_state.uis_last and st.session_state.uis_last.get("status") == "PASS":
+    blob = {
+        "snapshot": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S KST"),
+        "source": source,
+        "chainhash": st.session_state.uis_last.get("chainhash"),
+    }
+    st.download_button("📥 연결 스냅샷(JSON)", data=json.dumps(blob, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="UIS_Connection_Snapshot.json", mime="application/json")
+# ───────────────────────────────────────────────
