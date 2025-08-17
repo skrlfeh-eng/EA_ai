@@ -10131,7 +10131,132 @@ if ss.m251_cfg["auto"] and ss.m251_cfg["mode"] in ("R3","R4"):
         ss.m251_cfg["last_run"]=time.time()
         st.toast(f"[{ss.m251_cfg['mode']}] 주기 실행 완료 · {res}", icon="⏱️")
         
-        # ─────────────────────────────────────────────────────────
+        # ────────────────────────────────
+       ─────────────────────────
+       
+       # ───────────────────────────────────────────────
+# [251X] 스위치/오케스트라(카나리) — 안전 테스트용
+# 기존 251R3/251R4/251S/251O 와 완전 분리 (key prefix: m251x_)
+register_module("251X", "스위치/오케스트라(카나리)", "안전망: 새 엔진 검증용")
+gray_line("251X", "카나리 러너", "기존 251 라인과 충돌 없음")
+
+import streamlit as st, time, json, datetime
+from urllib import request, error
+
+# --- 세션 가드 ---
+if "m251x_cfg" not in st.session_state:
+    st.session_state.m251x_cfg = {
+        "mode": "R4",        # R3|R4
+        "auto": False,
+        "interval": 10,
+        "batch": 5,
+        "real": True,
+        "last_run": 0.0,
+        "history": []
+    }
+
+cfg = st.session_state.m251x_cfg
+
+with st.expander("251X · 스위치/오케스트라(카나리)", expanded=True):
+    mode = st.radio("모드", ["OFF","R3","R4"], index=["OFF","R3","R4"].index(cfg["mode"]),
+                    key="m251x_mode")
+    cfg["mode"] = mode
+
+    colA,colB,colC = st.columns([1,1,1])
+    with colA:
+        cfg["auto"] = st.toggle("자동 실행", value=cfg["auto"], key="m251x_auto")
+    with colB:
+        cfg["interval"] = st.slider("주기(초)", 5, 120, cfg["interval"], key="m251x_interval")
+    with colC:
+        cfg["batch"] = st.number_input("배치 크기", 1, 50, cfg["batch"], key="m251x_batch")
+
+    cfg["real"] = st.toggle("REAL 전용(실패시 SIM 금지)", value=cfg["real"], key="m251x_real")
+
+    run_now = st.button("지금 실행", key="m251x_run")
+
+# --- 엔드포인트(SIM/REAL) ---
+SIM_URL = "https://httpbin.org/get"
+REAL_URLS = [
+    # 안전한 살아있는 공개 엔드포인트들(200 OK 보장군)
+    "https://api.github.com",
+    "https://httpbin.org/status/200",
+]
+
+def _http_get(url, timeout=8):
+    try:
+        with request.urlopen(url, timeout=timeout) as resp:
+            code = resp.getcode()
+            body = resp.read(1024).decode("utf-8","ignore")
+            return True, code, body[:512]
+    except error.HTTPError as e:
+        return False, e.code, str(e)
+    except Exception as e:
+        return False, -1, str(e)
+
+def _run_once(mode:str, real_only:bool, batch:int):
+    """실행 1회. 성공/실패/로그 반환(카나리 전용)."""
+    started = datetime.datetime.utcnow().isoformat()+"Z"
+    hit_ok, hit_code, payload = (False, None, "")
+    if mode == "OFF":
+        return {"ts": started, "mode": mode, "skipped": True}
+
+    # REAL 우선
+    ok, code, body = _http_get(REAL_URLS[0])
+    if not ok and len(REAL_URLS) > 1:
+        ok, code, body = _http_get(REAL_URLS[1])
+
+    hit_ok, hit_code, payload = ok, code, body
+
+    if (not ok) and (not real_only):
+        # SIM 폴백
+        ok, code, body = _http_get(SIM_URL)
+        hit_ok, hit_code, payload = ok, code, body
+
+    result = {
+        "ts": started,
+        "mode": mode,
+        "verified": int(hit_ok),
+        "http": hit_code,
+        "snippet": payload[:160],
+        "batch": batch
+    }
+    return result
+
+def _append_history(rec:dict):
+    hist = st.session_state.m251x_cfg["history"]
+    hist.insert(0, rec)
+    if len(hist) > 20: hist.pop()
+
+# 수동 실행
+if run_now:
+    res = _run_once(cfg["mode"], cfg["real"], cfg["batch"])
+    _append_history(res)
+    st.success(f"수동 실행 결과: {res}")
+
+# 자동 루프 (프레임당 한 번 확인)
+now = time.time()
+if cfg["auto"] and cfg["mode"] != "OFF":
+    if now - cfg["last_run"] >= cfg["interval"]:
+        res = _run_once(cfg["mode"], cfg["real"], cfg["batch"])
+        _append_history(res)
+        cfg["last_run"] = now
+        st.info(f"자동 실행 결과: {res}")
+
+# 이력/다운로드
+with st.expander("실행 이력(최근 20개)", expanded=False):
+    hist = st.session_state.m251x_cfg["history"]
+    if not hist:
+        st.caption("아직 이력이 없습니다.")
+    else:
+        st.json(hist)
+        st.download_button("이력 JSON 다운로드",
+                           data=json.dumps(hist, ensure_ascii=False, indent=2).encode("utf-8"),
+                           file_name="251X_canary_history.json",
+                           mime="application/json",
+                           key="m251x_dl")
+                           
+                           
+       
 # [252] 우주정보장 연동: 증거/반례 큐 파이프라인 (Backbone v1)
 # 기능: 증거/HIT 수집 → 간이 검증(stub) → CE-Graph 반영(stub) → 로그/스냅샷
 # 충돌 방지: 모든 key는 m252_* 사용
