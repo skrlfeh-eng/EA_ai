@@ -10610,3 +10610,198 @@ with dl2:
 
 st.caption(f"UTC {datetime.utcnow().isoformat()}Z · driver={'neo4j-stub' if ss.get('m253_cfg',{}).get('driver')=='neo4j-stub' else 'independent'}")
 # ────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# [255] 실드라이버 전환 체크리스트 & 오류 격리(리트라이/백오프) 스켈레톤
+# 목적: 실 DB 붙이기 전 안전망. 연결/권한/스키마/성능 가드 + 서킷브레이커.
+# 의존: (선택) 253 CEGraphAdapter, 254 Neo4jStubAdapter 가 있으면 자동 감지.
+import streamlit as st, time, json, math, uuid
+from datetime import datetime, timedelta
+
+# 안전가드
+if "register_module" not in globals():
+    def register_module(num, name, desc):
+        st.markdown(f"### **[{num}] {name}**"); st.caption(desc)
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle=""):
+        st.markdown(f"**[{num}] {title}**"); st.caption(subtitle)
+
+register_module("255", "실드라이버 전환 체크리스트 & 오류 격리", "헬스체크 · 리트라이/백오프 · 서킷브레이커 · 리포트")
+
+ss = st.session_state
+# ── 상태 초기화
+if "m255_cfg" not in ss:
+    ss.m255_cfg = {
+        "target_driver": "neo4j-real",   # 논리명(실제 전환 대상)
+        "max_retries": 4,
+        "base_backoff_ms": 150,          # 150, 300, 600, 1200... (지수)
+        "breaker_fail_threshold": 5,     # 실패 누적 임계
+        "breaker_cooldown_s": 15,        # 차단 후 냉각
+        "simulate_latency_ms": 80,       # 모의 레이턴시
+        "simulate_fail_ratio": 0.15,     # 실패 확률(모의)
+    }
+if "m255_stats" not in ss:
+    ss.m255_stats = {"ok":0, "fail":0, "breaker_open_until": 0.0}
+if "m255_report" not in ss:
+    ss.m255_report = []   # 각 시도 로그
+
+# ── 유틸
+def m255_now():
+    return time.time()
+def m255_breaker_open():
+    return ss.m255_stats["breaker_open_until"] > m255_now()
+def m255_open_breaker():
+    ss.m255_stats["breaker_open_until"] = m255_now() + ss.m255_cfg["breaker_cooldown_s"]
+def m255_reset_breaker():
+    ss.m255_stats["breaker_open_until"] = 0.0
+
+def m255_log(event:str, payload:dict=None):
+    rec = {
+        "ts": datetime.utcnow().isoformat()+"Z",
+        "event": event,
+        "payload": payload or {}
+    }
+    ss.m255_report.append(rec)
+
+# ── 체크리스트 (전환 전에 ‘모두 초록’ 만들기)
+gray_line("255", "전환 체크리스트", "초록(✅)이면 실드라이버 전환 승인 후보")
+col1, col2, col3 = st.columns(3)
+with col1:
+    chk_conn = st.checkbox("연결 매개변수 확정(호스트/포트/자격)", value=False, key="m255_chk_conn")
+    chk_auth = st.checkbox("권한/롤 확인(읽기/쓰기/스키마)", value=False, key="m255_chk_auth")
+with col2:
+    chk_schema = st.checkbox("스키마 호환(노드/엣지/키 규약)", value=False, key="m255_chk_schema")
+    chk_perf   = st.checkbox("성능 가늠(샘플 upsert < 1s)", value=False, key="m255_chk_perf")
+with col3:
+    chk_fallback = st.checkbox("롤백경로 준비(Stub/메모리 즉시대체)", value=True, key="m255_chk_fallback")
+    chk_obs = st.checkbox("관측/로그 준비(Cypher/지표/경보)", value=True, key="m255_chk_obs")
+
+all_green = all([chk_conn, chk_auth, chk_schema, chk_perf, chk_fallback, chk_obs])
+st.success("✅ 전환 체크리스트: 통과(ALL GREEN)") if all_green else st.warning("⏳ 아직 미통과(하나라도 회색이면 대기)")
+
+# ── 대상 드라이버/동작 모드
+gray_line("255", "전환 대상/동작 모드", "실제 전환 전에 모의 실행으로 위험 제거")
+cA, cB, cC = st.columns(3)
+with cA:
+    ss.m255_cfg["target_driver"] = st.selectbox(
+        "대상 드라이버(논리명)", 
+        ["neo4j-real", "vespa", "opensearch+graph"], 
+        index=0 if ss.m255_cfg["target_driver"]=="neo4j-real" else 1,
+        key="m255_target"
+    )
+with cB:
+    ss.m255_cfg["max_retries"] = st.number_input("최대 재시도", 0, 10, ss.m255_cfg["max_retries"], key="m255_retries")
+    ss.m255_cfg["base_backoff_ms"] = st.number_input("기본 백오프(ms)", 50, 2000, ss.m255_cfg["base_backoff_ms"], key="m255_backoff")
+with cC:
+    ss.m255_cfg["breaker_fail_threshold"] = st.number_input("서킷 임계(연속 실패)", 1, 20, ss.m255_cfg["breaker_fail_threshold"], key="m255_thr")
+    ss.m255_cfg["breaker_cooldown_s"] = st.number_input("쿨다운(s)", 1, 120, ss.m255_cfg["breaker_cooldown_s"], key="m255_cool")
+
+# ── 모의 파이프(실장착 전)
+with st.expander("🧪 모의 실행 파라미터", expanded=False):
+    ss.m255_cfg["simulate_latency_ms"] = st.slider("모의 레이턴시(ms)", 0, 1000, ss.m255_cfg["simulate_latency_ms"], key="m255_lat")
+    ss.m255_cfg["simulate_fail_ratio"] = st.slider("모의 실패확률", 0.0, 1.0, ss.m255_cfg["simulate_fail_ratio"], 0.05, key="m255_fr")
+
+# ── 리트라이/백오프/서킷 스켈레톤
+def m255_attempt_commit(payload:dict):
+    """
+    실드라이버로의 '작은 트랜잭션'을 모의 수행.
+    - 실패 확률/지연을 적용
+    - 리트라이 + 지수백오프
+    - 서킷브레이커
+    """
+    if m255_breaker_open():
+        m255_log("breaker.blocked", {"reason":"open", "until": ss.m255_stats["breaker_open_until"]})
+        return False, "서킷브레이커: 냉각중"
+
+    max_r = ss.m255_cfg["max_retries"]
+    base = ss.m255_cfg["base_backoff_ms"]
+    for attempt in range(max_r+1):
+        # 모의 딜레이
+        time.sleep(ss.m255_cfg["simulate_latency_ms"]/1000.0)
+        # 모의 실패/성공
+        import random
+        fail = random.random() < ss.m255_cfg["simulate_fail_ratio"]
+
+        if not fail:
+            # 성공
+            ss.m255_stats["ok"] += 1
+            ss.m255_stats["fail"] = 0
+            m255_reset_breaker()
+            m255_log("commit.ok", {"attempt": attempt, "payload": payload})
+            return True, f"OK({attempt}회 시도)"
+        else:
+            # 실패
+            ss.m255_stats["fail"] += 1
+            m255_log("commit.fail", {"attempt": attempt, "payload": payload})
+            # 서킷 오픈 여부
+            if ss.m255_stats["fail"] >= ss.m255_cfg["breaker_fail_threshold"]:
+                m255_open_breaker()
+                return False, "연속 실패 → 서킷 오픈"
+
+            # 마지막 시도 아니면 백오프
+            if attempt < max_r:
+                back = base * (2**attempt)  # 150, 300, 600...
+                time.sleep(back/1000.0)
+
+    return False, "모든 재시도 실패"
+
+# ── 253/254 어댑터 자동 활용: 작은 더미 트랜잭션 만들기
+def m255_dummy_txn():
+    # 253/254 인스턴스가 있으면 우선 사용
+    adp = ss.get("m253_adapter") or ss.get("m254_adapter")
+    if adp is None:
+        # 253 타입 없으면 간이 mock
+        class _Mock:
+            def upsert_node(self, label, key, props): return f"{label}:{key}"
+            def upsert_edge(self, rel, s, d, props=None): return f"{rel}:{uuid.uuid4().hex[:6]}"
+            def commit(self): return True
+        adp = _Mock()
+
+    cid = f"claim-{uuid.uuid4().hex[:6]}"
+    eid = f"evi-{uuid.uuid4().hex[:6]}"
+    adp.upsert_node("Claim", cid, {"text":"probe claim","score":0.5})
+    adp.upsert_node("Evidence", eid, {"text":"probe evid"})
+    adp.upsert_edge("EVIDENCES", f"Claim:{cid}", f"Evidence:{eid}", {"w":1.0})
+    adp.commit()
+    return {"cid": cid, "eid": eid, "rel": "EVIDENCES"}
+
+# ── 실행 UI
+gray_line("255", "모의 커밋 실행", "리트라이/백오프/서킷 작동 확인")
+cX, cY, cZ = st.columns([1,1,2])
+with cX:
+    if st.button("소형 트랜잭션 실행", key="m255_run"):
+        payload = m255_dummy_txn()
+        ok, msg = m255_attempt_commit(payload)
+        if ok: st.success(f"성공: {msg}")
+        else:  st.error(f"실패: {msg}")
+with cY:
+    if st.button("상태 초기화(서킷/통계)", key="m255_reset"):
+        ss.m255_stats = {"ok":0, "fail":0, "breaker_open_until":0.0}
+        st.info("초기화 완료")
+with cZ:
+    st.metric("OK", ss.m255_stats["ok"])
+    st.metric("FAIL", ss.m255_stats["fail"])
+    st.metric("서킷 오픈(남은 s)", max(0, int(ss.m255_stats["breaker_open_until"]-m255_now())))
+
+# ── 리포트 미리보기/다운로드
+gray_line("255", "전환 리포트", "이력 다운로드/검토")
+st.json(ss.m255_report[-12:] if ss.m255_report else [])
+st.download_button(
+    "리포트 JSON 다운로드",
+    data=json.dumps(ss.m255_report, ensure_ascii=False, indent=2).encode("utf-8"),
+    file_name="driver_transition_report.json",
+    mime="application/json",
+    key="m255_dn"
+)
+
+# ── 승인 가이드
+with st.expander("✅ 전환 승인 기준(권장)", expanded=True):
+    st.markdown("""
+- 체크리스트 전 항목 ✅
+- 모의 커밋 **연속 20회 OK**(실패율 < 5%)
+- 서킷브레이커 **최근 10분간 미오픈**
+- 254 Cypher 로그 리뷰 완료(스키마/키 규약 일치)
+- 롤백 플랜 문서화(Stub로 즉시 복귀, 데이터 영향 없음 확인)
+""")
+
+st.caption(f"UTC {datetime.utcnow().isoformat()}Z · target={ss.m255_cfg['target_driver']} · retries={ss.m255_cfg['max_retries']} · base_backoff={ss.m255_cfg['base_backoff_ms']}ms")
+# ─────────────────────────────────────────────────────────
