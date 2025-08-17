@@ -12372,3 +12372,189 @@ with st.expander("③ 게이트 힌트(선택)", expanded=False):
         else:
             st.warning("먼저 ② 품질 평가를 실행하세요.")
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [264] Adversarial Hunt Mini-Loop (AH-ML1)
+# 기능:
+#  - CE-그래프에 경량 교란을 여러 형태로 가해 재평가(263의 계산식을 재사용)
+#  - 커버리지/일관성/중복/신규성의 강건성(robustness) 추정
+#  - 결과를 세션에 저장하고, 초검증(②축) 진행률 자동 가점(+5~+12)
+import streamlit as st, json, time, random, copy
+from typing import Dict, Any, List
+
+st.markdown("#### [264] Adversarial Hunt Mini-Loop (AH-ML1)")
+st.caption("CE-그래프 교란 → 263 평가지표 재계산 → 강건성(robustness) 추정")
+
+# --- 263 모듈의 도우미를 안전하게 참조(없으면 동일 파일의 함수명을 찾을 수 없어 샘플 계산으로 폴백) ---
+# 263에서 정의한 함수명이 존재하는지 체크
+_has_263 = all(name in globals() for name in [
+    "_263_pick_ce", "_263_nodes_by_kind", "_263_coverage",
+    "_263_consistency", "_263_dup_rate", "_263_novelty",
+    "_263_units_spot", "_263_fetch_items"
+])
+
+# 263이 없다면 최소 계산 대체(아주 간소)
+def _fallback_cov(ce): 
+    nodes = ce.get("nodes",[]); ev = len([n for n in nodes if n.get("kind")=="evidence"])
+    cl = len([n for n in nodes if n.get("kind")=="claim"])
+    md = len([n for n in nodes if n.get("kind")=="method"])
+    tot = ev+cl+md
+    return round((ev + (1 if md>0 else 0))/tot,3) if tot else 0.0
+
+def _fallback_con(ce):
+    edges = ce.get("edges",[])
+    return round(len(edges)/max(1,len(edges)),3) if edges else 0.0
+
+def _fallback_dup(ce):
+    return 0.0
+
+def _fallback_nov(ce):
+    nodes = ce.get("nodes",[])
+    evs = [n for n in nodes if n.get("kind")=="evidence"]
+    if not evs: return 0.0
+    doms = set((n.get("payload") or {}).get("domain") for n in evs if (n.get("payload") or {}).get("domain"))
+    return round(len(doms)/len(evs),3)
+
+def _use_cov(ce): return _263_coverage(ce) if _has_263 else _fallback_cov(ce)
+def _use_con(ce): return _263_consistency(ce) if _has_263 else _fallback_con(ce)
+def _use_dup(ce): return _263_dup_rate(ce) if _has_263 else _fallback_dup(ce)
+def _use_nov(ce): return _263_novelty(ce) if _has_263 else _fallback_nov(ce)
+def _use_units(items): 
+    return _263_units_spot(items) if _has_263 else {"total_equations":0,"pass":0,"score":1.0,"details":[]}
+def _use_items(): 
+    return _263_fetch_items() if _has_263 else []
+
+# --- 원본 CE 로딩(262 세션 → 샘플 폴백) ---
+def _pick_base_ce() -> Dict[str,Any]:
+    if "rlsi_ce_262" in st.session_state and st.session_state["rlsi_ce_262"]:
+        return copy.deepcopy(st.session_state["rlsi_ce_262"])
+    # 폴백 샘플
+    claim_id = "claim:sample"
+    nodes = [
+        {"id": claim_id, "kind": "claim", "payload": {"text": "중력파 검출은 실측 데이터로 재현 가능하다"}},
+        {"id": "evi:arxiv1602", "kind": "evidence", "payload":{"title":"GW Observation","domain":"arxiv.org","score":0.97}},
+        {"id": "evi:nist", "kind":"evidence", "payload":{"title":"CODATA constants","domain":"nist.gov","score":0.95}},
+        {"id": "method:eq:gw-strain", "kind":"method", "payload":{"statement":"h≈ΔL/L","source":"LIGO"}}
+    ]
+    edges = [
+        {"src":"evi:arxiv1602","dst":claim_id,"rel":"supports"},
+        {"src":"evi:nist","dst":claim_id,"rel":"supports"},
+        {"src":"method:eq:gw-strain","dst":claim_id,"rel":"measured_by"},
+    ]
+    return {"nodes":nodes,"edges":edges,"digest":"sample"}
+
+# --- 교란자(간이) ---
+def _perturb_drop_domain(ce:Dict[str,Any]) -> Dict[str,Any]:
+    ce2 = copy.deepcopy(ce)
+    for n in ce2.get("nodes",[]):
+        if n.get("kind")=="evidence" and (n.get("payload") or {}).get("domain"):
+            if random.random() < 0.6:
+                n["payload"]["domain"] = None
+    return ce2
+
+def _perturb_lower_scores(ce:Dict[str,Any]) -> Dict[str,Any]:
+    ce2 = copy.deepcopy(ce)
+    for n in ce2.get("nodes",[]):
+        if n.get("kind")=="evidence":
+            sc = (n.get("payload") or {}).get("score", 0.9)
+            n.setdefault("payload",{})["score"] = max(0.0, round(sc - random.uniform(0.05,0.2),3))
+    return ce2
+
+def _perturb_drop_edges(ce:Dict[str,Any]) -> Dict[str,Any]:
+    ce2 = copy.deepcopy(ce)
+    edges = ce2.get("edges",[])
+    k = max(1, int(len(edges)*0.3))
+    random.shuffle(edges)
+    ce2["edges"] = edges[k:]
+    return ce2
+
+def _perturb_duplicate_ev(ce:Dict[str,Any]) -> Dict[str,Any]:
+    ce2 = copy.deepcopy(ce)
+    dup_nodes = []
+    for n in ce2.get("nodes",[]):
+        if n.get("kind")=="evidence" and random.random()<0.5:
+            nn = copy.deepcopy(n)
+            # 동일 payload를 가진 중복 노드(id만 바꿈)
+            nn["id"] = n["id"] + ":dup"
+            dup_nodes.append(nn)
+    ce2["nodes"].extend(dup_nodes)
+    return ce2
+
+PERTURBERS = [
+    ("domain-drop", _perturb_drop_domain),
+    ("score-lower", _perturb_lower_scores),
+    ("edge-drop", _perturb_drop_edges),
+    ("evidence-dup", _perturb_duplicate_ev),
+]
+
+# --- 평가 실행 ---
+def _eval_quality(ce:Dict[str,Any]) -> Dict[str,Any]:
+    cov = _use_cov(ce)
+    con = _use_con(ce)
+    dup = _use_dup(ce)
+    nov = _use_nov(ce)
+    units = _use_units(_use_items())
+    score = cov*0.35 + con*0.35 + nov*0.20 + (1.0 - dup)*0.10
+    score = round(max(0.0, min(1.0, score)), 3)
+    return {
+        "coverage": cov, "consistency": con, "dup_rate": dup,
+        "novelty": nov, "units_spot": units, "ce_quality": score
+    }
+
+# --- UI ---
+base_ce = _pick_base_ce()
+st.json({"base_nodes": len(base_ce.get("nodes",[])), "base_edges": len(base_ce.get("edges",[]))})
+
+colA, colB = st.columns(2)
+with colA:
+    n_runs = st.number_input("교란 반복 횟수", 3, 50, 10, step=1, help="경량 반례사냥 반복 수")
+with colB:
+    seed = st.number_input("난수 시드", 0, 999999, 42, step=1)
+
+if st.button("반례사냥 실행", use_container_width=True, key="ahml_run"):
+    random.seed(int(seed))
+    base_q = _eval_quality(base_ce)
+    results = []
+    for i in range(int(n_runs)):
+        tag, fn = random.choice(PERTURBERS)
+        ce_p = fn(base_ce)
+        q = _eval_quality(ce_p)
+        q["perturber"] = tag
+        results.append(q)
+
+    # 강건성(robustness): 교란 후 품질의 중앙값 / 원본 품질
+    after_scores = sorted([r["ce_quality"] for r in results])
+    median_after = after_scores[len(after_scores)//2] if after_scores else 0.0
+    base_score = base_q["ce_quality"]
+    robustness = round((median_after / base_score), 3) if base_score>0 else 0.0
+
+    report = {
+        "base_quality": base_q,
+        "after_median_quality": median_after,
+        "robustness": robustness,
+        "runs": len(results),
+        "samples": results,
+        "ts": time.time()
+    }
+    st.session_state["ahml_264"] = report
+
+    # 출력
+    st.metric("원본 CE-Quality", f"{base_score:.3f}")
+    st.metric("교란 후 중앙값", f"{median_after:.3f}")
+    st.metric("강건성(robustness)", f"{robustness:.3f}", help="교란 후 중앙값 / 원본 품질")
+
+    st.download_button("📥 강건성 리포트(JSON)", data=json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="AHML1_report_264.json", mime="application/json", use_container_width=True)
+
+    # ②축 자동 가점: 강건성 기준
+    #  - robustness ≥0.9 → +12
+    #  - 0.8~0.9 → +9
+    #  - 0.7~0.8 → +7
+    #  - 그 외 → +5
+    bonus = 12 if robustness>=0.9 else (9 if robustness>=0.8 else (7 if robustness>=0.7 else 5))
+    try:
+        if "spx_backbone" in st.session_state:
+            st.session_state.spx_backbone["validation"] = min(100, st.session_state.spx_backbone["validation"] + bonus)
+    except Exception:
+        pass
+    st.caption(f"초검증 축 가점 반영: +{bonus} (사이드바/대시보드에서 확인)")
+# ───────────────────────────────────────────────
