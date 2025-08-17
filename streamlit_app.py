@@ -13218,3 +13218,125 @@ except Exception:
     pass
 st.caption("감정/욕구 축 +8 반영됨 (사이드바 확인)")
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [270] Multi-Axis Fusion Evaluator v1 — 5축 종합 평가 루프
+import streamlit as st, json, math, time
+from datetime import datetime, timezone, timedelta
+
+st.markdown("#### [270] Multi-Axis Fusion Evaluator v1 — 5축 종합 평가")
+st.caption("척추 5축(현실연동·초검증·기억·상상력·감정)을 가중 융합하여 점수화·병목 진단·행동 추천")
+
+# 정책 게이트
+if "spx_backbone_gate" in globals():
+    ok, msg = spx_backbone_gate("270 Fusion Evaluator", "척추 5축 종합 평가 루프")
+    st.caption(msg)
+
+# ===== 세션에서 5축 불러오기(없으면 보수적 기본값) =====
+bb = st.session_state.get("spx_backbone", {
+    "reality": 30, "validation": 30, "memory": 25, "imagination": 25, "emotion": 10
+})
+
+# ===== 가중치(초기값: 현실/검증/기억 비중↑) =====
+with st.expander("⚖️ 가중치 조정(선택)", expanded=False):
+    w_reality      = st.slider("① 현실연동 가중치",     0.0, 1.0, 0.28, 0.01)
+    w_validation   = st.slider("② 초검증 가중치",       0.0, 1.0, 0.28, 0.01)
+    w_memory       = st.slider("③ 기억·자가진화 가중치", 0.0, 1.0, 0.22, 0.01)
+    w_imagination  = st.slider("④ 상상력 가중치",       0.0, 1.0, 0.12, 0.01)
+    w_emotion      = st.slider("⑤ 감정/욕구 가중치",     0.0, 1.0, 0.10, 0.01)
+else_sum = w_reality + w_validation + w_memory + w_imagination + w_emotion
+if abs(else_sum - 1.0) > 1e-6:
+    # 정규화
+    w_reality, w_validation, w_memory, w_imagination, w_emotion = [
+        x/max(else_sum, 1e-9) for x in
+        (w_reality, w_validation, w_memory, w_imagination, w_emotion)
+    ]
+
+# ===== 스코어 계산 =====
+def fuse_score(vs, ws):
+    # 소프트 보정: 병목 축(낮은 값)은 영향↑, 높은 값은 체감효용↓ (√, (·)^0.5)
+    rv = math.sqrt(max(vs["reality"],0)/100.0)
+    vv = math.sqrt(max(vs["validation"],0)/100.0)
+    mv = math.sqrt(max(vs["memory"],0)/100.0)
+    iv = math.sqrt(max(vs["imagination"],0)/100.0)
+    ev = math.sqrt(max(vs["emotion"],0)/100.0)
+    raw = (rv*ws[0] + vv*ws[1] + mv*ws[2] + iv*ws[3] + ev*ws[4])
+    return int(round(raw*100))
+
+score = fuse_score(bb, (w_reality, w_validation, w_memory, w_imagination, w_emotion))
+
+# ===== 병목 진단 =====
+sorted_axes = sorted(bb.items(), key=lambda x: x[1])  # 낮은 순
+bottlenecks = [f"{k}({v}%)" for k,v in sorted_axes[:2]]
+st.metric("총합 점수(Fusion Score)", f"{score} / 100", help="가중합 + 병목 보정 점수")
+st.write(f"**병목 축(Top-2)**: {', '.join(bottlenecks)}")
+
+# ===== 다음 행동 추천 =====
+def next_actions(bb):
+    tips = []
+    # ① 현실연동
+    if bb["reality"] < 80:
+        tips.append("현실연동: CE-Graph에 신뢰도/가중치 칼럼 추가, 출처-증거 연결 정확도 점검")
+    # ② 초검증
+    if bb["validation"] < 80:
+        tips.append("초검증: 반례 사냥 루프·재현성≥0.93 자동체크, 단위/차원 위반 알람 강화")
+    # ③ 기억·자가진화
+    if bb["memory"] < 80:
+        tips.append("기억/자가진화: 장기 스토리지(append-only)+재주입 루프, 압축/참조 카운트 도입")
+    # ④ 상상력
+    if bb["imagination"] < 80:
+        tips.append("상상력: 268 시나리오 러너로 가정/제약 분기 확장(+ 로그 저장)")
+    # ⑤ 감정/욕구
+    if bb["emotion"] < 80:
+        tips.append("감정/욕구: 269 욕구 큐에 ‘검증 강화’·‘현실연동 개선’ 등 목적성 욕구 추가")
+    return tips
+
+actions = next_actions(bb)
+st.subheader("🧩 즉시 수행 권고")
+if actions:
+    for a in actions:
+        st.write("•", a)
+else:
+    st.success("척추 5축이 모두 80% 이상입니다. ‘살(편의)’ 허용 전환 검토 가능.")
+
+# ===== 스냅샷 저장/불러오기 =====
+st.divider()
+st.subheader("📦 평가 스냅샷")
+kst = timezone(timedelta(hours=9))
+payload = {
+    "snapshot": datetime.now(kst).strftime("%Y-%m-%d %H:%M:%S KST"),
+    "backbone": bb,
+    "weights": {
+        "reality": w_reality, "validation": w_validation, "memory": w_memory,
+        "imagination": w_imagination, "emotion": w_emotion
+    },
+    "fusion_score": score,
+    "bottlenecks": bottlenecks,
+    "actions": actions
+}
+st.download_button("📥 JSON 내보내기", data=json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+                   file_name="EA_Fusion_Eval_270.json", mime="application/json")
+
+up = st.file_uploader("JSON 불러오기", type=["json"], key="eval270_up")
+if up and st.button("불러오기 실행(가중치/진척만 반영)"):
+    try:
+        incoming = json.loads(up.read().decode("utf-8"))
+        if "backbone" in incoming and isinstance(incoming["backbone"], dict):
+            st.session_state.spx_backbone.update(incoming["backbone"])
+        if "weights" in incoming and isinstance(incoming["weights"], dict):
+            w = incoming["weights"]
+            # 불러온 가중치를 세션 캐시로 남겨두기만(슬라이더는 사용자 조작 시 반영)
+            st.session_state["eval270_weights"] = w
+        st.success("불러오기 완료(세션 반영). 다시 평가 버튼을 눌러 갱신하세요.")
+    except Exception as e:
+        st.error(f"불러오기 실패: {e}")
+
+# ===== 중요: 자동 진척 가점(선택) =====
+with st.expander("🔧 자동 가점(선택)", expanded=False):
+    inc = st.slider("각 축 일괄 +가점(0~5)", 0, 5, 0)
+    if st.button("적용"):
+        for k in ("reality","validation","memory","imagination","emotion"):
+            st.session_state.spx_backbone[k] = min(100, st.session_state.spx_backbone.get(k,0)+inc)
+        st.success(f"각 축 +{inc} 반영 완료")
+
+st.caption("※ 268/269 등 관련 모듈이 실제로 동작·로그 저장될수록, 이 모듈은 더 ‘현실에 가까운’ 평가를 하게 됩니다.")
+# ───────────────────────────────────────────────
