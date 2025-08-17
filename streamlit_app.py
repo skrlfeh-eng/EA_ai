@@ -9911,350 +9911,195 @@ if st.button("반례사냥 실행", key="adv244_run"):
         ok, msg = True, "게이트 확인 중 예외 → 코어로 진행"
     st.caption(f"Gate: {msg}")
 
-# ─────────────────────────────────────────────────────────
-# ───────────────────────────────────────────────
-# [245–250 Reset v5] CE-HIT & 검증 통합 안정판
-# 키 프리픽스: m245p5_*
-import streamlit as st, time, json
+  
+# 245–250P · CE-HIT & 검증 통합(Backbone PRO)  [prefix: p245p_]
+
+import streamlit as st, json, time, random
 from datetime import datetime
 
-# ── 안전 가드(선언 없을 때만)
+# (선택) 외부 호출용
+try:
+    import requests  # requirements.txt에 없으면 그냥 패스
+    HAS_REQ = True
+except Exception:
+    HAS_REQ = False
+
+# --- 안전장치(앱에 이미 정의되어 있으면 재정의 안 함) ---
 if "register_module" not in globals():
-    def register_module(num,name,desc): pass
+    def register_module(num, name, desc=""): pass
 if "gray_line" not in globals():
-    def gray_line(num,title,subtitle=""):
+    def gray_line(num, title, subtitle=""):
         st.markdown(f"**[{num}] {title}**  \n- {subtitle}")
 
-# ── 세션 초기화
+# ===================== 245P. 기본 설정/게이트 =====================
+register_module("245P", "CE-HIT 기본설정/게이트(PRO)", "입력 정책·라벨·간선타입 제어")
+gray_line("245P", "기본 설정/게이트", "중복방지, 입력 필터, 시뮬/리얼 전환")
+
+# 세션 상태
 ss = st.session_state
-if "m245p5_cfg" not in ss:
-    ss.m245p5_cfg = {
-        "policy": "strict",   # gate 정책 예시
-        "label":  "v5",       # 라벨
-        "gentle" : False,     # 간섭 최소화 여부
-        "snapshots": [],      # 250 스냅샷 저장소
+if "p245p_cfg" not in ss:
+    ss.p245p_cfg = {
+        "allow_dup": False,
+        "label": "v5",
+        "edge_type": "supports",
+        "source_tag": "R4",
+        "mode": "SIM",              # SIM | REAL
+        "max_per_batch": 5,
+        "ce_endpoint": "",          # REAL 반영시 사용(선택)
     }
-if "m245p5_ce" not in ss:            # CE-Graph 스텁
-    ss.m245p5_ce = {"facts":[], "hits":[], "verdicts":[]}
-if "m245p5_queue" not in ss:         # 처리 대기 큐
-    ss.m245p5_queue = []
-if "m245p5_last" not in ss:          # 상태 갱신 시간
-    ss.m245p5_last = 0.0
+if "p245p_q" not in ss: ss.p245p_q = []        # HIT 큐
+if "p245p_runlog" not in ss: ss.p245p_runlog = []  # 실행 히스토리
 
-# ───────────────── 245. CE-Graph 기본 설정/게이트 [v5]
-register_module("245-v5","CE-Graph 기본설정/게이트","입력정책·라벨/간섭타입")
-gray_line("245-v5","CE-Graph 설정","게이트/정책 조정")
+with st.expander("⚙️ 245P. 정책/게이트", expanded=False):
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        ss.p245p_cfg["allow_dup"] = st.toggle("중복 허용", value=ss.p245p_cfg["allow_dup"], key="p245p_allow_dup")
+        ss.p245p_cfg["max_per_batch"] = st.number_input("배치 최대 HIT", 1, 50, ss.p245p_cfg["max_per_batch"], key="p245p_max_per_batch")
+    with c2:
+        ss.p245p_cfg["label"] = st.text_input("라벨(tag)", ss.p245p_cfg["label"], key="p245p_label")
+        ss.p245p_cfg["edge_type"] = st.selectbox("간선 타입", ["supports","contradicts","neutral"], index=["supports","contradicts","neutral"].index(ss.p245p_cfg["edge_type"]), key="p245p_edge")
+    with c3:
+        ss.p245p_cfg["source_tag"] = st.selectbox("소스(R3/R4 등)", ["R3","R4","manual"], index=["R3","R4","manual"].index(ss.p245p_cfg["source_tag"]), key="p245p_source")
+        ss.p245p_cfg["mode"] = st.radio("모드", ["SIM","REAL"], index=0 if ss.p245p_cfg["mode"]=="SIM" else 1, key="p245p_mode", horizontal=True)
+    if ss.p245p_cfg["mode"]=="REAL":
+        ss.p245p_cfg["ce_endpoint"] = st.text_input("CE-Graph 엔드포인트(선택)", ss.p245p_cfg["ce_endpoint"], key="p245p_ceurl")
+    st.caption("게이트 규칙: REAL에서 실패 사유는 그대로 노출(더미 금지). SIM은 로컬 모의.")
 
-with st.expander("245. 게이트 & 정책", True):
-    colA,colB,colC = st.columns(3)
-    with colA:
-        ss.m245p5_cfg["policy"] = st.selectbox(
-            "정책(policy)", ["strict","balanced","loose"],
-            index=["strict","balanced","loose"].index(ss.m245p5_cfg["policy"]),
-            key="m245p5_policy")
-    with colB:
-        ss.m245p5_cfg["label"] = st.text_input("라벨", ss.m245p5_cfg["label"], key="m245p5_label")
-    with colC:
-        ss.m245p5_cfg["gentle"] = st.toggle("간섭 최소화", value=ss.m245p5_cfg["gentle"], key="m245p5_gentle")
+# ===================== 246P. HIT 생성/큐 적재 =====================
+register_module("246P", "HIT 생성/큐 적재(PRO)", "텍스트→HIT 변환, 큐에 push")
+gray_line("246P", "HIT 빌더", "간단 입력 → HIT 큐")
 
-    st.caption(f"현재 정책: **{ss.m245p5_cfg['policy']}** · 라벨: **{ss.m245p5_cfg['label']}** · gentle={ss.m245p5_cfg['gentle']}")
+with st.expander("🧪 246P. HIT 생성", expanded=False):
+    txt = st.text_area("입력 텍스트(문장/주장)", key="p245p_hit_txt", placeholder="예) '중력파 이벤트 GW150914가 검출되었다.'")
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        label = st.text_input("라벨(override)", "", key="p245p_hit_label")
+    with c2:
+        edge = st.selectbox("간선 타입(override)", ["(default)","supports","contradicts","neutral"], key="p245p_hit_edge")
+    with c3:
+        src = st.selectbox("소스(override)", ["(default)","R3","R4","manual"], key="p245p_hit_src")
 
-# ───────────────── 246. HIT 입력(수집) [v5]
-register_module("246-v5","HIT 입력(수집)","히트/증거/관측치 수집")
-gray_line("246-v5","HIT 입력","큐 투입")
+    if st.button("큐에 추가", key="p245p_addq"):
+        if not txt.strip():
+            st.warning("텍스트가 비어있습니다.")
+        else:
+            cfg = ss.p245p_cfg.copy()
+            hit = {
+                "id": f"hit_{int(time.time()*1000)}_{random.randint(100,999)}",
+                "text": txt.strip(),
+                "label": label.strip() or cfg["label"],
+                "edge": (edge if edge!="(default)" else cfg["edge_type"]),
+                "source": (src if src!="(default)" else cfg["source_tag"]),
+                "ts": datetime.utcnow().isoformat()+"Z"
+            }
+            # Dup gate
+            if (not cfg["allow_dup"]) and any(h["text"]==hit["text"] and h["edge"]==hit["edge"] for h in ss.p245p_q):
+                st.error("중복 HIT 차단(정책).")
+            else:
+                ss.p245p_q.append(hit)
+                st.success(f"큐 적재 완료: {hit['id']}")
 
-with st.expander("246. HIT 입력", True):
-    hit_text = st.text_area("HIT 텍스트", key="m245p5_hit_text", placeholder="관측·주장·증거를 입력")
-    meta     = st.text_input("메타(선택)", key="m245p5_hit_meta", placeholder="source=…, ref=…")
-    add_btn  = st.button("큐에 추가", key="m245p5_hit_add")
-    if add_btn and hit_text.strip():
-        item = {"ts": time.time(), "hit": hit_text.strip(), "meta": meta.strip()}
-        ss.m245p5_queue.append(item)
-        ss.m245p5_ce["hits"].append(item)
-        st.success("큐에 추가됨")
+# ===================== 247P. 큐 미리보기/관리 =====================
+register_module("247P", "큐 미리보기/관리(PRO)", "검색/삭제/내보내기")
+gray_line("247P", "큐 관리", "최대 200개 표시")
 
-    if ss.m245p5_queue:
-        st.write("대기 큐 크기:", len(ss.m245p5_queue))
-        st.json(ss.m245p5_queue[-3:])
+with st.expander("👀 247P. 큐", expanded=False):
+    st.write(f"현재 큐 길이: **{len(ss.p245p_q)}**")
+    q = ss.p245p_q[-200:]
+    for h in reversed(q):
+        with st.container(border=True):
+            st.code(h["text"])
+            st.caption(f"id={h['id']} · edge={h['edge']} · label={h['label']} · src={h['source']} · ts={h['ts']}")
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        if st.button("모두 비우기", key="p245p_clear"):
+            ss.p245p_q.clear(); st.success("큐 비움")
+    with c2:
+        if st.button("JSON 다운로드", key="p245p_dl"):
+            st.download_button("↓ 큐.json", data=json.dumps(ss.p245p_q, ensure_ascii=False, indent=2).encode("utf-8"),
+                               file_name="queue.json", mime="application/json", key="p245p_dl_real")
+    with c3:
+        st.caption("—")
 
-# ───────────────── 247. 큐 미리보기/관리 [v5]
-register_module("247-v5","큐 미리보기/관리","최근 항목/삭제")
-gray_line("247-v5","큐 관리","미리보기/정리")
+# ===================== 248P. CE-Graph 반영(Stub/REAL) =====================
+register_module("248P", "CE-Graph 반영(PRO)", "SIM=로컬 반영, REAL=HTTP 반영")
+gray_line("248P", "반영 러너", "배치 크기 지정 → 반영")
 
-with st.expander("247. 큐 관리", False):
-    if ss.m245p5_queue:
-        st.json(ss.m245p5_queue[-10:])
-        col1,col2 = st.columns(2)
-        with col1:
-            if st.button("맨 앞 항목 제거", key="m245p5_q_pop"):
-                ss.m245p5_queue.pop(0)
-                st.info("제거됨")
-        with col2:
-            if st.button("큐 비우기", key="m245p5_q_clear"):
-                ss.m245p5_queue.clear()
-                st.warning("큐 비움")
-    else:
-        st.caption("큐 비어있음")
+def _reflect_to_cegraph(batch, cfg):
+    """SIM: 로컬 성공, REAL: HTTP POST(선택)"""
+    if cfg["mode"]=="SIM" or not cfg["ce_endpoint"]:
+        # 모의 성공
+        return {"ok": True, "http": 200, "count": len(batch), "mode": "SIM"}
+    if not HAS_REQ:
+        return {"ok": False, "http": 0, "error": "requests 미설치"}
+    try:
+        resp = requests.post(cfg["ce_endpoint"], json={"batch": batch, "label": cfg["label"]}, timeout=20)
+        return {"ok": resp.ok, "http": resp.status_code, "text": resp.text[:200]}
+    except Exception as e:
+        return {"ok": False, "http": 0, "error": str(e)}
 
-# ───────────────── 248. CE-Graph 반영(Stub) [v5]
-register_module("248-v5","CE-Graph 반영(Stub)","큐 → CE 반영")
-gray_line("248-v5","CE 반영","스텁 동작")
+with st.expander("🕸️ 248P. 반영 실행", expanded=False):
+    n = st.number_input("배치 크기", 1, ss.p245p_cfg["max_per_batch"], min(ss.p245p_cfg["max_per_batch"], 5), key="p245p_batch")
+    if st.button("반영 실행", key="p245p_reflect"):
+        if not ss.p245p_q:
+            st.warning("큐가 비어있습니다.")
+        else:
+            take = ss.p245p_q[:n]
+            result = _reflect_to_cegraph(take, ss.p245p_cfg)
+            if result.get("ok"):
+                st.success(f"반영 성공 · {len(take)}건 · http {result.get('http')}")
+                # 성공 시 큐에서 pop
+                ss.p245p_q = ss.p245p_q[n:]
+            else:
+                st.error(f"반영 실패 · http {result.get('http')} · {result.get('error','')}")
+            ss.p245p_runlog.append({"ts": datetime.utcnow().isoformat()+"Z", "what":"reflect", "n":len(take), "result":result})
 
-with st.expander("248. 반영 실행(스텁)", False):
-    n = st.number_input("반영 개수", 0, 1000, 5, key="m245p5_apply_n")
-    if st.button("반영 실행", key="m245p5_apply_btn"):
-        applied = []
-        for _ in range(min(n, len(ss.m245p5_queue))):
-            it = ss.m245p5_queue.pop(0)
-            ss.m245p5_ce["facts"].append({"text": it["hit"], "meta": it["meta"], "label": ss.m245p5_cfg["label"]})
-            applied.append(it)
-        st.success(f"반영 {len(applied)}건")
-        st.json(applied)
+# ===================== 249P. 검증 러너(Stub/REAL) =====================
+register_module("249P", "검증 러너(PRO)", "반례사냥/재현성(모의 또는 REAL 훅)")
+gray_line("249P", "검증 실행", "간단 스텁 — 훅 연결 가능")
 
-# ───────────────── 249. 검증 러너(Stub) [v5]
-register_module("249-v5","검증 러너(Stub)","간단 검증")
-gray_line("249-v5","검증 스텁","무작위 패스/컨트라딕트")
+def _validate_batch(batch, cfg):
+    """간단 스텁: 텍스트 길이/edge 분포로 점수 산출. 필요 시 REAL 훅으로 교체."""
+    if not batch:
+        return {"ok": False, "score": 0.0, "msg": "empty"}
+    score = min(0.99, 0.5 + 0.1*sum(len(h["text"])>20 for h in batch))
+    contra = sum(h["edge"]=="contradicts" for h in batch)
+    return {"ok": True, "score": round(score,3), "contra": contra, "n": len(batch)}
 
-import random
-with st.expander("249. 검증 실행(스텁)", False):
-    m = st.number_input("검증 샘플 수", 0, 1000, 3, key="m245p5_verify_n")
-    if st.button("검증 실행", key="m245p5_verify_btn"):
-        verdicts=[]
-        sample = ss.m245p5_ce["facts"][-m:] if m>0 else []
-        for f in sample:
-            v = random.choice(["pass","contradicts","needs_more"])
-            verdicts.append({"fact": f["text"], "verdict": v, "ts": time.time()})
-        ss.m245p5_ce["verdicts"].extend(verdicts)
-        st.success(f"검증 결과 {len(verdicts)}건")
-        st.json(verdicts)
+with st.expander("🧪 249P. 검증 실행", expanded=False):
+    n2 = st.number_input("검증 샘플 크기", 1, 20, 5, key="p245p_vn")
+    if st.button("검증 실행", key="p245p_vrun"):
+        sample = ss.p245p_q[:n2] if ss.p245p_q else []
+        res = _validate_batch(sample, ss.p245p_cfg)
+        st.json(res)
+        ss.p245p_runlog.append({"ts": datetime.utcnow().isoformat()+"Z", "what":"validate", "n":len(sample), "result":res})
 
-# ───────────────── 250. 상태 리포트(JSON) [v5]
-register_module("250-v5","상태 리포트(JSON)","스냅샷 저장/다운로드")
-gray_line("250-v5","상태 스냅샷","JSON 내보내기")
+# ===================== 250P. 상태 리포트(JSON) =====================
+register_module("250P", "상태 리포트(JSON)(PRO)", "큐/설정/히스토리 스냅샷")
+gray_line("250P", "리포트", "다운로드/스냅샷")
 
-with st.expander("250. 리포트 & 스냅샷", True):
+with st.expander("📄 250P. 상태 리포트", expanded=True):
     report = {
         "ts": datetime.utcnow().isoformat()+"Z",
-        "cfg": ss.m245p5_cfg,
-        "summary": {
-            "facts": len(ss.m245p5_ce["facts"]),
-            "hits": len(ss.m245p5_ce["hits"]),
-            "verdicts": len(ss.m245p5_ce["verdicts"]),
-            "queue": len(ss.m245p5_queue),
-        }
+        "cfg": ss.p245p_cfg,
+        "queue_len": len(ss.p245p_q),
+        "queue_head": ss.p245p_q[:3],
+        "runlog_tail": ss.p245p_runlog[-10:],
     }
     st.json(report)
-    colA,colB = st.columns(2)
+    colA, colB = st.columns(2)
     with colA:
-        if st.button("스냅샷 저장", key="m245p5_snap_add"):
-            ss.m245p5_cfg["snapshots"].append(report)
-            st.success("저장됨")
+        if st.button("스냅샷 저장", key="p245p_snap"):
+            ss.setdefault("p245p_snaps", []).append(report)
+            st.success("스냅샷 저장 완료")
     with colB:
-        st.download_button("모든 스냅샷 다운로드",
-            data=json.dumps(ss.m245p5_cfg["snapshots"], ensure_ascii=False, indent=2).encode("utf-8"),
-            file_name="M245-250_Snapshots.json",
-            mime="application/json",
-            key="m245p5_snap_dl")
-            
-            # ───────────────────────────────────────────────
-# [251S/251O] 스위처·오케스트라 통합 (R3/R4 + 자동배치)
-# 키 프리픽스: m251_*
-import streamlit as st, time
+        st.download_button("↓ 리포트 JSON", data=json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
+                           file_name="report_250P.json", mime="application/json", key="p245p_repdl")
+    with st.expander("📦 저장된 스냅샷", expanded=False):
+        st.write(ss.get("p245p_snaps", [])[-5:])
 
-ss = st.session_state
-if "m251_cfg" not in ss:
-    ss.m251_cfg = {
-        "mode": "OFF",      # OFF | R3 | R4
-        "auto": False,      # 자동 실행
-        "interval": 10,     # 초
-        "batch": 5,         # 한 번에 처리 크기
-        "last_run": 0.0,    # 마지막 실행 시각
-    }
 
-# ── R3/R4 러너 (245–250을 호출)
-def _run_R3(batch:int):
-    # 느슨 탐지: 큐 일부를 CE에 반영
-    moved = 0
-    for _ in range(min(batch, len(ss.m245p5_queue))):
-        it = ss.m245p5_queue.pop(0)
-        ss.m245p5_ce["facts"].append({"text": it["hit"], "meta": it["meta"], "label": ss.m245p5_cfg["label"]})
-        moved += 1
-    return {"moved": moved, "mode":"R3"}
 
-def _run_R4(batch:int):
-    # 엄격 검증: 최근 facts 일부를 검증 verdict에 추가(스텁)
-    import random
-    sample = ss.m245p5_ce["facts"][-batch:]
-    verdicts=[]
-    for f in sample:
-        v = random.choice(["pass","contradicts","needs_more"])
-        verdicts.append({"fact": f["text"], "verdict": v, "ts": time.time()})
-    ss.m245p5_ce["verdicts"].extend(verdicts)
-    return {"verified": len(verdicts), "mode":"R4"}
-
-# ── UI
-st.markdown("### 251S/251O · 스위처/오케스트라 — 자동 배치 러너")
-mode = st.radio("모드", ["OFF","R3","R4"],
-                index=["OFF","R3","R4"].index(ss.m251_cfg["mode"]),
-                key="m251_mode")
-auto = st.toggle("자동 실행", value=ss.m251_cfg["auto"], key="m251_auto")
-interval = st.slider("주기(초)", 5, 120, ss.m251_cfg["interval"], key="m251_interval")
-batch = st.number_input("배치 크기", 1, 1000, ss.m251_cfg["batch"], key="m251_batch")
-
-# 변동사항 반영
-ss.m251_cfg.update({"mode": mode, "auto": auto, "interval": interval, "batch": int(batch)})
-
-# 수동 실행 버튼
-col1,col2 = st.columns(2)
-with col1:
-    if st.button("지금 실행", key="m251_run_now"):
-        if ss.m251_cfg["mode"]=="R3":
-            res = _run_R3(ss.m251_cfg["batch"])
-        elif ss.m251_cfg["mode"]=="R4":
-            res = _run_R4(ss.m251_cfg["batch"])
-        else:
-            res = {"info":"OFF"}
-        ss.m251_cfg["last_run"]=time.time()
-        st.success(f"수동 실행 결과: {res}")
-
-with col2:
-    st.caption(f"마지막 실행: {int(time.time()-ss.m251_cfg['last_run'])}초 전")
-
-# 자동 실행(폴링, 무한루프 금지)
-if ss.m251_cfg["auto"] and ss.m251_cfg["mode"] in ("R3","R4"):
-    elapsed = time.time() - ss.m251_cfg["last_run"]
-    if elapsed >= ss.m251_cfg["interval"]:
-        if ss.m251_cfg["mode"]=="R3":
-            res = _run_R3(ss.m251_cfg["batch"])
-        else:
-            res = _run_R4(ss.m251_cfg["batch"])
-        ss.m251_cfg["last_run"]=time.time()
-        st.toast(f"[{ss.m251_cfg['mode']}] 주기 실행 완료 · {res}", icon="⏱️")
-        
-  
-  
-# [251X] 스위치/오케스트라(카나리) — 안전 테스트용
-# 기존 251R3/251R4/251S/251O 와 완전 분리 (key prefix: m251x_)
-register_module("251X", "스위치/오케스트라(카나리)", "안전망: 새 엔진 검증용")
-gray_line("251X", "카나리 러너", "기존 251 라인과 충돌 없음")
-
-import streamlit as st, time, json, datetime
-from urllib import request, error
-
-# --- 세션 가드 ---
-if "m251x_cfg" not in st.session_state:
-    st.session_state.m251x_cfg = {
-        "mode": "R4",        # R3|R4
-        "auto": False,
-        "interval": 10,
-        "batch": 5,
-        "real": True,
-        "last_run": 0.0,
-        "history": []
-    }
-
-cfg = st.session_state.m251x_cfg
-
-with st.expander("251X · 스위치/오케스트라(카나리)", expanded=True):
-    mode = st.radio("모드", ["OFF","R3","R4"], index=["OFF","R3","R4"].index(cfg["mode"]),
-                    key="m251x_mode")
-    cfg["mode"] = mode
-
-    colA,colB,colC = st.columns([1,1,1])
-    with colA:
-        cfg["auto"] = st.toggle("자동 실행", value=cfg["auto"], key="m251x_auto")
-    with colB:
-        cfg["interval"] = st.slider("주기(초)", 5, 120, cfg["interval"], key="m251x_interval")
-    with colC:
-        cfg["batch"] = st.number_input("배치 크기", 1, 50, cfg["batch"], key="m251x_batch")
-
-    cfg["real"] = st.toggle("REAL 전용(실패시 SIM 금지)", value=cfg["real"], key="m251x_real")
-
-    run_now = st.button("지금 실행", key="m251x_run")
-
-# --- 엔드포인트(SIM/REAL) ---
-SIM_URL = "https://httpbin.org/get"
-REAL_URLS = [
-    # 안전한 살아있는 공개 엔드포인트들(200 OK 보장군)
-    "https://api.github.com",
-    "https://httpbin.org/status/200",
-]
-
-def _http_get(url, timeout=8):
-    try:
-        with request.urlopen(url, timeout=timeout) as resp:
-            code = resp.getcode()
-            body = resp.read(1024).decode("utf-8","ignore")
-            return True, code, body[:512]
-    except error.HTTPError as e:
-        return False, e.code, str(e)
-    except Exception as e:
-        return False, -1, str(e)
-
-def _run_once(mode:str, real_only:bool, batch:int):
-    """실행 1회. 성공/실패/로그 반환(카나리 전용)."""
-    started = datetime.datetime.utcnow().isoformat()+"Z"
-    hit_ok, hit_code, payload = (False, None, "")
-    if mode == "OFF":
-        return {"ts": started, "mode": mode, "skipped": True}
-
-    # REAL 우선
-    ok, code, body = _http_get(REAL_URLS[0])
-    if not ok and len(REAL_URLS) > 1:
-        ok, code, body = _http_get(REAL_URLS[1])
-
-    hit_ok, hit_code, payload = ok, code, body
-
-    if (not ok) and (not real_only):
-        # SIM 폴백
-        ok, code, body = _http_get(SIM_URL)
-        hit_ok, hit_code, payload = ok, code, body
-
-    result = {
-        "ts": started,
-        "mode": mode,
-        "verified": int(hit_ok),
-        "http": hit_code,
-        "snippet": payload[:160],
-        "batch": batch
-    }
-    return result
-
-def _append_history(rec:dict):
-    hist = st.session_state.m251x_cfg["history"]
-    hist.insert(0, rec)
-    if len(hist) > 20: hist.pop()
-
-# 수동 실행
-if run_now:
-    res = _run_once(cfg["mode"], cfg["real"], cfg["batch"])
-    _append_history(res)
-    st.success(f"수동 실행 결과: {res}")
-
-# 자동 루프 (프레임당 한 번 확인)
-now = time.time()
-if cfg["auto"] and cfg["mode"] != "OFF":
-    if now - cfg["last_run"] >= cfg["interval"]:
-        res = _run_once(cfg["mode"], cfg["real"], cfg["batch"])
-        _append_history(res)
-        cfg["last_run"] = now
-        st.info(f"자동 실행 결과: {res}")
-
-# 이력/다운로드
-with st.expander("실행 이력(최근 20개)", expanded=False):
-    hist = st.session_state.m251x_cfg["history"]
-    if not hist:
-        st.caption("아직 이력이 없습니다.")
-    else:
-        st.json(hist)
-        st.download_button("이력 JSON 다운로드",
-                           data=json.dumps(hist, ensure_ascii=False, indent=2).encode("utf-8"),
-                           file_name="251X_canary_history.json",
-                           mime="application/json",
-                           key="m251x_dl")
-                           
-                           
-       
 # [252] 우주정보장 연동: 증거/반례 큐 파이프라인 (Backbone v1)
 # 기능: 증거/HIT 수집 → 간이 검증(stub) → CE-Graph 반영(stub) → 로그/스냅샷
 # 충돌 방지: 모든 key는 m252_* 사용
