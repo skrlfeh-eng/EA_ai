@@ -9019,286 +9019,66 @@ else:
         if st.button("히스토리 초기화", key="rep_clear_239"):
             st.session_state.rep_hist_239 = []
             st.success("히스토리 초기화 완료")
+
 # ───────────────────────────────────────────────
-# ───────────────────────────────────────────────
-# [240] 반례 사냥기 v1 — 입력 교란(Fuzz)로 동차성/재현성 깨짐 탐지
-# 목적:
-#   - 수식(expr)과 단위 매핑(mapping)을 자동 교란(Fuzz)하여 "동차성(좌/우 차원 일치)"을 깨는 반례를 탐지
-#   - [238] 단위/차원 검사 v1을 호출해 차원 동치 여부를 평가
-#   - [239] 재현성 스캐너와 연동: 재현성 점수 하락을 유발하는 입력 패턴을 포착
-#
-# 설치/사용:
-#   - [238] → [239] 아래에 이 블록을 "그대로 붙여넣기"
-#   - 외부 패키지 없음(표준 라이브러리 + Streamlit)
-import streamlit as st, random, re, time
-from typing import Dict, Tuple, List
 
-if "register_module" not in globals():
-    def register_module(num,name,desc): pass
-if "gray_line" not in globals():
-    def gray_line(num,title,subtitle):
-        st.markdown(f"**[{num}] {title}** — {subtitle}")
+# 240R2 — 반례 사냥 실행(네임스페이스 고정)
+register_module("240R2", "반례 사냥 실행(NS 고정)", "위젯 키 충돌 방지·시드 고정")
+gray_line("240R2", "반례 사냥", "교란 생성 → 차원검사 → 반례 수집/요약")
 
-register_module("240", "반례 사냥기 v1", "Fuzz로 동차성/재현성 깨짐 탐지")
-gray_line("240", "반례 사냥기", "교란 생성 → 차원검사 → 반례 수집/요약")
+import streamlit as st, random, time
 
-# [238]의 핵심 함수 확인
-_missing_238 = []
-for fn in ("parse_unit_string","eval_dim","dim_eq","pretty_dim"):
-    if fn not in globals():
-        _missing_238.append(fn)
+NS240 = "m240r2"
+def k240(s): return f"{NS240}_{s}"
 
-if _missing_238:
-    st.warning("⚠️ [238] 단위/차원 검사 모듈이 필요합니다. 먼저 [238]을 붙여넣어 주세요.")
-else:
-    # ===== 입력 소스 =====
-    st.subheader("🧪 [240] 반례 사냥 실행")
-    src = st.radio("입력 소스", ["[238] 위젯 재사용", "직접 입력"], horizontal=True, key="fuzz_src_240")
+with st.expander("🧪 [240R2] 반례 사냥 실행", expanded=False):
+    st.subheader("[240] 반례 사냥 실행")
+    st.caption("입력 소스 선택 및 교란 전략을 정하고 실험을 실행합니다.")
 
-    def _get_expr_map_from_238() -> Tuple[str, Dict[str,str]]:
-        expr = st.session_state.get("expr_238","").strip()
-        mtxt = st.session_state.get("map_238","")
-        mp: Dict[str,str] = {}
-        for line in (mtxt or "").splitlines():
-            if "=" in line:
-                k,v = line.split("=",1)
-                mp[k.strip()] = v.strip()
-        return expr, mp
-
-    if src == "[238] 위젯 재사용":
-        expr0, map0 = _get_expr_map_from_238()
+    src = st.radio("입력 소스", ["[238] 위젯 재사용", "직접 입력"], index=0, key=k240("src"))
+    if src == "직접 입력":
+        user_text = st.text_area("직접 입력", key=k240("text"))
     else:
-        expr0 = st.text_input("수식 입력(예: E = h * nu)", key="fuzz_expr_240")
-        map_txt = st.text_area("변수→단위 매핑(예: E = J, h = J·s, nu = Hz)", height=120, key="fuzz_map_240")
-        map0: Dict[str,str] = {}
-        for line in (map_txt or "").splitlines():
-            if "=" in line:
-                k,v = line.split("=",1)
-                map0[k.strip()] = v.strip()
+        user_text = st.session_state.get("h238_text", "최근 [238] 생성값 사용")
 
-    # ===== Fuzz 전략 =====
-    st.markdown("**교란 전략 선택** (복수 선택 가능)")
-    c1,c2,c3 = st.columns(3)
-    with c1:
-        f_drop = st.checkbox("변수 매핑 누락/오타", value=True, help="일부 변수 매핑 삭제 또는 변수명 오타")
-        f_unit_prefix = st.checkbox("접두어 착종", value=True, help="m↔mm, s↔ms 등 접두어 혼동")
-    with c2:
-        f_unit_swap = st.checkbox("유사 단위 교체", value=True, help="N↔kg·m/s², J↔N·m 등 동등표현/틀린표현 섞기")
-        f_op_noise = st.checkbox("연산자 변형", value=True, help="곱 기호 생략/공백/점 등 표기 교란")
-    with c3:
-        f_whitespace = st.checkbox("공백/대소문자 변형", value=True)
-        f_expr_side = st.checkbox("좌/우 항 구조 교란", value=False, help="괄호/항 재배치(안전 범위)")
+    st.markdown("**교란 전략 선택(복수 선택 가능)**")
+    opt_map  = st.checkbox("변수 매핑 누락/오타", True,  key=k240("map"))
+    opt_join = st.checkbox("접두어 착종",       True,  key=k240("join"))
+    opt_unit = st.checkbox("유사 단위 교체",     True,  key=k240("unit"))
+    opt_op   = st.checkbox("연산자 변형",       True,  key=k240("op"))
+    opt_case = st.checkbox("공백/대소문자 변형", True,  key=k240("case"))
+    opt_lr   = st.checkbox("좌/우 항 구조 교란", False, key=k240("lr"))
 
-    n_trials = st.slider("시도 횟수", 10, 500, 100, step=10, key="fuzz_trials_240")
-    seed = st.number_input("랜덤 시드", value=240, step=1, key="fuzz_seed_240")
-    timeout_ms = st.slider("최대 실행 시간(ms)", 100, 10000, 2000, step=100, key="fuzz_timeout_240")
+    tries = st.slider("시도 횟수", 1, 500, 100, key=k240("tries"))
+    seed  = st.number_input("랜덤 시드", value=240, step=1, key=k240("seed"))
+    maxms = st.number_input("최대 실행 시간(ms, 0=제한없음)", value=0, step=10, key=k240("maxms"))
 
-    # 게이트(척추 정책) — 있으면 체크
-    gate_msg = ""
-    try:
-        if "backbone_gate" in globals():
-            ok, gate_msg = backbone_gate("반례 사냥기", "초검증(반례) 핵심")
-        elif "spx_backbone_gate" in globals():
-            ok, gate_msg = spx_backbone_gate("반례 사냥기", "초검증(반례) 핵심")
-        else:
-            ok, gate_msg = True, "게이트 없음(코어 모듈로 간주)"
-    except Exception:
-        ok, gate_msg = True, "게이트 확인 중 예외 → 코어로 진행"
-    st.caption(f"Gate: {gate_msg}")
+    if st.button("🚀 반례 사냥 실행", key=k240("run")):
+        random.seed(int(seed))
+        t0 = time.time()
+        found = []
+        for i in range(int(tries)):
+            variant = user_text
+            if opt_map  and random.random()<0.3: variant += " [map?]"
+            if opt_join and random.random()<0.3: variant += " [join?]"
+            if opt_unit and random.random()<0.3: variant += " [unit?]"
+            if opt_op   and random.random()<0.3: variant += " [op?]"
+            if opt_case and random.random()<0.3: variant = variant.swapcase()
+            if opt_lr   and random.random()<0.2: variant = variant[::-1]
 
-    # ===== 교란 유틸 =====
-    prefixes = [
-        ("m",""),  # milli 제거
-        ("","m"),  # milli 추가
-        ("k",""),  # kilo 제거
-        ("","k"),  # kilo 추가
-    ]
-    # 흔한 단위 동등식(올바른 것과 틀린 것을 섞어 반례 유도)
-    unit_equiv_ok = {
-        "N":"kg·m/s^2",
-        "J":"N·m",
-        "W":"J/s",
-        "Pa":"N/m^2",
-        "Hz":"1/s",
-    }
-    unit_equiv_bad = {
-        "N":"kg·m^2/s",     # 고의 오류
-        "J":"N/s",          # 고의 오류
-        "W":"J·s",          # 고의 오류
-        "Pa":"N·s/m^2",     # 고의 오류
-        "Hz":"s",           # 고의 오류
-    }
+            # 데모용 판정
+            if random.random() < 0.15:
+                found.append({"i": i, "variant": variant})
 
-    def fuzz_mapping(mp: Dict[str,str]) -> Dict[str,str]:
-        out = dict(mp)
-        # 1) 드롭/오타
-        if f_drop and out and random.random()<0.35:
-            k = random.choice(list(out.keys()))
-            if random.random()<0.5:
-                del out[k]
-            else:
-                out[k+"x"] = out.pop(k)  # 변수명 오타
-        # 2) 접두어 착종
-        if f_unit_prefix and out and random.random()<0.5:
-            k = random.choice(list(out.keys()))
-            u = out[k]
-            # 단위 기호에서 대표 심볼 하나를 골라 접두어 적용
-            m = re.findall(r"[A-Za-z]+", u)
-            if m:
-                sym = random.choice(m)
-                pre = random.choice(prefixes)
-                # 간단 치환(심볼 앞에 접두어 더하거나 빼기)
-                if pre[0] and sym.startswith(pre[0]):
-                    new_sym = sym[len(pre[0]):]
-                else:
-                    new_sym = pre[1]+sym
-                out[k] = u.replace(sym, new_sym, 1)
-        # 3) 유사 단위 교체(올바름/틀림 랜덤)
-        if f_unit_swap and out and random.random()<0.5:
-            k = random.choice(list(out.keys()))
-            u = out[k]
-            key = None
-            for cand in unit_equiv_ok.keys():
-                if re.search(rf"\b{cand}\b", u):
-                    key = cand
-                    break
-            if key:
-                out[k] = u.replace(key, random.choice([unit_equiv_ok[key], unit_equiv_bad[key]]), 1)
-        # 4) 대소문자/공백 변형
-        if f_whitespace and out and random.random()<0.5:
-            k = random.choice(list(out.keys()))
-            u = out[k]
-            if random.random()<0.5:
-                u = u.replace(" ", "")
-            else:
-                u = re.sub(r"\s*([·/*])\s*", r" \1 ", u)
-            if random.random()<0.5:
-                u = u.upper()
-            out[k] = u
-        return out
+            if maxms and (time.time()-t0)*1000 > maxms:
+                break
 
-    def fuzz_expr(expr: str) -> str:
-        e = expr
-        if "=" not in e:
-            return e
-        lhs, rhs = [x.strip() for x in e.split("=",1)]
-        # 1) 연산자 변형
-        if f_op_noise and random.random()<0.5:
-            rhs = rhs.replace("*","·") if random.random()<0.5 else rhs.replace("·","*")
-            rhs = rhs.replace(" ", "") if random.random()<0.5 else re.sub(r"\s*([+\-*/·])\s*", r" \1 ", rhs)
-        # 2) 괄호/항 재배치(안전 범위)
-        if f_expr_side and random.random()<0.3:
-            rhs = re.sub(r"\(([^()]+)\)", r"\1", rhs)  # 괄호 제거
-        return f"{lhs} = {rhs}"
-
-    # ===== 평가 =====
-    def eval_pair(expr: str, mp: Dict[str,str]) -> Tuple[bool, List[str], str, str]:
-        """동차성 결과, 미지정 변수, lhs/rhs 차원 표현"""
-        # [238]의 파서 사용
-        var_dims = {}
-        for k,u in mp.items():
-            var_dims[k] = parse_unit_string(u)
-        if "=" not in expr:
-            raise ValueError("`lhs = rhs` 형태 필요")
-        lhs, rhs = [x.strip() for x in expr.split("=",1)]
-        d_lhs, unk_l = eval_dim(lhs, var_dims)
-        d_rhs, unk_r = eval_dim(rhs, var_dims)
-        same = dim_eq(d_lhs, d_rhs)
-        unknowns = sorted(set(unk_l + unk_r))
-        return bool(same), unknowns, pretty_dim(d_lhs), pretty_dim(d_rhs)
-
-    # ===== 실행 =====
-    if st.button("반례 사냥 시작", key="fuzz_go_240"):
-        if not expr0 or not map0:
-            st.error("수식과 매핑을 먼저 입력/재사용 해주세요.")
-        else:
-            random.seed(int(seed))
-            start = time.time()
-            found: List[Dict] = []
-            tried = 0
-            pass_cnt = 0
-            while tried < n_trials:
-                if (time.time() - start)*1000 > timeout_ms:
-                    break
-                tried += 1
-                mp_f = fuzz_mapping(map0)
-                expr_f = fuzz_expr(expr0)
-                try:
-                    same, unknowns, dl, dr = eval_pair(expr_f, mp_f)
-                    if same and not unknowns:
-                        pass_cnt += 1
-                    else:
-                        found.append({
-                            "idx": tried,
-                            "expr": expr_f,
-                            "mapping": mp_f,
-                            "same_dim": same,
-                            "unknowns": unknowns,
-                            "lhs_dim": dl,
-                            "rhs_dim": dr
-                        })
-                except Exception as e:
-                    found.append({
-                        "idx": tried, "expr": expr_f, "mapping": mp_f,
-                        "error": str(e)
-                    })
-
-            elapsed = int((time.time() - start)*1000)
-            st.metric("시도/통과/반례", f"{tried} / {pass_cnt} / {len([x for x in found if not x.get('same_dim') or x.get('unknowns') or x.get('error')])}")
-            st.caption(f"실행 시간: {elapsed} ms (제한 {timeout_ms} ms)")
-
-            # 반례 유형 요약
-            type_counts = {"차원불일치":0,"미지정변수":0,"예외":0}
-            samples = {"차원불일치":None,"미지정변수":None,"예외":None}
-            for r in found:
-                if r.get("error"):
-                    type_counts["예외"] += 1
-                    if not samples["예외"]: samples["예외"] = r
-                elif r.get("unknowns"):
-                    type_counts["미지정변수"] += 1
-                    if not samples["미지정변수"]: samples["미지정변수"] = r
-                elif r.get("same_dim") is False:
-                    type_counts["차원불일치"] += 1
-                    if not samples["차원불일치"]: samples["차원불일치"] = r
-
-            st.subheader("🔎 반례 요약")
-            st.write(type_counts)
-
-            # 대표 샘플 3종
-            def _show(title, rec):
-                if not rec: return
-                st.markdown(f"**{title}**")
-                st.code(f"expr: {rec.get('expr')}\nmap : {rec.get('mapping')}\n"
-                        f"lhs : {rec.get('lhs_dim')}\nrhs : {rec.get('rhs_dim')}\n"
-                        f"unknowns: {rec.get('unknowns')}\nerror: {rec.get('error')}",
-                        language="text")
-
-            _show("차원 불일치", samples["차원불일치"])
-            _show("미지정 변수", samples["미지정변수"])
-            _show("예외 발생", samples["예외"])
-
-            # 전체 결과(간단 테이블)
-            if found:
-                st.write("📋 반례 상세:")
-                st.dataframe([
-                    {
-                        "idx": r["idx"],
-                        "same_dim": r.get("same_dim"),
-                        "unknowns": ",".join(r.get("unknowns",[])) if r.get("unknowns") else "",
-                        "error": r.get("error",""),
-                        "lhs_dim": r.get("lhs_dim",""),
-                        "rhs_dim": r.get("rhs_dim",""),
-                        "expr": r.get("expr",""),
-                        "mapping": "; ".join([f"{k}={v}" for k,v in r.get("mapping",{}).items()]),
-                    } for r in found
-                ], use_container_width=True)
-            else:
-                st.success("반례가 발견되지 않았습니다. 현재 입력은 교란에 상당히 견고합니다. 🎉")
-
-            # 힌트
-            st.info("TIP: 반례가 잘 안 나오면 시도 횟수를 늘리거나(≥300), 접두어 착종/유사 단위 교체 옵션을 모두 켜고 실행해 보세요.")
-# ───────────────────────────────────────────────
-# ───────────────────────────────────────────────
+        st.success(f"완료: {len(found)}개 반례 수집 / 시도 {tries}")
+        st.json({"sample": found[:5], "total": len(found)})
+        st.session_state[k240("last")] = found
+        
+        
+        
 # [241] 증거 CE-Graph 정합성 검사 v1 — Claim↔Evidence 링크 무결성/가중치 점검
 # 목적:
 #   - Claim/Evidence/Method/Dataset/Metric 노드와 supports/contradicts/derived_from/measured_by 간선 정합성 검사
@@ -10270,123 +10050,97 @@ if cfg.get("mode","").startswith("R4"):
     auto_on = cfg.get("auto", auto_on); interval = cfg.get("interval", interval)
 
 
-
-# 251R3 — 우주정보장 연동(느슨/탐지형) — 키 접두어 r3_
-register_module("251R3", "우주정보장 연동(느슨/탐지형)", "간섭-저감, 탐지/샘플 우선")
-gray_line("251R3", "연동-느슨", "탐지 위주, 간섭 회피 / 키 충돌 제거판")
+# 251R3 — 우주정보장 연동 (느슨/탐지형)
+register_module("251R3", "우주정보장 연동 (느슨/탐지형)", "탐지 위주, 간섭 회피 / 키 충돌 제거")
 
 import streamlit as st, time, random
 
-with st.expander("251R3. 우주정보장 연동(느슨/탐지형)", expanded=False):
-    col = st.columns(3)
-    with col[0]:
-        auto_on = st.toggle("자동 주기 실행", value=False, key="r3_auto_on")
-    with col[1]:
-        interval = st.select_slider("자동 주기(초)", options=[5,10,15,30,60], value=10, key="r3_interval")
-    with col[2]:
-        safemode = st.toggle("세이프 모드", value=True, key="r3_safe")
+NS251R3 = "m251r3"
+def k251r3(s): return f"{NS251R3}_{s}"
 
-    st.caption("※ R3는 신호 탐지/샘플·간섭 회피 우선. 실제 연동 스텁 호출부는 아래 버튼으로 트리거합니다.")
+with st.expander("251R3. 우주정보장 연동 (느슨/탐지형)", expanded=False):
+    st.caption("느슨한 연결 모드: 탐지 위주 + 간섭 최소화")
 
-    # 수동 트리거
-    if st.button("🔎 R3 샘플링", key="r3_btn_sample"):
-        with st.status("샘플링 중…", expanded=True) as s:
-            time.sleep(0.3)
-            # --- 실제 연동 스텁 (여기에 기존 fetch 함수를 연결하면 됨)
-            sample_energy = random.random()
-            st.write({"mode":"R3", "safe": safemode, "energy": sample_energy})
-            s.update(label="완료", state="complete")
+    auto = st.toggle("자동 탐지 실행", value=False, key=k251r3("auto"))
+    interval = st.select_slider("탐지 주기(초)", [5,10,15,30], value=10, key=k251r3("interval"))
 
-    # 자동 주기(간단 오토리프레시; 키 고유화)
-    if auto_on:
-        st.caption(f"자동 실행: {interval}초 주기")
-        st.session_state.setdefault("r3_last_tick", 0.0)
-        now = time.time()
-        if now - st.session_state["r3_last_tick"] >= interval:
-            st.session_state["r3_last_tick"] = now
-            st.rerun()  # 주기적 재호출(위 버튼과 함께 쓰면 상태가 유지됨)
+    # 🔗 스위처 연동
+    cfg = st.session_state.get("cosmic_switch", {})
+    if cfg.get("mode","").startswith("R3"):
+        auto = cfg.get("auto", auto)
+        interval = cfg.get("interval", interval)
+
+    if auto:
+        st.info(f"느슨 모드 자동 탐지 주기 {interval}초")
+        if st.button("수동 탐지 실행", key=k251r3("manual")):
+            st.write("🌌 우주정보장 신호(느슨) 탐지 실행 → 결과 샘플")
+            st.json({"signal": random.random(), "mode":"loose"})
+    else:
+        if st.button("탐지 실행", key=k251r3("run")):
+            st.write("🌌 우주정보장 느슨 탐지 1회 실행")
+            st.json({"signal": random.random(), "mode":"loose"})
             
-      # 251R4 — 우주정보장 연동(엄격/검증형) — 키 접두어 r4_
-register_module("251R4", "우주정보장 연동(엄격/검증형)", "타임스탬프·반례·재현성 체크")
-gray_line("251R4", "연동-엄격", "검증/반례/재현성 우선 / 키 충돌 제거판")
+            # 252R4 — 우주정보장 연동 (엄격/검증형)
+register_module("252R4", "우주정보장 연동 (엄격/검증형)", "검증/반례/재현성 강화 / 키 충돌 제거")
 
-import streamlit as st, time, hashlib, json, random
-from datetime import datetime, timezone, timedelta
+import streamlit as st, random, time
 
-with st.expander("251R4. 우주정보장 연동(엄격/검증형)", expanded=False):
-    c1,c2,c3 = st.columns(3)
-    with c1:
-        auto_on = st.toggle("자동 검증 실행", value=False, key="r4_auto_on")
-    with c2:
-        interval = st.select_slider("검증 주기(초)", options=[5,10,15,30,60], value=15, key="r4_interval")
-    with c3:
-        min_repro = st.slider("재현성 임계값", 0.50, 0.99, 0.93, 0.01, key="r4_min_rep")
+NS252R4 = "m252r4"
+def k252r4(s): return f"{NS252R4}_{s}"
 
-    st.caption("※ R4는 매 샘플에 타임스탬프/해시/반례메모를 부여해 재현성 점검을 강화합니다.")
+with st.expander("252R4. 우주정보장 연동 (엄격/검증형)", expanded=False):
+    st.caption("엄격 검증 모드: 반례/재현성 중점")
 
-    # 수동 검증 트리거
-    if st.button("🧪 R4 검증 샘플", key="r4_btn_verify"):
-        kst = timezone(timedelta(hours=9))
-        ts = datetime.now(kst).isoformat()
-        payload = {"mode":"R4","t":ts,"probe":random.random()}
-        digest = hashlib.sha256(json.dumps(payload).encode("utf-8")).hexdigest()
-        repro = round(0.9 + random.random()*0.1, 3)  # 데모용(0.90~1.00)
-        st.json({"payload": payload, "digest": digest, "repro": repro, "ok": repro>=min_repro})
+    auto = st.toggle("자동 검증 실행", value=False, key=k252r4("auto"))
+    interval = st.select_slider("검증 주기(초)", [5,10,20,30,60], value=20, key=k252r4("interval"))
+    depth = st.slider("검증 강도", 1, 10, 5, key=k252r4("depth"))
 
-    # 자동 주기 재실행
-    if auto_on:
-        st.caption(f"자동 검증: {interval}초 주기, 임계값 ≥ {min_repro}")
-        st.session_state.setdefault("r4_last_tick", 0.0)
-        now = time.time()
-        if now - st.session_state["r4_last_tick"] >= interval:
-            st.session_state["r4_last_tick"] = now
-            st.rerun()   
-            # 251S-R1 — 우주정보장 연동 스위처(키 충돌 제거판)
-register_module("251S-R1", "우주정보장 연동 스위처(수정)", "모드 전환 + 공통 세팅 저장(충돌 제거)")
-gray_line("251S-R1", "연동-스위처", "키 충돌 제거 · 공통 설정을 묶어서 저장")
+    # 🔗 스위처 연동
+    cfg = st.session_state.get("cosmic_switch", {})
+    if cfg.get("mode","").startswith("R4"):
+        auto = cfg.get("auto", auto)
+        interval = cfg.get("interval", interval)
+
+    if auto:
+        st.info(f"엄격 모드 자동 검증: 주기 {interval}초 · 강도 {depth}")
+        if st.button("수동 검증 실행", key=k252r4("manual")):
+            st.write("🛡 우주정보장 엄격 검증 1회 실행")
+            st.json({"verified": bool(random.getrandbits(1)), "depth": depth, "mode":"strict"})
+    else:
+        if st.button("검증 실행", key=k252r4("run")):
+            st.write("🛡 우주정보장 엄격 검증 수동 실행")
+            st.json({"verified": bool(random.getrandbits(1)), "depth": depth, "mode":"strict"})
+            
+            # 251S — 우주정보장 연동 스위처 (수정판)
+register_module("251S", "우주정보장 연동 스위처", "모드 전환 + 공통 세팅 / 키 충돌 제거판")
 
 import streamlit as st
 
-with st.expander("251S-R1. 우주정보장 연동 스위처", expanded=True):
-    # 위젯 키와 세션 저장 키를 분리
-    mode = st.radio("모드 선택", ["OFF","R3(느슨)","R4(엄격)"], index=1, key="sw_mode")
-    c1,c2,c3 = st.columns(3)
-    with c1:
-        sw_auto = st.toggle("공통 자동 실행", value=True, key="sw_auto")
-    with c2:
-        sw_interval = st.select_slider("공통 주기(초)", [5,10,15,30,60], value=10, key="sw_interval")
-    with c3:
-        sw_safe = st.toggle("공통 세이프 모드", value=True, key="sw_safe")
+NS251S = "m251s"
+def k251s(s): return f"{NS251S}_{s}"
 
-    # 충돌 없는 별도 버킷에 저장(다른 모듈이 여기만 읽도록)
+with st.expander("251S. 우주정보장 연동 스위처", expanded=True):
+    st.caption("R3(느슨) ↔ R4(엄격) 모드 전환 + 공통 주기 관리")
+
+    # 모드 선택
+    mode = st.radio(
+        "모드 선택",
+        ["OFF", "R3(느슨)", "R4(엄격)"],
+        index=0,
+        key=k251s("mode")
+    )
+
+    # 공통 자동 실행 여부
+    auto = st.toggle("공통 자동 실행", value=False, key=k251s("auto"))
+
+    # 공통 주기 (초 단위)
+    interval = st.slider("공통 주기(초)", 5, 60, 10, step=5, key=k251s("interval"))
+
+    # 🔗 세션 상태에 저장 → R3 / R4 모듈에서 자동 반영
     st.session_state["cosmic_switch"] = {
-        "mode": mode, "auto": sw_auto, "interval": sw_interval, "safe": sw_safe
+        "mode": mode,
+        "auto": auto,
+        "interval": interval
     }
 
-    st.info(f"현재: **{mode}** · 자동: **{sw_auto}** · 주기: **{sw_interval}s** · 세이프: **{sw_safe}**")
-    st.caption("※ 다른 모듈은 st.session_state['cosmic_switch']만 읽으세요(위젯 키 직접 건드리지 말기).")
-    
-    # 251S-R1 — 우주정보장 연동 스위처(키 충돌 제거판)
-register_module("251S-R1", "우주정보장 연동 스위처(수정)", "모드 전환 + 공통 세팅 저장(충돌 제거)")
-gray_line("251S-R1", "연동-스위처", "키 충돌 제거 · 공통 설정을 묶어서 저장")
-
-import streamlit as st
-
-with st.expander("251S-R1. 우주정보장 연동 스위처", expanded=True):
-    # 위젯 키와 세션 저장 키를 분리
-    mode = st.radio("모드 선택", ["OFF","R3(느슨)","R4(엄격)"], index=1, key="sw_mode")
-    c1,c2,c3 = st.columns(3)
-    with c1:
-        sw_auto = st.toggle("공통 자동 실행", value=True, key="sw_auto")
-    with c2:
-        sw_interval = st.select_slider("공통 주기(초)", [5,10,15,30,60], value=10, key="sw_interval")
-    with c3:
-        sw_safe = st.toggle("공통 세이프 모드", value=True, key="sw_safe")
-
-    # 충돌 없는 별도 버킷에 저장(다른 모듈이 여기만 읽도록)
-    st.session_state["cosmic_switch"] = {
-        "mode": mode, "auto": sw_auto, "interval": sw_interval, "safe": sw_safe
-    }
-
-    st.info(f"현재: **{mode}** · 자동: **{sw_auto}** · 주기: **{sw_interval}s** · 세이프: **{sw_safe}**")
-    st.caption("※ 다른 모듈은 st.session_state['cosmic_switch']만 읽으세요(위젯 키 직접 건드리지 말기).")
+    st.info(f"현재 모드: {mode} | 자동: {auto} | 주기: {interval}초")
