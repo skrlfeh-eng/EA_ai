@@ -11022,3 +11022,285 @@ if st.button("RUN WRITE", key="m256_run_write"):
 # 253/254/255와의 연결(있다면) — 다음 모듈들이 ss.m256_driver를 소비
 st.caption("다음 모듈은 ss.m256_driver(실/스텁)를 직접 사용합니다. 255의 리포트와 함께 전환하세요.")
 # ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# [257] Vespa / OpenSearch 어댑터 — 색인/검색/헬스체크 스켈레톤
+# 목적: 그래프(Neo4j) 옆에서 텍스트/벡터 검색 백엔드 제공 (멀티 백엔드 대비)
+# 동작: OpenSearch 우선 시도 → Vespa HTTP → 불가 시 스텁으로 강등. 동일 API 유지.
+import streamlit as st, os, json, time, uuid
+from dataclasses import dataclass
+
+# UI 헬퍼가 없다면 간이 정의
+if "register_module" not in globals():
+    def register_module(num, name, desc): st.markdown(f"### **[{num}] {name}**"); st.caption(desc)
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle=""): st.markdown(f"**[{num}] {title}**"); st.caption(subtitle)
+
+register_module("257", "Vespa/OpenSearch 어댑터", "색인/검색/헬스체크 · 패키지 없으면 스텁")
+
+# ── 가용성 감지
+m257_has_requests = True
+try:
+    import requests
+except Exception as e:
+    m257_has_requests = False
+    m257_req_err = str(e)
+
+try:
+    from opensearchpy import OpenSearch
+    m257_has_opensearch = True
+except Exception:
+    m257_has_opensearch = False
+
+# ── 세션 상태
+ss = st.session_state
+if "m257_cfg" not in ss:
+    ss.m257_cfg = {
+        "backend": os.getenv("SEARCH_BACKEND", "opensearch"),  # opensearch | vespa | stub
+        # OpenSearch
+        "os_host": os.getenv("OS_HOST", "http://localhost:9200"),
+        "os_index": os.getenv("OS_INDEX", "gea_ce"),
+        "os_user": os.getenv("OS_USER", ""),
+        "os_pw": os.getenv("OS_PW", ""),
+        "os_tls": bool(os.getenv("OS_TLS", "false").lower() == "true"),
+        # Vespa
+        "vespa_host": os.getenv("VESPA_HOST", "http://localhost:8080"),
+        "vespa_app": os.getenv("VESPA_APP", "gea"),
+        "vespa_schema": os.getenv("VESPA_SCHEMA", "doc"),
+        # 공통
+        "timeout_s": 5,
+    }
+if "m257_client" not in ss: ss.m257_client = None
+if "m257_status" not in ss: ss.m257_status = {"ok": False, "msg": "disconnected"}
+
+# ── 결과형
+@dataclass
+class M257Result:
+    ok: bool
+    msg: str
+    payload: dict | None = None
+
+# ── 공통 인터페이스
+class SearchAdapterBase:
+    def health(self) -> M257Result: raise NotImplementedError
+    def upsert(self, doc_id:str, doc:dict) -> M257Result: raise NotImplementedError
+    def search(self, query:str, k:int=5) -> M257Result: raise NotImplementedError
+    def delete(self, doc_id:str) -> M257Result: raise NotImplementedError
+
+# ── OpenSearch 어댑터
+class OpenSearchAdapter(SearchAdapterBase):
+    def __init__(self, host:str, index:str, user:str="", pw:str="", use_tls:bool=False, timeout:int=5):
+        self.host = host.rstrip("/")
+        self.index = index
+        self.timeout = timeout
+        if m257_has_opensearch:
+            self.client = OpenSearch(
+                hosts=[self.host],
+                http_compress=True,
+                http_auth=(user, pw) if user or pw else None,
+                use_ssl=use_tls,
+                verify_certs=use_tls,
+                timeout=timeout,
+            )
+        else:
+            self.client = None  # requests로 최소 동작 or 실패
+
+    def health(self)->M257Result:
+        try:
+            if self.client:
+                info = self.client.info()
+                return M257Result(True, "OpenSearch ok", {"version": info.get("version", {})})
+            if not m257_has_requests: return M257Result(False, f"no client/requests")
+            r = requests.get(f"{self.host}", timeout=self.timeout)
+            return M257Result(r.ok, f"http {r.status_code}", {"text": r.text[:200]})
+        except Exception as e:
+            return M257Result(False, f"health fail: {e}")
+
+    def upsert(self, doc_id:str, doc:dict)->M257Result:
+        try:
+            if self.client:
+                r = self.client.index(index=self.index, id=doc_id, body=doc, refresh=True)
+                return M257Result(True, "indexed", {"result": r.get("result", "ok")})
+            if not m257_has_requests: return M257Result(False, "requests missing")
+            r = requests.post(f"{self.host}/{self.index}/_doc/{doc_id}", json=doc, timeout=self.timeout)
+            return M257Result(r.ok, f"http {r.status_code}", {"text": r.text[:200]})
+        except Exception as e:
+            return M257Result(False, f"upsert fail: {e}")
+
+    def search(self, query:str, k:int=5)->M257Result:
+        body = {"size": k, "query": {"multi_match": {"query": query, "fields": ["text^3","title^2","body"]}}}
+        try:
+            if self.client:
+                r = self.client.search(index=self.index, body=body)
+                hits = [{"id": h["_id"], "score": h["_score"], "src": h["_source"]} for h in r["hits"]["hits"]]
+                return M257Result(True, "search ok", {"hits": hits})
+            if not m257_has_requests: return M257Result(False, "requests missing")
+            r = requests.get(f"{self.host}/{self.index}/_search", json=body, timeout=self.timeout)
+            ok = r.ok
+            payload = r.json() if ok else {"text": r.text[:200]}
+            hits = [{"id": h["_id"], "score": h.get("_score", 0), "src": h.get("_source", {})}
+                    for h in payload.get("hits", {}).get("hits", [])] if ok else []
+            return M257Result(ok, f"http {r.status_code}", {"hits": hits})
+        except Exception as e:
+            return M257Result(False, f"search fail: {e}")
+
+    def delete(self, doc_id:str)->M257Result:
+        try:
+            if self.client:
+                r = self.client.delete(index=self.index, id=doc_id, ignore=[404], refresh=True)
+                return M257Result(True, "deleted", {"result": r.get("result", "ok")})
+            if not m257_has_requests: return M257Result(False, "requests missing")
+            r = requests.delete(f"{self.host}/{self.index}/_doc/{doc_id}", timeout=self.timeout)
+            return M257Result(r.ok, f"http {r.status_code}")
+        except Exception as e:
+            return M257Result(False, f"delete fail: {e}")
+
+# ── Vespa 어댑터(HTTP)
+class VespaAdapter(SearchAdapterBase):
+    def __init__(self, host:str, app:str, schema:str, timeout:int=5):
+        self.host = host.rstrip("/")
+        self.app = app
+        self.schema = schema
+        self.timeout = timeout
+
+    def _doc_url(self, doc_id:str)->str:
+        return f"{self.host}/document/v1/{self.app}/{self.schema}/docid/{doc_id}"
+
+    def health(self)->M257Result:
+        if not m257_has_requests:
+            return M257Result(False, "requests missing")
+        try:
+            # 간이 ping: 상태 엔드포인트가 환경마다 달라 HTTP 200만 확인
+            r = requests.get(self.host, timeout=self.timeout)
+            return M257Result(r.ok, f"http {r.status_code}", {"text": r.text[:200]})
+        except Exception as e:
+            return M257Result(False, f"health fail: {e}")
+
+    def upsert(self, doc_id:str, doc:dict)->M257Result:
+        if not m257_has_requests:
+            return M257Result(False, "requests missing")
+        try:
+            r = requests.post(self._doc_url(doc_id), json=doc, timeout=self.timeout)
+            return M257Result(r.ok, f"http {r.status_code}", {"text": r.text[:200]})
+        except Exception as e:
+            return M257Result(False, f"upsert fail: {e}")
+
+    def search(self, query:str, k:int=5)->M257Result:
+        if not m257_has_requests:
+            return M257Result(False, "requests missing")
+        try:
+            # 간이 yql: 텍스트 필드 fulltext
+            params = {
+                "yql": f"select * from sources * where userInput(@q);",
+                "q": query, "hits": k
+            }
+            r = requests.get(f"{self.host}/search/", params=params, timeout=self.timeout)
+            ok = r.ok
+            payload = r.json() if ok else {"text": r.text[:200]}
+            hits = [{"id": h.get("id"), "score": h.get("relevance", 0), "fields": h.get("fields", {})}
+                    for h in payload.get("root", {}).get("children", [])] if ok else []
+            return M257Result(ok, f"http {r.status_code}", {"hits": hits})
+        except Exception as e:
+            return M257Result(False, f"search fail: {e}")
+
+    def delete(self, doc_id:str)->M257Result:
+        if not m257_has_requests:
+            return M257Result(False, "requests missing")
+        try:
+            r = requests.delete(self._doc_url(doc_id), timeout=self.timeout)
+            return M257Result(r.ok, f"http {r.status_code}", {"text": r.text[:200]})
+        except Exception as e:
+            return M257Result(False, f"delete fail: {e}")
+
+# ── 스텁
+class SearchStub(SearchAdapterBase):
+    def __init__(self): self.store = {}
+    def health(self)->M257Result: return M257Result(True, "stub ok")
+    def upsert(self, doc_id, doc)->M257Result:
+        self.store[doc_id] = doc; return M257Result(True, "stub upsert", {"id": doc_id})
+    def search(self, query, k=5)->M257Result:
+        # 매우 단순: text 포함 여부로 점수
+        hits = []
+        for did, d in self.store.items():
+            text = json.dumps(d, ensure_ascii=False)
+            if query.lower() in text.lower():
+                hits.append({"id": did, "score": 1.0, "doc": d})
+        return M257Result(True, "stub search", {"hits": hits[:k]})
+    def delete(self, doc_id)->M257Result:
+        self.store.pop(doc_id, None); return M257Result(True, "stub delete", {"id": doc_id})
+
+# ── UI & 초기화
+gray_line("257", "백엔드 선택/설정", "OpenSearch 우선 → Vespa → Stub")
+c1, c2, c3 = st.columns(3)
+with c1:
+    ss.m257_cfg["backend"] = st.selectbox("백엔드", ["opensearch","vespa","stub"], index=["opensearch","vespa","stub"].index(ss.m257_cfg["backend"]), key="m257_backend")
+    ss.m257_cfg["timeout_s"] = st.number_input("Timeout(s)", 1, 60, ss.m257_cfg["timeout_s"], key="m257_timeout")
+with c2:
+    st.text_input("OS Host", ss.m257_cfg["os_host"], key="m257_os_host")
+    st.text_input("OS Index", ss.m257_cfg["os_index"], key="m257_os_index")
+with c3:
+    st.text_input("Vespa Host", ss.m257_cfg["vespa_host"], key="m257_vs_host")
+    st.text_input("Vespa App/Schema", f"{ss.m257_cfg['vespa_app']}/{ss.m257_cfg['vespa_schema']}", key="m257_vs_appsch")
+
+cA, cB, cC = st.columns([1,1,2])
+with cA:
+    if st.button("클라이언트 초기화", key="m257_init"):
+        try:
+            if ss.m257_cfg["backend"] == "opensearch":
+                ss.m257_client = OpenSearchAdapter(
+                    host=ss.m257_cfg["os_host"], index=ss.m257_cfg["os_index"],
+                    user=ss.m257_cfg.get("os_user",""), pw=ss.m257_cfg.get("os_pw",""),
+                    use_tls=ss.m257_cfg.get("os_tls", False), timeout=ss.m257_cfg["timeout_s"]
+                )
+            elif ss.m257_cfg["backend"] == "vespa":
+                ss.m257_client = VespaAdapter(
+                    host=ss.m257_cfg["vespa_host"], app=ss.m257_cfg["vespa_app"],
+                    schema=ss.m257_cfg["vespa_schema"], timeout=ss.m257_cfg["timeout_s"]
+                )
+            else:
+                ss.m257_client = SearchStub()
+            ss.m257_status = {"ok": True, "msg": f"client ready({ss.m257_cfg['backend']})"}
+        except Exception as e:
+            ss.m257_client = SearchStub(); ss.m257_status = {"ok": False, "msg": f"init fail → stub: {e}"}
+        st.toast(ss.m257_status["msg"])
+with cB:
+    if st.button("클라이언트 종료", key="m257_close"):
+        ss.m257_client = None
+        ss.m257_status = {"ok": False, "msg": "closed"}
+with cC:
+    st.json(ss.m257_status)
+
+# ── 스모크: 헬스/업서트/검색/삭제
+gray_line("257", "스모크 테스트", "헬스 → 업서트 → 검색 → 삭제")
+cli = ss.get("m257_client")
+colx, coly, colz, colw = st.columns(4)
+with colx:
+    if st.button("HEALTH", key="m257_health"):
+        if not cli: st.warning("초기화 먼저")
+        else:
+            r = cli.health(); (st.success if r.ok else st.error)(r.msg); st.json(r.payload or {})
+with coly:
+    if st.button("UPSERT DOC", key="m257_up"):
+        if not cli: st.warning("초기화 먼저")
+        else:
+            did = f"doc-{uuid.uuid4().hex[:6]}"
+            doc = {"title":"hello", "text":"cosmic claim evidence test", "ts": time.time()}
+            r = cli.upsert(did, doc)
+            (st.success if r.ok else st.error)(r.msg); st.json({"id": did, **(r.payload or {})})
+            ss["m257_last_id"] = did
+with colz:
+    st.text_input("쿼리", "cosmic", key="m257_q")
+    if st.button("SEARCH", key="m257_search"):
+        if not cli: st.warning("초기화 먼저")
+        else:
+            r = cli.search(ss["m257_q"], k=5)
+            (st.success if r.ok else st.error)(r.msg); st.json(r.payload or {})
+with colw:
+    if st.button("DELETE DOC", key="m257_del"):
+        if not cli: st.warning("초기화 먼저")
+        else:
+            did = ss.get("m257_last_id", "")
+            r = cli.delete(did) if did else M257Result(False, "no last id")
+            (st.success if r.ok else st.error)(r.msg); st.json(r.payload or {})
+
+st.caption("메모: 256(그래프) + 257(검색)을 병렬 운용하면 CE-Graph 증거확장·회수 속도를 크게 개선.")
+# ─────────────────────────────────────────────────────────
