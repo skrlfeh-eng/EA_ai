@@ -9912,317 +9912,146 @@ if st.button("반례사냥 실행", key="adv244_run"):
     st.caption(f"Gate: {msg}")
 
 # ─────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────
-# [245~251 v5.1 LIVE] CE-HIT + 검증 + 스위처/오케스트라(동작형)
-# 프리픽스: m245v5_*, m251v5_*  (모든 위젯 key 유니크)
-# ─────────────────────────────────────────────────────────
-import time, json
-import streamlit as st
+# ───────────────────────────────────────────────
+# [245–250 Reset v5] CE-HIT & 검증 통합 안정판
+# 키 프리픽스: m245p5_*
+import streamlit as st, time, json
 from datetime import datetime
 
-# 안전: 없는 도우미는 no-op
+# ── 안전 가드(선언 없을 때만)
 if "register_module" not in globals():
-    def register_module(num, name, desc=""): pass
+    def register_module(num,name,desc): pass
 if "gray_line" not in globals():
-    def gray_line(num, title, subtitle=""):
-        st.markdown(f"**[{num}] {title}** — {subtitle}")
+    def gray_line(num,title,subtitle=""):
+        st.markdown(f"**[{num}] {title}**  \n- {subtitle}")
 
-# ── 세션 기본값
-st.session_state.setdefault("m245v5_cfg", {
-    "policy": "strict",     # 입력 정책(표시용)
-    "label_style": "v5",
-    "itime": 5,             # 간선 타임(sec)
-    "dedup": True,
-})
-st.session_state.setdefault("m245v5_hits", [])       # 대기 큐
-st.session_state.setdefault("m245v5_processed", [])  # 처리 결과 로그(최근부터 append)
-st.session_state.setdefault("m245v5_graph", [])      # 실제 반영된 CE-Graph 간선
+# ── 세션 초기화
+ss = st.session_state
+if "m245p5_cfg" not in ss:
+    ss.m245p5_cfg = {
+        "policy": "strict",   # gate 정책 예시
+        "label":  "v5",       # 라벨
+        "gentle" : False,     # 간섭 최소화 여부
+        "snapshots": [],      # 250 스냅샷 저장소
+    }
+if "m245p5_ce" not in ss:            # CE-Graph 스텁
+    ss.m245p5_ce = {"facts":[], "hits":[], "verdicts":[]}
+if "m245p5_queue" not in ss:         # 처리 대기 큐
+    ss.m245p5_queue = []
+if "m245p5_last" not in ss:          # 상태 갱신 시간
+    ss.m245p5_last = 0.0
 
-st.session_state.setdefault("m249v5_logs", [])       # 검증/러너 로그
+# ───────────────── 245. CE-Graph 기본 설정/게이트 [v5]
+register_module("245-v5","CE-Graph 기본설정/게이트","입력정책·라벨/간섭타입")
+gray_line("245-v5","CE-Graph 설정","게이트/정책 조정")
 
-st.session_state.setdefault("m251v5_cfg", {
-    "mode": "OFF",          # OFF | R3 | R4
-    "auto": False,          # 자동 실행
-    "interval": 10,         # 주기(sec)
-    "batch": 5,             # 1회 처리 개수
-    "last_tick": 0.0,
-})
-st.session_state.setdefault("m251v5_runs", [])       # 오케스트라 실행 이력
+with st.expander("245. 게이트 & 정책", True):
+    colA,colB,colC = st.columns(3)
+    with colA:
+        ss.m245p5_cfg["policy"] = st.selectbox(
+            "정책(policy)", ["strict","balanced","loose"],
+            index=["strict","balanced","loose"].index(ss.m245p5_cfg["policy"]),
+            key="m245p5_policy")
+    with colB:
+        ss.m245p5_cfg["label"] = st.text_input("라벨", ss.m245p5_cfg["label"], key="m245p5_label")
+    with colC:
+        ss.m245p5_cfg["gentle"] = st.toggle("간섭 최소화", value=ss.m245p5_cfg["gentle"], key="m245p5_gentle")
 
-# ─────────────────────────────────────────────────────────
-# 공통 유틸: 시그니처/그래프 반영/검증
-# ─────────────────────────────────────────────────────────
-def _hit_signature(hit: dict) -> str:
-    """중복 체크용 시그니처(정렬 json)."""
-    return json.dumps({"s":hit.get("src","").strip(),
-                       "d":hit.get("dst","").strip(),
-                       "r":hit.get("rel","").strip(),
-                       "m":hit.get("meta","").strip()}, sort_keys=True)
+    st.caption(f"현재 정책: **{ss.m245p5_cfg['policy']}** · 라벨: **{ss.m245p5_cfg['label']}** · gentle={ss.m245p5_cfg['gentle']}")
 
-def _graph_contains(signature: str) -> bool:
-    return signature in [e["sig"] for e in st.session_state["m245v5_graph"]]
+# ───────────────── 246. HIT 입력(수집) [v5]
+register_module("246-v5","HIT 입력(수집)","히트/증거/관측치 수집")
+gray_line("246-v5","HIT 입력","큐 투입")
 
-def _apply_to_graph(hit: dict) -> bool:
-    """CE-Graph 반영(중복 방지). 성공 시 True."""
-    sig = _hit_signature(hit)
-    if _graph_contains(sig):
-        return False
-    st.session_state["m245v5_graph"].append({
-        "sig": sig,
-        "src": hit["src"], "dst": hit["dst"], "rel": hit["rel"],
-        "meta": hit.get("meta",""), "ts": datetime.utcnow().isoformat()+"Z"
-    })
-    return True
+with st.expander("246. HIT 입력", True):
+    hit_text = st.text_area("HIT 텍스트", key="m245p5_hit_text", placeholder="관측·주장·증거를 입력")
+    meta     = st.text_input("메타(선택)", key="m245p5_hit_meta", placeholder="source=…, ref=…")
+    add_btn  = st.button("큐에 추가", key="m245p5_hit_add")
+    if add_btn and hit_text.strip():
+        item = {"ts": time.time(), "hit": hit_text.strip(), "meta": meta.strip()}
+        ss.m245p5_queue.append(item)
+        ss.m245p5_ce["hits"].append(item)
+        st.success("큐에 추가됨")
 
-def _try_parse_json(s: str):
-    try:
-        return json.loads(s)
-    except Exception:
-        return None
+    if ss.m245p5_queue:
+        st.write("대기 큐 크기:", len(ss.m245p5_queue))
+        st.json(ss.m245p5_queue[-3:])
 
-def _validate_hit(hit: dict, strict: bool) -> (bool, str):
-    """기본 검증: 필수값/관계/메타 검사. strict=True면 더 엄격."""
-    src, dst, rel = hit.get("src","").strip(), hit.get("dst","").strip(), hit.get("rel","").strip()
-    if not src or not dst:
-        return False, "src/dst 비어있음"
-    if rel not in ("supports","contradicts","relates"):
-        return False, "알 수 없는 관계"
-    meta_s = (hit.get("meta") or "").strip()
-    if strict:
-        # 엄격: meta는 JSON이어야 하며 evidence/score 기준 만족
-        meta = _try_parse_json(meta_s)
-        if meta is None:
-            return False, "meta JSON 아님(R4)"
-        if "score" in meta and float(meta["score"]) < 0.6:
-            return False, "score<0.6(R4)"
-        if rel == "contradicts" and not meta.get("evidence"):
-            return False, "contradicts는 evidence필수(R4)"
+# ───────────────── 247. 큐 미리보기/관리 [v5]
+register_module("247-v5","큐 미리보기/관리","최근 항목/삭제")
+gray_line("247-v5","큐 관리","미리보기/정리")
+
+with st.expander("247. 큐 관리", False):
+    if ss.m245p5_queue:
+        st.json(ss.m245p5_queue[-10:])
+        col1,col2 = st.columns(2)
+        with col1:
+            if st.button("맨 앞 항목 제거", key="m245p5_q_pop"):
+                ss.m245p5_queue.pop(0)
+                st.info("제거됨")
+        with col2:
+            if st.button("큐 비우기", key="m245p5_q_clear"):
+                ss.m245p5_queue.clear()
+                st.warning("큐 비움")
     else:
-        # 느슨: meta가 없어도 OK. contradicts면 'flag' 달고 통과(그래프 반영은 하지 않도록)
-        pass
-    return True, "ok"
+        st.caption("큐 비어있음")
 
-# ─────────────────────────────────────────────────────────
-# 245. CE-Graph 설정/게이트
-# ─────────────────────────────────────────────────────────
-register_module("245-v5", "CE-Graph 기본 설정/게이트", "입력 정책/라벨/간선타임/중복제거")
-gray_line("245-v5", "CE-Graph 설정", "게이트 & 파라미터")
+# ───────────────── 248. CE-Graph 반영(Stub) [v5]
+register_module("248-v5","CE-Graph 반영(Stub)","큐 → CE 반영")
+gray_line("248-v5","CE 반영","스텁 동작")
 
-cfg245 = st.session_state["m245v5_cfg"]
-c1,c2,c3 = st.columns(3)
-with c1:
-    cfg245["policy"] = st.selectbox("입력 정책", ["strict","lenient","sandbox"],
-                                    index=["strict","lenient","sandbox"].index(cfg245["policy"]),
-                                    key="m245v5_policy")
-with c2:
-    cfg245["label_style"] = st.selectbox("라벨 스타일", ["v5","raw","full"],
-                                         index=["v5","raw","full"].index(cfg245["label_style"]),
-                                         key="m245v5_label")
-with c3:
-    cfg245["itime"] = st.slider("간선 타임(sec)", 1, 60, int(cfg245["itime"]), key="m245v5_itime")
-cfg245["dedup"] = st.toggle("중복 제거", value=bool(cfg245["dedup"]), key="m245v5_dedup")
-st.caption(f"현재 설정: {cfg245}")
+with st.expander("248. 반영 실행(스텁)", False):
+    n = st.number_input("반영 개수", 0, 1000, 5, key="m245p5_apply_n")
+    if st.button("반영 실행", key="m245p5_apply_btn"):
+        applied = []
+        for _ in range(min(n, len(ss.m245p5_queue))):
+            it = ss.m245p5_queue.pop(0)
+            ss.m245p5_ce["facts"].append({"text": it["hit"], "meta": it["meta"], "label": ss.m245p5_cfg["label"]})
+            applied.append(it)
+        st.success(f"반영 {len(applied)}건")
+        st.json(applied)
 
-st.divider()
+# ───────────────── 249. 검증 러너(Stub) [v5]
+register_module("249-v5","검증 러너(Stub)","간단 검증")
+gray_line("249-v5","검증 스텁","무작위 패스/컨트라딕트")
 
-# ─────────────────────────────────────────────────────────
-# 246. CE-HIT 입력(중복/간섭 안전)
-# ─────────────────────────────────────────────────────────
-register_module("246-v5", "CE-HIT 추가", "간선/패스/증거 기록(중복 방지)")
-gray_line("246-v5", "CE-HIT 입력", "큐 적재")
+import random
+with st.expander("249. 검증 실행(스텁)", False):
+    m = st.number_input("검증 샘플 수", 0, 1000, 3, key="m245p5_verify_n")
+    if st.button("검증 실행", key="m245p5_verify_btn"):
+        verdicts=[]
+        sample = ss.m245p5_ce["facts"][-m:] if m>0 else []
+        for f in sample:
+            v = random.choice(["pass","contradicts","needs_more"])
+            verdicts.append({"fact": f["text"], "verdict": v, "ts": time.time()})
+        ss.m245p5_ce["verdicts"].extend(verdicts)
+        st.success(f"검증 결과 {len(verdicts)}건")
+        st.json(verdicts)
 
-with st.expander("HIT 입력", expanded=False):
-    ic1, ic2 = st.columns([3,1])
-    with ic1:
-        h_src = st.text_input("원인/근거(Source)", key="m246v5_src")
-        h_dst = st.text_input("귀결(Target)", key="m246v5_dst")
-        h_rel = st.selectbox("관계", ["supports","contradicts","relates"], key="m246v5_rel")
-        h_meta = st.text_area("메타/증거(JSON 가능, 빈값 허용)", key="m246v5_meta")
-    with ic2:
-        if st.button("HIT 추가", key="m246v5_add"):
-            hit = {"src": h_src, "dst": h_dst, "rel": h_rel, "meta": h_meta}
-            sig = _hit_signature(hit)
-            if cfg245["dedup"]:
-                dup = sig in [_hit_signature(x) for x in st.session_state["m245v5_hits"]]
-                if dup:
-                    st.info("중복 HIT → 스킵")
-                else:
-                    st.session_state["m245v5_hits"].append(hit)
-                    st.success("HIT 추가 완료")
-            else:
-                st.session_state["m245v5_hits"].append(hit)
-                st.success("HIT 추가 완료")
+# ───────────────── 250. 상태 리포트(JSON) [v5]
+register_module("250-v5","상태 리포트(JSON)","스냅샷 저장/다운로드")
+gray_line("250-v5","상태 스냅샷","JSON 내보내기")
 
-q_len = len(st.session_state["m245v5_hits"])
-g_len = len(st.session_state["m245v5_graph"])
-p_len = len(st.session_state["m245v5_processed"])
-mA,mB,mC = st.columns(3)
-mA.metric("대기 큐", q_len)
-mB.metric("그래프 간선", g_len)
-mC.metric("처리 로그", p_len)
-
-st.divider()
-
-# ─────────────────────────────────────────────────────────
-# 247. 큐/그래프/로그 미리보기
-# ─────────────────────────────────────────────────────────
-register_module("247-v5", "큐 미리보기/관리", "큐/그래프/로그 확인")
-gray_line("247-v5", "미리보기", "HIT·그래프·로그")
-
-with st.expander("대기 큐(HIT)", expanded=False):
-    st.json(st.session_state["m245v5_hits"] or [])
-    if st.button("큐 비우기", key="m247v5_clear"):
-        st.session_state["m245v5_hits"].clear(); st.success("큐 초기화")
-
-with st.expander("그래프 간선", expanded=False):
-    st.json(st.session_state["m245v5_graph"] or [])
-
-with st.expander("처리 로그(최근 50)", expanded=False):
-    st.json(st.session_state["m245v5_processed"][-50:] or [])
-
-st.divider()
-
-# ─────────────────────────────────────────────────────────
-# 248. 반영 패널(수동 반영/내보내기)
-# ─────────────────────────────────────────────────────────
-register_module("248-v5", "CE-Graph 반영 패널", "수동 반영/내보내기")
-gray_line("248-v5", "반영/내보내기", "그래프 JSON export")
-
-if st.button("그래프 JSON 다운로드", key="m248v5_dl_btn"):
-    st.download_button("↓ 받기",
-        data=json.dumps(st.session_state["m245v5_graph"], ensure_ascii=False, indent=2).encode("utf-8"),
-        file_name="CE_Graph.json", mime="application/json", key="m248v5_dl_real")
-
-st.divider()
-
-# ─────────────────────────────────────────────────────────
-# 249. 검증 러너(실동작: 기록 남김)
-# ─────────────────────────────────────────────────────────
-register_module("249-v5", "검증 러너", "실제 처리 기록 남김")
-gray_line("249-v5", "검증 러너", "한 번 실행 테스트")
-
-def _log_run(mode:str, taken:int, accepted:int, rejected:int, flags:int):
-    stamp = datetime.utcnow().isoformat()+"Z"
-    entry = {"mode":mode, "taken":taken, "accepted":accepted,
-             "rejected":rejected, "flagged":flags, "ts":stamp}
-    st.session_state["m249v5_logs"].append(entry)
-    st.session_state["m245v5_processed"].append(entry)
-    return entry
-
-def _process_batch(mode:str, batch:int):
-    """큐 앞에서 batch개 꺼내 처리. R3(느슨)/R4(엄격)."""
-    strict = (mode == "R4")
-    taken = accepted = rejected = flagged = 0
-    new_queue = []
-    hits = st.session_state["m245v5_hits"]
-
-    for i, hit in enumerate(hits):
-        if taken >= batch:
-            new_queue.append(hit); continue
-        taken += 1
-        ok, reason = _validate_hit(hit, strict=strict)
-        if not ok:
-            rejected += 1
-            st.session_state["m245v5_processed"].append({"mode":mode,"hit":hit,"result":"reject","reason":reason,"ts":datetime.utcnow().isoformat()+"Z"})
-            continue
-        # R3: contradicts는 flag만 달고 그래프 반영은 생략(표시만)
-        if mode=="R3" and hit.get("rel")=="contradicts":
-            flagged += 1
-            st.session_state["m245v5_processed"].append({"mode":mode,"hit":hit,"result":"flag-contradicts","ts":datetime.utcnow().isoformat()+"Z"})
-            continue
-        # 그래프 반영
-        added = _apply_to_graph(hit)
-        accepted += 1 if added else 0
-        st.session_state["m245v5_processed"].append({"mode":mode,"hit":hit,"result":"apply" if added else "duplicate","ts":datetime.utcnow().isoformat()+"Z"})
-
-    # 남은 건 큐에 유지
-    if taken < len(hits):
-        new_queue.extend(hits[taken:])
-    st.session_state["m245v5_hits"] = new_queue
-    return _log_run(mode, taken, accepted, rejected, flagged)
-
-# 수동 실행 버튼
-b1,b2 = st.columns(2)
-with b1:
-    if st.button("R3(느슨) 배치 처리", key="m249v5_r3"):
-        info = _process_batch("R3", st.session_state["m251v5_cfg"]["batch"])
-        st.success(f"R3 실행: {info}")
-with b2:
-    if st.button("R4(엄격) 배치 처리", key="m249v5_r4"):
-        info = _process_batch("R4", st.session_state["m251v5_cfg"]["batch"])
-        st.success(f"R4 실행: {info}")
-
-st.divider()
-
-# ─────────────────────────────────────────────────────────
-# 250. 상태 리포트(JSON)
-# ─────────────────────────────────────────────────────────
-register_module("250-v5", "상태 리포트(JSON)", "스냅샷/내보내기")
-gray_line("250-v5", "상태 리포트", "구성·큐·그래프·로그 상태")
-
-report = {
-    "snapshot": datetime.utcnow().isoformat()+"Z",
-    "cfg245": st.session_state["m245v5_cfg"],
-    "queue_len": len(st.session_state["m245v5_hits"]),
-    "graph_len": len(st.session_state["m245v5_graph"]),
-    "processed_len": len(st.session_state["m245v5_processed"]),
-    "recent_run": st.session_state["m249v5_logs"][-1] if st.session_state["m249v5_logs"] else None,
-}
-st.json(report)
-
-st.divider()
-
-# ─────────────────────────────────────────────────────────
-# 251R3/251R4 프리셋(수동)
-# ─────────────────────────────────────────────────────────
-register_module("251R3", "우주정보장 연동(느슨)", "탐지형")
-register_module("251R4", "우주정보장 연동(엄격)", "검증형")
-gray_line("251R3/251R4", "프리셋 실행", "수동 배치 처리")
-
-pr1, pr2 = st.columns(2)
-with pr1:
-    if st.button("R3 한 번 실행", key="m251v5_r3_once"):
-        info = _process_batch("R3", st.session_state["m251v5_cfg"]["batch"])
-        st.success(f"R3: {info}")
-with pr2:
-    if st.button("R4 한 번 실행", key="m251v5_r4_once"):
-        info = _process_batch("R4", st.session_state["m251v5_cfg"]["batch"])
-        st.success(f"R4: {info}")
-
-st.divider()
-
-# ─────────────────────────────────────────────────────────
-# 251S 스위처 + 251O 오케스트라(비차단)
-# ─────────────────────────────────────────────────────────
-register_module("251S", "연동 스위처", "모드 전환 + 자동 주기")
-gray_line("251S/251O", "스위처/오케스트라", "자동 배치 러너")
-
-cfgS = st.session_state["m251v5_cfg"]
-sc1, sc2, sc3 = st.columns([2,1,1])
-with sc1:
-    cfgS["mode"] = st.radio("모드", ["OFF","R3","R4"],
-                            index=["OFF","R3","R4"].index(cfgS["mode"]),
-                            key="m251v5_mode")
-with sc2:
-    cfgS["auto"] = st.toggle("자동 실행", value=bool(cfgS["auto"]), key="m251v5_auto")
-with sc3:
-    cfgS["batch"] = st.number_input("배치 크기", 1, 50, int(cfgS["batch"]), key="m251v5_batch")
-cfgS["interval"] = st.slider("주기(초)", 3, 60, int(cfgS["interval"]), key="m251v5_interval")
-
-# 오케스트라(비차단): 렌더링 때마다 시각 비교 후 1회 실행
-now = time.time()
-if cfgS["auto"] and cfgS["mode"] in ("R3","R4"):
-    due = (now - float(cfgS.get("last_tick", 0))) >= float(cfgS["interval"])
-    st.caption(f"오토체크: 경과 {round(now - float(cfgS.get('last_tick',0)),1)}s / 주기 {cfgS['interval']}s")
-    if due:
-        info = _process_batch(cfgS["mode"], int(cfgS["batch"]))
-        cfgS["last_tick"] = now
-        st.toast(f"오케스트라 {cfgS['mode']} 실행: {info}", icon="✅")
-
-# 최근 실행 이력
-if st.session_state["m249v5_logs"]:
-    last = st.session_state["m249v5_logs"][-1]
-    st.success(f"최근 실행: {last}")
-else:
-    st.info("오케스트라 이력 없음")
-# ─────────────────────────────────────────────────────────
+with st.expander("250. 리포트 & 스냅샷", True):
+    report = {
+        "ts": datetime.utcnow().isoformat()+"Z",
+        "cfg": ss.m245p5_cfg,
+        "summary": {
+            "facts": len(ss.m245p5_ce["facts"]),
+            "hits": len(ss.m245p5_ce["hits"]),
+            "verdicts": len(ss.m245p5_ce["verdicts"]),
+            "queue": len(ss.m245p5_queue),
+        }
+    }
+    st.json(report)
+    colA,colB = st.columns(2)
+    with colA:
+        if st.button("스냅샷 저장", key="m245p5_snap_add"):
+            ss.m245p5_cfg["snapshots"].append(report)
+            st.success("저장됨")
+    with colB:
+        st.download_button("모든 스냅샷 다운로드",
+            data=json.dumps(ss.m245p5_cfg["snapshots"], ensure_ascii=False, indent=2).encode("utf-8"),
+            file_name="M245-250_Snapshots.json",
+            mime="application/json",
+            key="m245p5_snap_dl")
