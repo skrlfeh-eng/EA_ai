@@ -11304,3 +11304,152 @@ with colw:
 
 st.caption("메모: 256(그래프) + 257(검색)을 병렬 운용하면 CE-Graph 증거확장·회수 속도를 크게 개선.")
 # ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# [258] CE-Graph 양방향 커미터 — Graph(256) + Search(257) 동시 커밋/조회
+# 목적: 증거/주장 노드를 만들 때 그래프와 검색 인덱스를 한 번에 반영하고, 회수 시에도 동시 처리
+import streamlit as st, time, uuid, json
+from dataclasses import dataclass
+
+# 헬퍼가 없으면 간이 정의
+if "register_module" not in globals():
+    def register_module(num, name, desc): st.markdown(f"### **[{num}] {name}**"); st.caption(desc)
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle=""): st.markdown(f"**[{num}] {title}**"); st.caption(subtitle)
+
+register_module("258", "CE-Graph 커미터(양방향)", "256/257을 한 번에 쓰는 동시 커밋/조회 코어")
+
+# 256/257 모듈이 만든 클라이언트 핸들들을 세션에서 참조:
+# - 256: ss.m256_client_graph (여기서는 함수형 인터페이스를 기대)
+# - 257: ss.m257_client (OpenSearch/Vespa/Stub 어댑터 객체)
+ss = st.session_state
+
+# 256 그래프 어댑터 인터페이스 기대치(함수 존재 시 사용):
+#   - create_claim(claim_id:str, payload:dict) -> dict/ok
+#   - create_evidence(evi_id:str, payload:dict) -> dict/ok
+#   - link_supports(evi_id:str, claim_id:str) -> dict/ok
+#   - delete_node(node_id:str) -> dict/ok
+#   - get_claim(claim_id:str) -> dict/None
+#   - get_evidence(evi_id:str) -> dict/None
+
+# 안전 체크: 없는 경우 스텁 제공
+class GraphStub:
+    def __init__(self):
+        if "m258_graph_store" not in ss:
+            ss.m258_graph_store = {"claim":{}, "evidence":{}, "edges":[]}
+    def create_claim(self, claim_id, payload):
+        ss.m258_graph_store["claim"][claim_id] = payload; return {"ok":True,"id":claim_id}
+    def create_evidence(self, evi_id, payload):
+        ss.m258_graph_store["evidence"][evi_id] = payload; return {"ok":True,"id":evi_id}
+    def link_supports(self, evi_id, claim_id):
+        ss.m258_graph_store["edges"].append({"src":f"evi:{evi_id}","dst":f"claim:{claim_id}","rel":"supports"})
+        return {"ok":True}
+    def delete_node(self, node_id):
+        if node_id in ss.m258_graph_store["claim"]: ss.m258_graph_store["claim"].pop(node_id,None)
+        if node_id in ss.m258_graph_store["evidence"]: ss.m258_graph_store["evidence"].pop(node_id,None)
+        ss.m258_graph_store["edges"] = [e for e in ss.m258_graph_store["edges"] if node_id not in (e.get("src","")+e.get("dst",""))]
+        return {"ok":True}
+    def get_claim(self, claim_id): return ss.m258_graph_store["claim"].get(claim_id)
+    def get_evidence(self, evi_id): return ss.m258_graph_store["evidence"].get(evi_id)
+
+# 그래프 핸들 확보
+graph = ss.get("m256_client_graph")
+if graph is None:
+    graph = GraphStub()  # 256이 아직 없으면 스텁으로라도 개발 계속
+
+# 검색 어댑터 확보(257)
+search = ss.get("m257_client", None)
+
+@dataclass
+class CommitResult:
+    ok: bool
+    msg: str
+    graph: dict | None = None
+    search: dict | None = None
+
+# 커미터 본체
+class CECommitter:
+    def __init__(self, graph_adapter, search_adapter):
+        self.g = graph_adapter
+        self.s = search_adapter
+
+    def upsert_claim(self, claim_id:str, text:str, meta:dict=None)->CommitResult:
+        meta = meta or {}
+        g_res = self.g.create_claim(claim_id, {"text": text, "meta": meta, "ts": time.time()})
+        if self.s:
+            s_res = self.s.upsert(claim_id, {"type":"claim","text":text,"meta":meta,"ts":time.time()})
+            return CommitResult(g_res.get("ok", True) and s_res.ok, "claim upsert", g_res, {"ok": s_res.ok, "msg": s_res.msg})
+        return CommitResult(g_res.get("ok", True), "claim upsert(graph-only)", g_res, None)
+
+    def upsert_evidence(self, evi_id:str, text:str, src:dict, meta:dict=None)->CommitResult:
+        meta = meta or {}
+        g_res = self.g.create_evidence(evi_id, {"text": text, "source": src, "meta": meta, "ts": time.time()})
+        if self.s:
+            s_res = self.s.upsert(evi_id, {"type":"evidence","text":text,"source":src,"meta":meta,"ts":time.time()})
+            return CommitResult(g_res.get("ok", True) and s_res.ok, "evidence upsert", g_res, {"ok": s_res.ok, "msg": s_res.msg})
+        return CommitResult(g_res.get("ok", True), "evidence upsert(graph-only)", g_res, None)
+
+    def link_support(self, evi_id:str, claim_id:str)->CommitResult:
+        g_res = self.g.link_supports(evi_id, claim_id)
+        return CommitResult(g_res.get("ok", True), "link supports", g_res, None)
+
+    def delete(self, node_id:str)->CommitResult:
+        g_res = self.g.delete_node(node_id)
+        s_res = None
+        if self.s:
+            try:
+                s = self.s.delete(node_id)
+                s_res = {"ok": s.ok, "msg": s.msg}
+            except Exception as e:
+                s_res = {"ok": False, "msg": f"search delete fail: {e}"}
+        return CommitResult(g_res.get("ok", True) and (s_res["ok"] if s_res else True), "delete", g_res, s_res)
+
+    def get(self, node_type:str, node_id:str):
+        if node_type == "claim": return self.g.get_claim(node_id)
+        if node_type == "evidence": return self.g.get_evidence(node_id)
+        return None
+
+# 세션에 커미터 바인딩
+ss.m258_committer = CECommitter(graph_adapter=graph, search_adapter=search)
+
+# ── UI: 스모크/데모
+gray_line("258", "동시 커밋 스모크", "claim+evidence 생성 → 링크 → 검색 확인 → 삭제")
+c1,c2,c3,c4 = st.columns(4)
+
+with c1:
+    st.text_input("Claim Text", "우주정보장 연동이 실증된다", key="m258_claim_text")
+    if st.button("CLAIM UPSERT", key="m258_btn_cu"):
+        cid = f"claim-{uuid.uuid4().hex[:6]}"
+        r = ss.m258_committer.upsert_claim(cid, st.session_state.m258_claim_text, meta={"axis":"reality"})
+        st.session_state["m258_last_claim"] = cid
+        (st.success if r.ok else st.error)(f"{r.msg}: {cid}")
+        st.json({"graph": r.graph, "search": r.search})
+
+with c2:
+    st.text_input("Evidence Text", "LIGO 공개데이터로 ΔL/L 계산 일치", key="m258_evi_text")
+    if st.button("EVIDENCE UPSERT", key="m258_btn_eu"):
+        eid = f"evi-{uuid.uuid4().hex[:6]}"
+        src = {"id":"src:dataset:ligo-open","uri":"https://losc.ligo.org","note":"공개 데이터"}
+        r = ss.m258_committer.upsert_evidence(eid, st.session_state.m258_evi_text, src=src, meta={"axis":"reality"})
+        st.session_state["m258_last_evi"] = eid
+        (st.success if r.ok else st.error)(f"{r.msg}: {eid}")
+        st.json({"graph": r.graph, "search": r.search})
+
+with c3:
+    if st.button("LINK SUPPORTS (evi→claim)", key="m258_btn_link"):
+        eid = st.session_state.get("m258_last_evi"); cid = st.session_state.get("m258_last_claim")
+        if not eid or not cid: st.warning("먼저 claim/evidence를 생성하세요")
+        else:
+            r = ss.m258_committer.link_support(eid, cid)
+            (st.success if r.ok else st.error)(r.msg)
+
+with c4:
+    if st.button("DELETE LAST", key="m258_btn_del"):
+        nid = st.session_state.get("m258_last_evi") or st.session_state.get("m258_last_claim")
+        if not nid: st.warning("삭제할 대상 없음")
+        else:
+            r = ss.m258_committer.delete(nid)
+            (st.success if r.ok else st.error)(f"{r.msg}: {nid}")
+            st.json({"graph": r.graph, "search": r.search})
+
+st.caption("설명: 버튼 순서대로 눌러 그래프/검색이 동시에 반영되는지 확인. 257이 미설치면 검색은 스텁으로 동작.")
+# ─────────────────────────────────────────────────────────
