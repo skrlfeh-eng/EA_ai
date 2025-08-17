@@ -10454,3 +10454,159 @@ with colD3:
 
 st.caption(f"UTC {datetime.utcnow().isoformat()}Z · driver={ss.m253_cfg['driver']} · dry={ss.m253_cfg['dry_run']}")
 # ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# [254] CE-Graph 드라이버 어댑터 (Neo4j-Stub) — 실연결 전 리허설
+# 목적: 253 어댑터 I/F 유지한 채, neo4j 스타일 Cypher를 생성·로그로 확인
+# 주의: 외부 패키지/실접속 없음. 모든 상태키는 m254_* 사용.
+import streamlit as st, json, time, uuid
+from datetime import datetime
+
+# 안전가드
+if "register_module" not in globals():
+    def register_module(num, name, desc): 
+        st.markdown(f"### **[{num}] {name}**"); st.caption(desc)
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle=""):
+        st.markdown(f"**[{num}] {title}**");  st.caption(subtitle)
+
+register_module("254", "드라이버 어댑터(Neo4j-Stub)", "Cypher 생성/로그 · 253과 드라이버 동기화 스위치")
+
+ss = st.session_state
+if "m254_cfg" not in ss:
+    ss.m254_cfg = {
+        "host": "bolt://localhost:7687",
+        "user": "neo4j",
+        "password": "*****",
+        "test_latency_ms": 120,     # 연결 테스트 지연 시뮬
+        "sync_253_driver": True,    # 253 드라이버를 neo4j-stub으로 전환
+    }
+if "m254_cypher" not in ss:
+    ss.m254_cypher = []            # 생성된 Cypher 로그
+if "m254_last_test" not in ss:
+    ss.m254_last_test = None
+
+# ── 253 어댑터가 있으면 확장, 없으면 독립 I/F로 정의
+Base = globals().get("CEGraphAdapter", object)
+
+class Neo4jStubAdapter(Base):
+    """253 CEGraphAdapter 호환. 실제 접속 대신 Cypher 로그만 남김."""
+    def __init__(self, *args, **kwargs):
+        # Base(inmem) 초기화 유지: in-memory에도 반영되게(super 호출)
+        super().__init__(*args, **kwargs)
+        self.driver = "neo4j-stub"
+
+    # Cypher 생성 유틸
+    def _c(self, q, params=None):
+        ss.m254_cypher.append({
+            "ts": datetime.utcnow().isoformat()+"Z",
+            "query": q,
+            "params": params or {}
+        })
+
+    def upsert_node(self, label:str, key:str, props:dict):
+        nid = super().upsert_node(label, key, props)
+        q = (
+            f"MERGE (n:`{label}` {{key:$key}})\n"
+            f"SET n += $props"
+        )
+        self._c(q, {"key": key, "props": props})
+        return nid
+
+    def upsert_edge(self, rel:str, src_id:str, dst_id:str, props:dict=None):
+        eid = super().upsert_edge(rel, src_id, dst_id, props or {})
+        # src_id, dst_id는 "Label:key" 형태(253 규격). Label, key 분해
+        def parse(nid):
+            lab, k = nid.split(":", 1)
+            return lab, k
+        sL, sK = parse(src_id); dL, dK = parse(dst_id)
+        q = (
+            f"MATCH (s:`{sL}` {{key:$skey}}), (d:`{dL}` {{key:$dkey}})\n"
+            f"MERGE (s)-[r:`{rel}`]->(d)\n"
+            f"SET r += $props"
+        )
+        self._c(q, {"skey": sK, "dkey": dK, "props": props or {}})
+        return eid
+
+    def commit(self):
+        # 실제 환경이면 세션/트랜잭션 커밋. 여기서는 로그만 남김
+        self._c("// COMMIT")
+        return super().commit()
+
+# ── 253과 드라이버 동기화(선택)
+def _maybe_sync_with_253():
+    if not ss.m254_cfg.get("sync_253_driver"): 
+        return
+    if "m253_cfg" in ss:
+        ss.m253_cfg["driver"] = "neo4j-stub"
+    if "m253_adapter" in ss:
+        # 기존 어댑터를 stub로 교체
+        try:
+            ss.m253_adapter = Neo4jStubAdapter(dry_run=False)
+        except Exception:
+            ss.m253_adapter = Neo4jStubAdapter()
+
+# ── 연결 설정 패널
+gray_line("254", "연결 설정", "실접속 전 리허설(Stub) · 253 드라이버 동기화")
+c1, c2 = st.columns(2)
+with c1:
+    ss.m254_cfg["host"] = st.text_input("Neo4j Host", ss.m254_cfg["host"], key="m254_host")
+    ss.m254_cfg["user"] = st.text_input("User", ss.m254_cfg["user"], key="m254_user")
+with c2:
+    ss.m254_cfg["password"] = st.text_input("Password", ss.m254_cfg["password"], type="password", key="m254_pass")
+    ss.m254_cfg["test_latency_ms"] = st.number_input("연결 테스트 지연(ms)", 0, 2000, ss.m254_cfg["test_latency_ms"], key="m254_lat")
+
+sync = st.toggle("253 드라이버를 neo4j-stub으로 동기화", value=ss.m254_cfg["sync_253_driver"], key="m254_sync")
+ss.m254_cfg["sync_253_driver"] = sync
+if sync:
+    _maybe_sync_with_253()
+
+# ── 연결 테스트(시뮬)
+if st.button("연결 테스트(Stub)", key="m254_test"):
+    t0 = time.time()
+    time.sleep(ss.m254_cfg["test_latency_ms"]/1000.0)
+    ss.m254_last_test = {
+        "host": ss.m254_cfg["host"],
+        "user": ss.m254_cfg["user"],
+        "ok": True,
+        "latency_ms": int((time.time()-t0)*1000),
+        "ts": datetime.utcnow().isoformat()+"Z"
+    }
+if ss.m254_last_test:
+    st.success(f"테스트 OK · {ss.m254_last_test['latency_ms']} ms  · {ss.m254_last_test['host']} ({ss.m254_last_test['user']})")
+else:
+    st.info("아직 테스트 전입니다.")
+
+# ── 빠른 리허설: 샘플 upsert → commit
+with st.expander("⚙️ 샘플 시나리오 실행(노드/엣지/커밋)", expanded=False):
+    if st.button("샘플 실행", key="m254_demo"):
+        # 253이 있으면 253의 어댑터를 쓰고, 없으면 로컬 stub 인스턴스 사용
+        adp = ss.get("m253_adapter", Neo4jStubAdapter())
+        c_key = f"clm-{str(uuid.uuid4())[:6]}"
+        e_key = f"ev-{str(uuid.uuid4())[:6]}"
+        adp.upsert_node("Claim", c_key, {"text":"demo claim","score":0.7})
+        evid = adp.upsert_node("Evidence", e_key, {"text":"demo evidence"})
+        adp.upsert_edge("EVIDENCES", f"Claim:{c_key}", f"Evidence:{e_key}", {"w":1.0})
+        adp.commit()
+        st.success("샘플 반영·커밋 완료 (로그 탭에서 Cypher 확인)")
+
+# ── Cypher 로그 미리보기/다운로드/초기화
+gray_line("254", "Cypher 로그", "실행 순서/파라미터 확인")
+st.write(f"로그 건수: {len(ss.m254_cypher)}")
+st.json(ss.m254_cypher[-10:] if ss.m254_cypher else [])  # 최신 10건 프리뷰
+
+dl1, dl2 = st.columns(2)
+with dl1:
+    st.download_button(
+        "Cypher 로그 다운로드",
+        data=json.dumps(ss.m254_cypher, ensure_ascii=False, indent=2).encode("utf-8"),
+        file_name="neo4j_stub_cypher_log.json",
+        mime="application/json",
+        key="m254_dn_cypher",
+    )
+with dl2:
+    if st.button("로그 초기화", key="m254_clear"):
+        ss.m254_cypher.clear()
+        st.warning("Cypher 로그 초기화 완료")
+
+st.caption(f"UTC {datetime.utcnow().isoformat()}Z · driver={'neo4j-stub' if ss.get('m253_cfg',{}).get('driver')=='neo4j-stub' else 'independent'}")
+# ────────────────────────────────────────────────────────
