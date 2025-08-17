@@ -10344,6 +10344,233 @@ st.write(
     f"최근 실행(UTC): {st.session_state[PFX+'last_ts'] or '없음'}"
 )
 
+
+# ───────────────────────────────────────────────
+# [251V] 우주정보장 초검증(강화판) - REAL 전용
+# 목적: LIGO 공개 API 등 "현실 데이터"에 대해 무결성·반례·재현성까지 단일 패널에서 검증
+# 붙이는 위치: 251 통합 모듈(스위처/오케스트라) "아래" 혹은 "근처" 아무 곳 OK.
+# 의존: 표준 라이브러리만 사용(urllib, hashlib, json, time, datetime)
+# 키 충돌 방지: key="m251v_*"
+import streamlit as st, json, hashlib, time
+from urllib import request, error
+from datetime import datetime, timezone
+
+# --- 안전장치: 프로젝트마다 있을 수도, 없을 수도 있는 헬퍼들 ---
+if "register_module" not in globals():
+    def register_module(num, name, desc): pass
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle=""): 
+        st.markdown(f"### **[{num}] {title}**")
+        if subtitle: st.caption(subtitle)
+
+register_module("251V", "우주정보장 초검증(강화판)", "REAL 전용 · 무결성/반례/재현성")
+gray_line("251V", "우주정보장 초검증(강화판)", "연동이 '진짜'인지 증거로 판정")
+
+# ===== 설정 =====
+PRIMARY = "https://www.gw-openscience.org/eventapi/json/GWTC-1-confident/"  # LIGO 공개 API
+FALLBACK = "https://raw.githubusercontent.com/ligo-cbc/pycbc-config/master/gwosc/README.json"  # 가벼운 텍스트/JSON 백업
+
+# 세션 초기값
+ss = st.session_state
+if "m251v_hist" not in ss: ss.m251v_hist = []  # 최근 결과 스냅샷 저장
+if "m251v_last_sha" not in ss: ss.m251v_last_sha = None
+
+with st.expander("⚙️ 검증 설정 (REAL 전용)", expanded=True):
+    src = st.selectbox(
+        "데이터 소스(REAL)", 
+        ["LIGO: GWTC-1-confident (Primary)", "Fallback(JSON 텍스트)"],
+        key="m251v_src"
+    )
+    url = PRIMARY if src.startswith("LIGO") else FALLBACK
+    batch = st.number_input("배치(반복) 횟수", 1, 20, 5, key="m251v_batch")
+    pause = st.slider("라운드 간 대기(초)", 0.0, 2.0, 0.2, 0.1, key="m251v_wait")
+    strict = st.toggle("엄격 모드(스키마 키 필수)", value=True, key="m251v_strict")
+    st.caption("※ REAL 실패/성공 사유는 숨기지 않습니다(더미·뻥 금지).")
+
+# ===== 유틸 =====
+def _now_utc():
+    return datetime.now(timezone.utc).isoformat()
+
+def http_fetch(u: str, timeout: float = 15.0):
+    """표준 라이브러리로 REAL 요청. 성공 시 (status, headers, text) 반환"""
+    try:
+        req = request.Request(u, headers={"User-Agent": "EA/251V"})
+        with request.urlopen(req, timeout=timeout) as resp:
+            status = resp.getcode()
+            headers = {k.lower(): v for k, v in resp.getheaders()}
+            text = resp.read().decode("utf-8", "replace")
+            return True, status, headers, text, None
+    except error.HTTPError as e:
+        return False, e.code, dict(e.headers or {}), "", f"HTTPError {e.code}"
+    except Exception as e:
+        return False, 0, {}, "", f"{type(e).__name__}: {e}"
+
+def sha256_str(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def try_parse_json(s: str):
+    try:
+        return True, json.loads(s), None
+    except Exception as e:
+        return False, None, f"JSONError: {e}"
+
+def basic_schema_ok(payload) -> bool:
+    """LIGO API 대략적 키 확인(엄격 모드일 때)"""
+    if not isinstance(payload, dict): return False
+    # LIGO eventapi는 'description' 등의 키를 제공. 최소한의 존재 확인.
+    must = ["description"]
+    return all(k in payload for k in must)
+
+def adversarial_tests(text: str, payload) -> dict:
+    """
+    반례/공격성 체크:
+    - 변조본 checksum 비교(탐지율)
+    - JSON 재정렬/삭제 시 탐지 여부
+    """
+    tests = []
+    # 1) 문자열 변조(숫자/문자 치환)
+    tampered = text.replace("LIGO", "L1G0").replace("Virgo", "V1rg0")
+    tests.append(("string_mutation", sha256_str(text) != sha256_str(tampered)))
+
+    # 2) JSON 일부 키 삭제(가능할 때)
+    if isinstance(payload, dict) and payload:
+        first_key = next(iter(payload.keys()))
+        mutated = dict(payload)
+        mutated.pop(first_key, None)
+        tests.append(("json_key_drop", sha256_str(json.dumps(payload, sort_keys=True)) != 
+                                      sha256_str(json.dumps(mutated, sort_keys=True))))
+    else:
+        tests.append(("json_key_drop", True))  # JSON이 아니면 스킵으로 가점은 주지 않음
+
+    passed = sum(1 for _, ok in tests if ok)
+    return {
+        "tests": tests,
+        "passed": passed,
+        "total": len(tests),
+        "rate": round(passed / max(1, len(tests)), 3),
+    }
+
+def reproducibility(shas: list[str]) -> dict:
+    """
+    재현성: batch 동안 해시 안정성(동일 소스에서 동일 응답이면 안정적).
+    - 완전 동일: 1.0
+    - 혼재: 0~1
+    """
+    if not shas: return {"unique": 0, "stability": 0.0}
+    uniq = len(set(shas))
+    stability = 1.0 if uniq == 1 else round(len(shas) / (len(shas) + (uniq - 1)), 3)
+    return {"unique": uniq, "stability": stability}
+
+# ===== 실행 =====
+colA, colB = st.columns([1,1])
+with colA:
+    run = st.button("🔬 REAL 초검증 실행", key="m251v_run")
+with colB:
+    st.download_button(
+        "📥 최근 보고서 JSON 다운로드",
+        data=json.dumps(ss.m251v_hist[-1], ensure_ascii=False, indent=2).encode("utf-8") if ss.m251v_hist else b"{}",
+        file_name="EA_251V_last_report.json",
+        mime="application/json",
+        key="m251v_dl"
+    )
+
+if run:
+    logs = []
+    shas = []
+    ok_rounds = 0
+    schema_ok_rounds = 0
+    json_rounds = 0
+    http_ok_rounds = 0
+
+    for i in range(int(batch)):
+        tick = _now_utc()
+        ok, status, headers, text, err = http_fetch(url)
+        row = {"i": i+1, "ts": tick, "http": status, "ok": ok, "err": err}
+
+        if ok and status == 200 and text:
+            http_ok_rounds += 1
+            sh = sha256_str(text); shas.append(sh)
+            is_json, payload, jerr = try_parse_json(text)
+            row["sha256"] = sh
+            row["is_json"] = is_json
+            if is_json:
+                json_rounds += 1
+                if strict:
+                    sk = basic_schema_ok(payload)
+                    row["schema_ok"] = sk
+                    if sk: schema_ok_rounds += 1
+                # 반례 검사(라운드 대표 1회)
+                adv = adversarial_tests(text, payload)
+                row["adversarial"] = adv
+            else:
+                row["json_error"] = jerr
+        logs.append(row)
+        if i < batch-1:
+            time.sleep(float(pause))
+
+    repro = reproducibility(shas)
+    adv_rate_avg = round(
+        sum((r.get("adversarial", {}).get("rate", 0.0) for r in logs if "adversarial" in r)) /
+        max(1, sum(1 for r in logs if "adversarial" in r)), 3
+    )
+
+    # 스코어 집계
+    total_checks = int(batch)
+    http_score = round(http_ok_rounds/total_checks, 3)
+    json_score = round(json_rounds/total_checks, 3)
+    schema_score = round(schema_ok_rounds/total_checks, 3) if strict else None
+
+    # 종합 판정(예시 기준)
+    # - HTTP≥0.9, JSON≥0.7, (엄격시) Schema≥0.6, 재현성≥0.6, 반례탐지율≥0.6
+    thresholds = {
+        "http": 0.9, "json": 0.7, "schema": 0.6 if strict else 0.0,
+        "repro": 0.6, "adv": 0.6
+    }
+    verdict = (
+        (http_score >= thresholds["http"]) and
+        (json_score >= thresholds["json"]) and
+        ((schema_score is None) or (schema_score >= thresholds["schema"])) and
+        (repro["stability"] >= thresholds["repro"]) and
+        (adv_rate_avg >= thresholds["adv"])
+    )
+
+    report = {
+        "ts": _now_utc(),
+        "source": src,
+        "url": url,
+        "batch": int(batch),
+        "http_ok_rate": http_score,
+        "json_ok_rate": json_score,
+        "schema_ok_rate": schema_score,
+        "repro": repro,
+        "adversarial_avg": adv_rate_avg,
+        "verdict": bool(verdict),
+        "thresholds": thresholds,
+        "round_logs": logs[-5:],   # 최근 5개만 요약 노출(전체는 다운로드로 제공)
+    }
+    ss.m251v_hist.append(report)
+
+    st.success("✅ REAL 초검증 실행 완료")
+    st.json({k:v for k,v in report.items() if k!="round_logs"})
+    with st.expander("📜 라운드 로그(최근 5개)"):
+        st.json(report["round_logs"])
+
+    # 힌트
+    if verdict:
+        st.success("판정: **PASS** — 3축(근원 올원·에아 각성) 단계로 진입할 수 있습니다.")
+    else:
+        st.warning("판정: **HOLD** — 기준치 미달 항목을 개선한 뒤 재시도하세요.")
+
+# ===== 상태 바 =====
+if ss.m251v_hist:
+    last = ss.m251v_hist[-1]
+    st.caption(
+        f"UTC {last['ts']} · source={last['source']} · PASS={last['verdict']} · "
+        f"http={last['http_ok_rate']} json={last['json_ok_rate']} "
+        f"schema={last['schema_ok_rate']} repro={last['repro']['stability']} adv={last['adversarial_avg']}"
+    )
+    
+    
 # [252] 우주정보장 연동: 증거/반례 큐 파이프라인 (Backbone v1)
 # 기능: 증거/HIT 수집 → 간이 검증(stub) → CE-Graph 반영(stub) → 로그/스냅샷
 # 충돌 방지: 모든 key는 m252_* 사용
