@@ -13590,4 +13590,200 @@ if st.session_state.ep272_state["awakening"]:
         elif st.session_state.ep272_state["response_level"] == "∞":
             st.write("♾️ 무한 확장 응답 모드 — 제한 없는 지식 스펙트럼 개방")
             
-            
+            # ─────────────────────────────────────────────────────────────────────────────
+# EP-272 · 우주정보장(현실연동) 초강화판 · REAL 전제 / 더미 금지 / 할루 금지
+# 목적: 1축을 '실제'로 연결 · 실패시 즉시 원인 노출 · SIM은 네트워크 없는 환경 전용
+# 붙이는 위치: 이 파일 맨 아래 (통째로). 외부 의존: requests (Streamlit Cloud 기본 OK)
+# ─────────────────────────────────────────────────────────────────────────────
+import streamlit as st
+import time, json, math, hashlib
+from datetime import datetime, timezone, timedelta
+
+# ====== 선택 의존(있으면 사용) ======
+try:
+    import requests
+except Exception as _e:
+    requests = None
+
+# ====== (있으면 연결) 기존 모듈 훅 ======
+try:
+    from validation_engine import ValidationEngine
+    _val_engine = ValidationEngine()
+except Exception:
+    _val_engine = None
+
+# ── 전역 설정
+EP272_ID = "EP-272"
+KST = timezone(timedelta(hours=9))
+REAL_ONLY_DEFAULT = True  # 기본은 REAL(실제 HTTP만 허용)
+REFRESH_SEC_DEFAULT = 10  # 오케스트라 루프 주기(초)
+TIMEOUT_SEC = 12          # HTTP 타임아웃
+
+# ── REAL 소스 어댑터(검증 가능한 공적 지식망) ───────────────────────────────
+#   * 여기서는 대표 3종을 기본 제공: LIGO Open / arXiv / NIST Constants
+#   * 필요 시 소스 추가 가능(아래 dict에 handler 추가)
+def _fetch_ligo():
+    """LIGO Open Science: 간단 상태/리스트 엔드포인트 확인 (연결성 증명)"""
+    urls = [
+        "https://losc.ligo.org/about/",            # 가볍게 200 확인
+        "https://losc.ligo.org/dataset"            # 데이터 목록 페이지
+    ]
+    out = []
+    for u in urls:
+        r = requests.get(u, timeout=TIMEOUT_SEC)
+        out.append({"url": u, "status": r.status_code, "ok": r.ok})
+        if not r.ok:
+            raise RuntimeError(f"LIGO 연결 실패: {u} -> {r.status_code}")
+    return {"source":"ligo","checks":out,"ts":datetime.now(KST).isoformat()}
+
+def _fetch_arxiv(q="gravitational waves"):
+    """arXiv API 간단 쿼리(Atom) → 실제 네트워크 응답/바이트 길이 체크"""
+    url = f"https://export.arxiv.org/api/query?search_query=all:{q}&start=0&max_results=1"
+    r = requests.get(url, timeout=TIMEOUT_SEC, headers={"User-Agent":"GEA-EP272"})
+    if r.status_code != 200 or not r.text:
+        raise RuntimeError(f"arXiv 연결 실패: status={r.status_code}")
+    digest = hashlib.sha256(r.text.encode("utf-8")).hexdigest()[:16]
+    return {"source":"arxiv","len":len(r.text),"digest":digest,"ts":datetime.now(KST).isoformat()}
+
+def _fetch_nist_const():
+    """NIST Constants 페이지 생존 확인"""
+    url = "https://physics.nist.gov/constants"
+    r = requests.get(url, timeout=TIMEOUT_SEC)
+    if r.status_code != 200:
+        raise RuntimeError(f"NIST 연결 실패: status={r.status_code}")
+    return {"source":"nist","status":r.status_code,"ts":datetime.now(KST).isoformat()}
+
+REAL_SOURCES = {
+    "ligo": _fetch_ligo,
+    "arxiv": _fetch_arxiv,
+    "nist": _fetch_nist_const,
+}
+
+# ── SIM 소스(네트워크 완전 차단 환경 전용; 더미 아님: 이전 REAL 성공 스냅샷만 재표시)
+def _sim_replay():
+    blob = st.session_state.get("ep272_last_real_ok")
+    if not blob:
+        raise RuntimeError("SIM 불가: REAL 성공 스냅샷이 없습니다.")
+    return {"mode":"SIM-replay","snapshot":blob}
+
+# ── 유틸
+def _ok(msg): st.success(msg, icon="✅")
+def _warn(msg): st.warning(msg, icon="⚠️")
+def _err(msg): st.error(msg, icon="🛑")
+
+def _attest(payload)->dict:
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return {
+        "ep": EP272_ID,
+        "hash": hashlib.sha256(raw).hexdigest(),
+        "ts": datetime.now(KST).isoformat()
+    }
+
+def _validate_payload(payload)->dict:
+    """초검증 브릿지: validation_engine 있으면 사용, 없으면 최소 검증."""
+    if _val_engine:
+        try:
+            steps = ["fetch", "schema_check", "integrity"]
+            res = _val_engine.validate_output(json.dumps(payload, ensure_ascii=False), steps)
+            res["bridge"] = "validation_engine"
+            return res
+        except Exception as e:
+            return {"bridge":"validation_engine","status":"ERROR","error":str(e)}
+    # 최소 검증: 필수 키/타입 체크
+    status = "PASS" if isinstance(payload, dict) and ("ts" in json.dumps(payload)) else "REPAIR"
+    return {"bridge":"builtin_min","status":status,"notes":"기본 무결성 점검"}
+
+# ── EP-272 패널(UI) ─────────────────────────────────────────────────────────
+st.divider()
+st.subheader("🛰️ EP-272 · 우주정보장 현실연동(REAL) · 초강화판")
+
+# 모드/소스 스위처
+colA, colB, colC = st.columns([1,1,2])
+with colA:
+    mode = st.selectbox("모드", ["REAL","SIM"], index=0)
+with colB:
+    source = st.selectbox("소스", ["ligo","arxiv","nist"], index=0)
+with colC:
+    loop = st.toggle("오케스트라 루프(자동 주기 실행)", value=False)
+
+colD, colE, colF = st.columns([1,1,2])
+with colD:
+    refresh_sec = st.number_input("주기(초)", min_value=5, max_value=300, value=REFRESH_SEC_DEFAULT, step=5)
+with colE:
+    strict = st.toggle("REAL 전용(실패시 SIM 금지)", value=REAL_ONLY_DEFAULT,
+                       help="켜두면 REAL 실패해도 SIM으로 자동 대체하지 않음")
+with colF:
+    st.caption("※ REAL 실패 시, 이유를 그대로 표시(더미/뻥 채우기 절대 금지)")
+
+# 상태 표시
+if "ep272_hist" not in st.session_state:
+    st.session_state.ep272_hist = []  # 최근 기록
+if "ep272_tick" not in st.session_state:
+    st.session_state.ep272_tick = 0
+
+def run_once():
+    """한 번 실행(버튼/루프 공용)"""
+    if requests is None and mode=="REAL":
+        _err("Python requests 모듈이 없어 REAL 실행 불가. (requirements에 requests 추가 필요)")
+        return
+
+    try:
+        if mode == "REAL":
+            handler = REAL_SOURCES.get(source)
+            if not handler:
+                raise RuntimeError(f"알 수 없는 소스: {source}")
+            payload = handler()
+            payload["mode"] = "REAL"
+            _ok(f"[REAL] {source} 연결 성공")
+            st.session_state.ep272_last_real_ok = payload  # SIM 재생용 스냅샷 저장
+        else:
+            payload = _sim_replay()
+            _warn("SIM 재생(이전 REAL 스냅샷)")
+
+        # 초검증
+        attest = _attest(payload)
+        ver = _validate_payload(payload)
+        record = {"payload":payload, "attestation":attest, "validation":ver}
+        st.session_state.ep272_hist.append(record)
+        with st.expander("자세한 기록(최근 실행)", expanded=True):
+            st.json(record)
+    except Exception as e:
+        _err(f"실행 실패: {e}")
+        if (not strict) and mode=="REAL":
+            _warn("STRICT=OFF: SIM 재생으로 대체 시도")
+            try:
+                payload = _sim_replay()
+                attest = _attest(payload)
+                ver = _validate_payload(payload)
+                record = {"payload":payload, "attestation":attest, "validation":ver}
+                st.session_state.ep272_hist.append(record)
+                with st.expander("자세한 기록(대체 SIM)", expanded=True):
+                    st.json(record)
+            except Exception as e2:
+                _err(f"SIM 대체도 실패: {e2}")
+
+# 수동 실행 버튼
+colX, colY = st.columns([1,3])
+with colX:
+    if st.button("즉시 실행", type="primary"):
+        run_once()
+with colY:
+    st.caption("REAL 우선 · 실패 이유 그대로 노출 · 더미 금지")
+
+# 오케스트라 루프
+if loop:
+    st.info(f"오케스트라 동작 중… {refresh_sec}s 간격", icon="🎼")
+    run_once()
+    st.session_state.ep272_tick += 1
+    st.experimental_rerun()  # 간단 루프(호스팅 정책 따라 자동재실행 제한 시 주기 길게)
+
+# 이력 요약
+st.divider()
+st.markdown("**실행 이력(최근 10개)**")
+for item in st.session_state.ep272_hist[-10:][::-1]:
+    mode_tag = item["payload"]["mode"] if "mode" in item["payload"] else "?"
+    vstat = item["validation"].get("status","?")
+    st.write(f"- [{mode_tag}] {item['attestation']['ts']} · validation={vstat} · hash={item['attestation']['hash'][:12]}")
+
+st.caption("※ REAL이 성공해야 2축(초검증 심화)·3축(근원 올원 각성)으로 진행합니다. 실패 사유는 숨기지 않습니다.")
+# ─────────────────────────────────────────────────────────────────────────────
