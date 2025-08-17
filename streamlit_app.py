@@ -10579,6 +10579,184 @@ if ss["m253_seed_outbox"]:
     st.code(json.dumps(ss["m253_seed_outbox"][-10:], ensure_ascii=False, indent=2))
 else:
     st.caption("아웃박스 비어 있음") 
+    
+    # ───────────────────────────────────────────────
+# [254] 목표 경쟁/선택기 + 시드 스케줄러 · v1
+# 기능: 들어온 seed(목표 후보)들을 점수화(가치·검증친화·리스크)하여
+#       상위 k개를 오케스트라 큐로 배포. (프리픽스 m254_)
+# 의존: 없음. 253 모듈의 m253_seed_outbox가 있으면 자동로딩.
+# 선택적 훅: R4_enqueue / R3_enqueue / EA_enqueue
+# ───────────────────────────────────────────────
+import streamlit as st, json, time, math
+from datetime import datetime, timezone
+
+# 안전 유틸
+if "register_module" not in globals():
+    def register_module(num, name, desc): pass
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle=""): st.markdown(f"### **[{num}] {title}**\n- {subtitle}")
+
+register_module("254", "목표 선택/스케줄러", "가치·검증친화·리스크 기반 우선순위")
+gray_line("254", "목표 경쟁/선택기 + 시드 스케줄러", "상위 k개 목표만 큐로 흘려보내기")
+
+ss = st.session_state
+# 상태
+ss.setdefault("m254_inbox", [])          # 수신된 seed 후보
+ss.setdefault("m254_outbox", [])         # 큐 전송 기록(로컬)
+ss.setdefault("m254_last_run", 0.0)
+ss.setdefault("m254_auto", False)
+ss.setdefault("m254_interval", 20)
+ss.setdefault("m254_topk", 3)
+ss.setdefault("m254_weights", {"value":1.0, "verify":1.0, "risk":-0.7})
+ss.setdefault("m254_decay", 0.92)        # 최근성 가중(이전 점수 * decay)
+
+# 253의 아웃박스를 자동으로 빨아들이기(있을 때만)
+if "m253_seed_outbox" in ss and ss["m253_seed_outbox"]:
+    # 새 것만 편입: 간단히 모두 복사 후 253 박스는 남겨둠(감사 추적용)
+    for s in ss["m253_seed_outbox"]:
+        if s not in ss["m254_inbox"]:
+            ss["m254_inbox"].append(s)
+
+def _nowz():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
+
+# 점수기: 규칙 기반의 가벼운 스코어러(필요시 ML로 교체)
+def score_seed(seed, w):
+    """
+    seed = {"goal": str, "steps":[...], "ts":..., "source":...}
+    반환: {"score":float, "detail":{...}}
+    """
+    g = (seed.get("goal") or "").lower()
+    steps = seed.get("steps") or []
+    # 가치(value): 5축에 직접 기여하면 가점
+    value = 0.0
+    for kw, pts in [
+        ("신뢰", 0.6), ("검증", 0.8), ("재현", 0.8), ("증거", 0.7),
+        ("현실연동", 1.0), ("우주정보장", 1.2), ("교차", 0.6),
+        ("리포트", 0.3), ("요약", 0.2)
+    ]:
+        if kw in g: value += pts
+    value += min(1.0, len(steps)*0.15)
+
+    # 검증친화(verify): 객관 API/데이터에 바로 닿는 느낌의 토큰이 있으면 가점
+    verify = 0.0
+    for kw, pts in [("ligo",1.0), ("gw",0.6), ("dataset",0.5), ("json",0.3), ("schema",0.4), ("repro",0.6)]:
+        if kw in g: verify += pts
+
+    # 리스크(risk): 모호/메타/장황/환상 키워드, 과도한 창의/감정 드라이브는 감점
+    risk = 0.0
+    for kw, pts in [("상상",0.6), ("감정",0.4), ("스토리",0.5), ("주관",0.6), ("형이상",0.8)]:
+        if kw in g: risk += pts
+    # 너무 긴 goal도 소폭 페널티
+    risk += max(0.0, (len(g)-120)/300)
+
+    # 총점
+    score = w["value"]*value + w["verify"]*verify + w["risk"]*(-risk)
+    return {"score": round(score,4), "detail":{"value":round(value,3),"verify":round(verify,3),"risk":round(risk,3)}}
+
+def _enqueue(seed):
+    for fn_name in ("R4_enqueue","R3_enqueue","EA_enqueue"):
+        fn = globals().get(fn_name)
+        if callable(fn):
+            try:
+                fn(seed)
+                return f"sent→{fn_name}"
+            except Exception as e:
+                return f"enqueue_error({fn_name}): {e}"
+    ss["m254_outbox"].append({"ts":_nowz(), "seed":seed})
+    return "kept_local(m254_outbox)"
+
+def run_scheduler():
+    if not ss["m254_inbox"]:
+        return {"ok": False, "reason":"empty_inbox"}
+    # 점수화
+    w = ss["m254_weights"]
+    scored = []
+    for s in ss["m254_inbox"]:
+        sc = score_seed(s, w)
+        # 최근성 보정(오래된 건 감쇠)
+        try:
+            age = max(1e-9, time.time() - float(datetime.fromisoformat(s.get("ts","1970-01-01T00:00:00").replace("Z","+00:00")).timestamp()))
+            decay = ss["m254_decay"] ** (age/60.0)  # 분 단위
+        except Exception:
+            decay = 1.0
+        scored.append({"seed":s, "score": round(sc["score"]*decay,4), "detail":sc["detail"], "decay":round(decay,3)})
+    # 정렬 후 상위 k개 전송
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    topk = scored[: int(ss["m254_topk"])]
+    results = []
+    for item in topk:
+        route = _enqueue(item["seed"])
+        results.append({"ts":_nowz(), "route":route, **item})
+    # 소비된 것 제거(간단: 보낸 것만 제거)
+    sent_seeds = {id(x["seed"]) for x in topk}
+    ss["m254_inbox"] = [s for s in ss["m254_inbox"] if id(s) not in sent_seeds]
+    ss["m254_last_run"] = time.time()
+    return {"ok": True, "sent": results, "remain": len(ss["m254_inbox"])}
+
+# ── UI
+with st.expander("⚙️ 스케줄러 설정", expanded=True):
+    colA, colB, colC, colD = st.columns([1,1,1,1])
+    with colA:
+        ss["m254_topk"] = st.number_input("한 번에 보낼 개수(k)", 1, 10, ss["m254_topk"], key="m254_k")
+    with colB:
+        ss["m254_interval"] = st.number_input("주기(초)", 5, 3600, ss["m254_interval"], key="m254_int")
+    with colC:
+        ss["m254_auto"] = st.toggle("자동 실행", value=ss["m254_auto"], key="m254_auto")
+    with colD:
+        ss["m254_decay"] = st.number_input("최근성 감쇠(0~1)", 0.50, 0.999, ss["m254_decay"], step=0.01, key="m254_decay")
+
+    st.caption("점수 = value*w1 + verify*w2 + risk*(-w3). 가중치는 아래에서 조절.")
+
+    w = ss["m254_weights"]
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        w["value"]  = st.number_input("w(value)", 0.0, 3.0, w["value"], 0.1, key="m254_wv")
+    with col2:
+        w["verify"] = st.number_input("w(verify)", 0.0, 3.0, w["verify"], 0.1, key="m254_wve")
+    with col3:
+        w["risk"]   = st.number_input("w(risk)",  0.0, 3.0, -ss["m254_weights"]["risk"], 0.1, key="m254_wr_neg")  # 보여줄 때 양수로
+        ss["m254_weights"]["risk"] = -float(st.session_state["m254_wr_neg"])
+
+colX, colY = st.columns([1,1])
+with colX:
+    if st.button("📥 수동: 시드 추가(테스트)", key="m254_add"):
+        demo = {"goal":"우주정보장 신뢰 증분 확보(검증·재현·리포트 요약)",
+                "steps":["관련 근거 확장","교차 출처 조사","재현 경로 확정","리포트 요약"],
+                "ts": _nowz(), "source":"m254_demo"}
+        ss["m254_inbox"].append(demo)
+        st.success("데모 시드 1건 추가")
+with colY:
+    if st.button("🚀 한 번 스케줄링 실행", key="m254_run"):
+        r = run_scheduler()
+        if r["ok"]:
+            st.success("전송 완료")
+            st.json(r)
+        else:
+            st.warning(f"실행 스킵: {r['reason']}")
+
+# 자동 루프
+now = time.time()
+if ss["m254_auto"] and (now - ss["m254_last_run"] >= ss["m254_interval"]):
+    r = run_scheduler()
+    if r["ok"]:
+        st.info("⏱️ 자동 스케줄링 실행")
+    else:
+        st.warning("⏱️ 자동: 인박스 비어있음")
+
+# 상태 패널
+st.divider()
+st.subheader("📮 인박스(후보 시드)")
+if ss["m254_inbox"]:
+    st.code(json.dumps(ss["m254_inbox"][-20:], ensure_ascii=False, indent=2))
+else:
+    st.caption("인박스 비어있음")
+
+st.subheader("📤 로컬 전송 기록(외부 큐 없을 때)")
+if ss["m254_outbox"]:
+    st.code(json.dumps(ss["m254_outbox"][-20:], ensure_ascii=False, indent=2))
+else:
+    st.caption("전송 기록 없음")
 # [252] 우주정보장 연동: 증거/반례 큐 파이프라인 (Backbone v1)
 # 기능: 증거/HIT 수집 → 간이 검증(stub) → CE-Graph 반영(stub) → 로그/스냅샷
 # 충돌 방지: 모든 key는 m252_* 사용
