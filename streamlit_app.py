@@ -10111,24 +10111,47 @@ with st.expander("252R4. 우주정보장 연동 (엄격/검증형)", expanded=Fa
             st.write("🛡 우주정보장 엄격 검증 수동 실행")
             st.json({"verified": bool(random.getrandbits(1)), "depth": depth, "mode":"strict"})
             
-            # 251S — 우주정보장 연동 스위처 (수정판)
-register_module("251S", "우주정보장 연동 스위처", "모드 전환 + 공통 세팅 / 키 충돌 제거판")
+  # 251S — 우주정보장 연동 스위처 (수정/안전판)
+# 핵심: 위젯-키는 m251s_ 접두사로만 사용, 외부에서 읽을 상태는 'cosmic_switch'로 별도 저장
+register_module("251S", "우주정보장 연동 스위처", "모드 전환 + 자동주기")
 
 import streamlit as st
-
-NS251S = "m251s"
-def k251s(s): return f"{NS251S}_{s}"
+NS = "m251s"                 # 위젯 키 네임스페이스
+def k(s): return f"{NS}_{s}" # 중복키 방지
 
 with st.expander("251S. 우주정보장 연동 스위처", expanded=True):
-    st.caption("R3(느슨) ↔ R4(엄격) 모드 전환 + 공통 주기 관리")
+    # 초기값(위젯 키와 별개로 외부에서 읽을 통합 상태)
+    if "cosmic_switch" not in st.session_state:
+        st.session_state["cosmic_switch"] = {"mode":"OFF","auto":False,"interval":10}
 
-    # 모드 선택
+    # 위젯 표시 (각각 고유 키)
     mode = st.radio(
-        "모드 선택",
-        ["OFF", "R3(느슨)", "R4(엄격)"],
-        index=0,
-        key=k251s("mode")
+        "모드 선택", ["OFF", "R3(느슨)", "R4(엄격)"],
+        index=["OFF","R3(느슨)","R4(엄격)"].index(st.session_state["cosmic_switch"]["mode"]),
+        key=k("mode"),
+        horizontal=True
     )
+
+    auto = st.toggle(
+        "공통 자동 실행",
+        value=bool(st.session_state["cosmic_switch"]["auto"]),
+        key=k("auto")
+    )
+
+    interval = st.slider(
+        "공통 주기(초)", min_value=3, max_value=60, step=1,
+        value=int(st.session_state["cosmic_switch"]["interval"]),
+        key=k("interval")
+    )
+
+    # 👉 위젯 키에 직접 할당하지 말고, 별도 통합 상태로만 업데이트 (APIException 예방)
+    st.session_state["cosmic_switch"] = {
+        "mode": mode,
+        "auto": auto,
+        "interval": int(interval),
+    }
+
+    st.info(f"현재: 모드 **{mode}**, 자동 **{auto}**, 주기 **{interval}s**")
 
     # 공통 자동 실행 여부
     auto = st.toggle("공통 자동 실행", value=False, key=k251s("auto"))
@@ -10240,3 +10263,5 @@ with st.expander("253. 우주정보장 연동 오케스트레이터", expanded=T
     if did:
         st.session_state[k253("last_run")] = f"{ts} · {did}"
     st.caption(f"최근 실행: {st.session_state.get(k253('last_run')) or '없음'}")
+    
+    
