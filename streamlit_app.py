@@ -10111,20 +10111,28 @@ with st.expander("252R4. 우주정보장 연동 (엄격/검증형)", expanded=Fa
             st.write("🛡 우주정보장 엄격 검증 수동 실행")
             st.json({"verified": bool(random.getrandbits(1)), "depth": depth, "mode":"strict"})
             
-  # 251S — 우주정보장 연동 스위처 (수정/안전판)
-# 핵심: 위젯-키는 m251s_ 접두사로만 사용, 외부에서 읽을 상태는 'cosmic_switch'로 별도 저장
-register_module("251S", "우주정보장 연동 스위처", "모드 전환 + 자동주기")
+  # 251S — 우주정보장 연동 스위처 (토글→자동 폴백 적용)
+# 키 중복 방지: m251s_*
+register_module("251S", "우주정보장 연동 스위처", "모드 전환 + 자동주기 (토글 폴백)")
 
 import streamlit as st
-NS = "m251s"                 # 위젯 키 네임스페이스
-def k(s): return f"{NS}_{s}" # 중복키 방지
+NS = "m251s"
+def k(s): return f"{NS}_{s}"
+
+# toggle 폴백: 배포 환경에 toggle 없으면 checkbox로 대체
+def _toggle(label:str, value:bool, key:str):
+    _t = getattr(st, "toggle", None)
+    if callable(_t):
+        return _t(label, value=value, key=key)
+    # 폴백: checkbox는 True/False를 동일하게 반환
+    return st.checkbox(label, value=value, key=key)
 
 with st.expander("251S. 우주정보장 연동 스위처", expanded=True):
-    # 초기값(위젯 키와 별개로 외부에서 읽을 통합 상태)
+    # 외부에서 읽는 통합 상태
     if "cosmic_switch" not in st.session_state:
         st.session_state["cosmic_switch"] = {"mode":"OFF","auto":False,"interval":10}
 
-    # 위젯 표시 (각각 고유 키)
+    # ---- 위젯(고유 키 사용) ----
     mode = st.radio(
         "모드 선택", ["OFF", "R3(느슨)", "R4(엄격)"],
         index=["OFF","R3(느슨)","R4(엄격)"].index(st.session_state["cosmic_switch"]["mode"]),
@@ -10132,7 +10140,7 @@ with st.expander("251S. 우주정보장 연동 스위처", expanded=True):
         horizontal=True
     )
 
-    auto = st.toggle(
+    auto = _toggle(
         "공통 자동 실행",
         value=bool(st.session_state["cosmic_switch"]["auto"]),
         key=k("auto")
@@ -10144,29 +10152,14 @@ with st.expander("251S. 우주정보장 연동 스위처", expanded=True):
         key=k("interval")
     )
 
-    # 👉 위젯 키에 직접 할당하지 말고, 별도 통합 상태로만 업데이트 (APIException 예방)
+    # ---- 통합 상태 업데이트(위젯 키에 직접 할당 금지) ----
     st.session_state["cosmic_switch"] = {
         "mode": mode,
-        "auto": auto,
+        "auto": bool(auto),
         "interval": int(interval),
     }
 
     st.info(f"현재: 모드 **{mode}**, 자동 **{auto}**, 주기 **{interval}s**")
-
-    # 공통 자동 실행 여부
-    auto = st.toggle("공통 자동 실행", value=False, key=k251s("auto"))
-
-    # 공통 주기 (초 단위)
-    interval = st.slider("공통 주기(초)", 5, 60, 10, step=5, key=k251s("interval"))
-
-    # 🔗 세션 상태에 저장 → R3 / R4 모듈에서 자동 반영
-    st.session_state["cosmic_switch"] = {
-        "mode": mode,
-        "auto": auto,
-        "interval": interval
-    }
-
-    st.info(f"현재 모드: {mode} | 자동: {auto} | 주기: {interval}초")
     
     # 253 — 우주정보장 연동 오케스트레이터(런타임 루프)
 # 역할: 251S(스위처)의 설정을 읽어 251R3/252R4를 주기적으로/수동으로 실행
