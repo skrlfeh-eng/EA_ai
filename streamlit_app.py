@@ -11453,3 +11453,174 @@ with c4:
 
 st.caption("설명: 버튼 순서대로 눌러 그래프/검색이 동시에 반영되는지 확인. 257이 미설치면 검색은 스텁으로 동작.")
 # ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# [259] 초검증 루프 — 재현성 체크 + 반례사냥 + REPAIR 제안
+# 목적: 5축 중 ②(초검증)를 실질적으로 끌어올리는 코어 루프
+import streamlit as st, time, json, math, random, hashlib
+from dataclasses import dataclass
+from typing import List, Dict, Any, Tuple
+
+# 헬퍼가 없으면 간이 정의
+if "register_module" not in globals():
+    def register_module(num, name, desc): st.markdown(f"### **[{num}] {name}**"); st.caption(desc)
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle=""): st.markdown(f"**[{num}] {title}**"); st.caption(subtitle)
+
+register_module("259", "초검증 루프", "재현성 재실행 + 반례사냥 + REPAIR 제안(요약 리포트 포함)")
+gray_line("259", "검증 3단 콤보", "1) 재현성 2) 반례사냥 3) 리페어 제안 — 한 번에")
+
+ss = st.session_state
+
+# ===== 샘플/외부 증인(witnesses.jsonl) 로더 =====
+def _m259_load_witnesses() -> List[Dict[str,Any]]:
+    # upstream에서 ingest한 경우 memory에 있을 수 있으나, 여기선 파일 대신 세션 캐시/스텁 활용
+    if "m259_witnesses" in ss:
+        return ss.m259_witnesses
+    # 기본 스텁(문제 유형별 소형 세트)
+    data = [
+        {"problem_id":"sat:toy1","type":"SAT","instance":{"clauses":[["x1","x2"],["¬x1","x3"],["¬x2","¬x3"]]},"witness":{"x1":True,"x2":True,"x3":True},"verifier":"truth-assign-check"},
+        {"problem_id":"units:gw-strain","type":"UNITS","instance":{"expr":"ΔL/L","units":{"ΔL":"m","L":"m"}},"witness":{"unit_result":"dimensionless"},"verifier":"dimensional-analysis"},
+        {"problem_id":"numeric:planck","type":"NUMERIC","instance":{"expr":"E=h·ν","inputs":{"h":6.62607015e-34,"ν":5.0e14}},"witness":{"E":3.313035075e-19,"tolerance":1e-24},"verifier":"substitution-check"},
+    ]
+    ss.m259_witnesses = data
+    return data
+
+# ===== 간이 검증기 구현 =====
+def _verify_sat(inst, wit)->bool:
+    # 매우 단순한 검사: True/False로 절만 평가(부정 '¬' 처리)
+    assign = wit
+    def lit_val(l):
+        if l.startswith("¬"):
+            v = assign.get(l[1:], False); return (not v)
+        return assign.get(l, False)
+    for clause in inst.get("clauses", []):
+        if not any(lit_val(l) for l in clause):
+            return False
+    return True
+
+def _verify_units(inst, wit)->bool:
+    # ΔL/L => 무차원 체크
+    expr = inst.get("expr","")
+    units = inst.get("units",{})
+    if expr.strip() == "ΔL/L" and units.get("ΔL")=="m" and units.get("L")=="m":
+        return wit.get("unit_result") == "dimensionless"
+    return False
+
+def _verify_numeric(inst, wit)->bool:
+    # 대입 계산 후 오차 내 일치 검사
+    expr = inst.get("expr","")
+    inp = inst.get("inputs",{})
+    if expr == "E=h·ν":
+        E = inp.get("h",0.0)*inp.get("ν",0.0)
+        return abs(E - wit.get("E",0.0)) <= wit.get("tolerance",1e-12)
+    return False
+
+def _run_verifier(item)->bool:
+    typ = item.get("type")
+    inst = item.get("instance",{})
+    wit = item.get("witness",{})
+    if typ == "SAT":    return _verify_sat(inst, wit)
+    if typ == "UNITS":  return _verify_units(inst, wit)
+    if typ == "NUMERIC":return _verify_numeric(inst, wit)
+    return False
+
+# ===== 재현성 테스트 =====
+@dataclass
+class ReproResult:
+    trials:int
+    pass_count:int
+    ratio:float
+    detail:List[Dict[str,Any]]
+
+def _m259_reproducibility(trials:int=30)->ReproResult:
+    wrk = _m259_load_witnesses()
+    detail=[]; pass_cnt=0
+    for i in range(trials):
+        # 라운드마다 witness 셔플·선택
+        item = random.choice(wrk)
+        ok = _run_verifier(item)
+        detail.append({"i":i,"id":item["problem_id"],"ok":ok})
+        if ok: pass_cnt += 1
+    return ReproResult(trials=trials, pass_count=pass_cnt, ratio=pass_cnt/max(1,trials), detail=detail)
+
+# ===== 반례사냥(Adversarial) =====
+@dataclass
+class HuntResult:
+    attempts:int
+    found:int
+    samples:List[Dict[str,Any]]
+
+def _perturb(item:Dict[str,Any])->Dict[str,Any]:
+    # 간단 교란: SAT문제에 절 하나 제거, NUMERIC에 소수점 변형, UNITS에 단위 살짝 바꾸기
+    j = json.loads(json.dumps(item))
+    if j["type"]=="SAT" and j["instance"]["clauses"]:
+        if random.random()<0.5 and len(j["instance"]["clauses"])>1:
+            j["instance"]["clauses"].pop(0)  # 제약 제거 → 더 쉬워질 수도, 반례가 될 수도
+        else:
+            j["witness"]["x1"] = not j["witness"].get("x1", True)  # 증인 뒤집기
+    elif j["type"]=="NUMERIC":
+        j["instance"]["inputs"]["ν"] *= (1.0 + (random.random()-0.5)*1e-6)
+        # witness 허용오차는 고정 → 작은 흔들림으로 실패 유도 가능
+    elif j["type"]=="UNITS":
+        if random.random()<0.5: j["instance"]["units"]["L"] = "cm"  # 단위 불일치 유발
+    return j
+
+def _m259_adversarial(attempts:int=50)->HuntResult:
+    base = _m259_load_witnesses()
+    found=0; samples=[]
+    for i in range(attempts):
+        item = random.choice(base)
+        adv = _perturb(item)
+        ok = _run_verifier(adv)
+        if not ok:
+            found += 1
+            if len(samples)<5:
+                samples.append({"i":i,"from":item["problem_id"],"mut":"ok→fail", "adv":adv})
+    return HuntResult(attempts=attempts, found=found, samples=samples)
+
+# ===== REPAIR 제안 =====
+def _m259_repair_suggestions(repro:ReproResult, hunt:HuntResult)->List[str]:
+    tips=[]
+    if repro.ratio < 0.93:
+        tips.append("재현성 하한(0.93) 미달: 테스트 스위트 확장 및 결정적 수치(시드/정밀도) 고정 필요")
+    if hunt.found > 0:
+        tips.append(f"반례 {hunt.found}건 발견: 단위 정상화(ISO 80000)·허용오차 재설계·증인 재검토 필요")
+    if not tips:
+        tips.append("모든 지표 양호: CE-Graph 링크 추가 및 외부 출처 스팬 더 확보 추천")
+    return tips
+
+# ===== UI =====
+cA,cB,cC = st.columns(3)
+with cA:
+    trials = st.number_input("재현성 Trials", min_value=5, max_value=500, value=30, step=5, key="m259_trials")
+with cB:
+    adv_attempts = st.number_input("반례사냥 Attempts", min_value=10, max_value=1000, value=50, step=10, key="m259_attempts")
+with cC:
+    st.write("")  # spacing
+    run_all = st.button("▶ 검증 3단 콤보 실행", key="m259_run")
+
+if run_all:
+    t0=time.time()
+    repro = _m259_reproducibility(int(trials))
+    hunt  = _m259_adversarial(int(adv_attempts))
+    tips  = _m259_repair_suggestions(repro, hunt)
+    t1=time.time()
+
+    st.success(f"재현성: {repro.pass_count}/{repro.trials} → **{repro.ratio:.3f}**")
+    st.info(f"반례사냥: 발견 **{hunt.found}** / {hunt.attempts}")
+    with st.expander("세부 로그(샘플)"):
+        st.json({
+            "repro_detail_head": repro.detail[:10],
+            "adv_samples": hunt.samples
+        })
+    st.markdown("**REPAIR 제안**")
+    for t in tips:
+        st.write(f"- {t}")
+    st.caption(f"실행 시간: {(t1-t0):.2f}s")
+
+    # 목표치 달성 시 5축(validation) 퍼센트 자동 상향(선택적)
+    if repro.ratio >= 0.93 and hunt.found == 0:
+        key = "bb_validation" if "bb_validation" in ss else None
+        if key: ss[key] = min(100, ss[key]+5)
+
+# ─────────────────────────────────────────────────────────
