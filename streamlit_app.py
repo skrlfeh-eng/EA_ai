@@ -10080,7 +10080,7 @@ with st.expander("251R3. 우주정보장 연동 (느슨/탐지형)", expanded=Fa
             st.write("🌌 우주정보장 느슨 탐지 1회 실행")
             st.json({"signal": random.random(), "mode":"loose"})
             
-            # 252R4 — 우주정보장 연동 (엄격/검증형)
+  # 252R4 — 우주정보장 연동 (엄격/검증형)
 register_module("252R4", "우주정보장 연동 (엄격/검증형)", "검증/반례/재현성 강화 / 키 충돌 제거")
 
 import streamlit as st, random, time
@@ -10111,10 +10111,10 @@ with st.expander("252R4. 우주정보장 연동 (엄격/검증형)", expanded=Fa
             st.write("🛡 우주정보장 엄격 검증 수동 실행")
             st.json({"verified": bool(random.getrandbits(1)), "depth": depth, "mode":"strict"})
             
-  # ───────────────────────────────────────────────
-# 251S. 우주정보장 연동 스위처 [v3]
-# 목적: R3(느슨)/R4(엄격) 모드 선택 + 자동 실행 주기 설정
-# 키 충돌 방지: m251s_* 네임스페이스 사용
+            # ───────────────────────────────────────────────
+# 251S. 우주정보장 연동 스위처 [v4]
+# 목적: R3(느슨)/R4(엄격) 모드 전환 + 자동/주기 설정
+# 변경점: 위젯 변경 시 이번 런에서는 오케스트라 재실행 금지 플래그 설정
 try:
     register_module("251S", "우주정보장 연동 스위처", "모드 전환 + 자동/주기 설정")
     gray_line("251S", "우주정보장 연동 스위처", "R3/R4 모드 + 자동 실행/주기")
@@ -10123,47 +10123,45 @@ except Exception:
 
 import streamlit as st
 
-# ---- 세션 안전 초기화 ----
+# ---- 공용 세션 기본값 ----
 if "cosmic_switch" not in st.session_state:
+    st.session_state["cosmic_switch"] = {"mode":"OFF","auto":False,"interval":10}
+# 오케스트라 재실행 허용 플래그(위젯 변경 직후 한 런은 False)
+if "m253o_allow_rerun" not in st.session_state:
+    st.session_state["m253o_allow_rerun"] = True
+
+def _on_switch_changed():
+    # 이번 런에서는 오케스트라 rerun 금지 → 입력 안정 반영
+    st.session_state["m253o_allow_rerun"] = False
+    # 스위처 세션 반영
     st.session_state["cosmic_switch"] = {
-        "mode": "OFF",     # "OFF" | "R3(느슨)" | "R4(엄격)"
-        "auto": False,     # 자동 실행 on/off
-        "interval": 10,    # 초
+        "mode": st.session_state.get("m251s_mode","OFF"),
+        "auto": bool(st.session_state.get("m251s_auto", False)),
+        "interval": int(st.session_state.get("m251s_interval", 10)),
     }
 
 with st.expander("251S. 우주정보장 연동 스위처", expanded=True):
-    mode = st.radio(
+    cur = st.session_state["cosmic_switch"]
+    st.radio(
         "모드 선택",
         ["OFF", "R3(느슨)", "R4(엄격)"],
-        index=["OFF","R3(느슨)","R4(엄격)"].index(st.session_state["cosmic_switch"]["mode"]),
-        key="m251s_mode",
-        horizontal=True,
+        index=["OFF","R3(느슨)","R4(엄격)"].index(cur["mode"]),
+        key="m251s_mode", horizontal=True, on_change=_on_switch_changed
     )
-    auto = st.checkbox(
-        "공통 자동 실행",
-        value=bool(st.session_state["cosmic_switch"]["auto"]),
-        key="m251s_auto"
-    )
-    interval = st.slider(
-        "공통 주기(초)",
-        min_value=5, max_value=60, value=int(st.session_state["cosmic_switch"]["interval"]),
-        step=1, key="m251s_interval"
-    )
+    st.checkbox("공통 자동 실행", key="m251s_auto", value=bool(cur["auto"]), on_change=_on_switch_changed)
+    st.slider("공통 주기(초)", 5, 60, int(cur["interval"]), 1, key="m251s_interval", on_change=_on_switch_changed)
 
-    # 세션 반영(항상 덮어쓰기)
-    st.session_state["cosmic_switch"] = {
-        "mode": mode,
-        "auto": bool(auto),
-        "interval": int(interval),
-    }
-
-    st.info(f"현재: 모드 **{mode}**, 자동 **{bool(auto)}**, 주기 **{int(interval)}s**")
+    # 보정 및 표시
+    s = st.session_state["cosmic_switch"]
+    s["interval"] = max(3, min(300, int(s["interval"])))
+    st.info(f"현재: 모드 **{s['mode']}**, 자동 **{bool(s['auto'])}**, 주기 **{int(s['interval'])}s**")
 # ───────────────────────────────────────────────
 # ───────────────────────────────────────────────
-# 253O. 우주정보장 오케스트라(실행/자동루프) [v3]
-# 목적: 251S 스위처 상태를 읽어 R3/R4 실행을 오케스트레이션
-# - 키 충돌 방지: m253o_* 네임스페이스 사용
-# - 자동 루프는 st.session_state + st.rerun 기반
+# 253O. 우주정보장 오케스트라(실행/자동루프) [v4]
+# 변경점:
+# - 위젯 변경 직후 런에서는 rerun 금지(충돌 방지)
+# - sleep 사용 금지(프리즈 방지), 다음 틱 시간만 스케줄
+# - 키 네임스페이스: m253o_*
 try:
     register_module("253O", "우주정보장 오케스트라", "스위처 상태 읽기 + 실행 제어")
     gray_line("253O", "우주정보장 오케스트라", "모드 분기/자동 루프")
@@ -10172,70 +10170,72 @@ except Exception:
 
 import streamlit as st, time
 
-def _get_cosmic_switch():
-    """251S가 저장한 스위처 세션값을 안전하게 불러온다."""
+def _get_switch():
     if "cosmic_switch" not in st.session_state:
         st.session_state["cosmic_switch"] = {"mode":"OFF","auto":False,"interval":10}
     cfg = st.session_state["cosmic_switch"]
-    mode = cfg.get("mode", "OFF")
+    mode = cfg.get("mode","OFF")
     auto_on = bool(cfg.get("auto", False))
-    interval = int(cfg.get("interval", 10))
-    # 방어: 최소 주기 3초
-    interval = max(3, min(300, interval))
+    interval = max(3, min(300, int(cfg.get("interval",10))))
     return mode, auto_on, interval
 
 def _try_call(name: str):
-    """
-    같은 파일에 정의된 실행 함수가 있으면 호출한다.
-    기대 함수명:
-      - run_251R3()  # 느슨 모드 실행 함수(251R3 모듈이 제공하면 베스트)
-      - run_252R4()  # 엄격 모드 실행 함수(252R4 모듈이 제공하면 베스트)
-    없으면 False 반환(크래시 방지).
-    """
     fn = globals().get(name)
     if callable(fn):
         try:
-            fn()
+            with st.status(f"{name} 실행 중...", state="running"):
+                fn()
+            st.success(f"{name} 완료")
             return True
         except Exception as e:
-            st.error(f"오케스트라: {name} 실행 중 오류: {e}")
+            st.error(f"{name} 오류: {e}")
             return False
     return False
 
 with st.expander("253O. 오케스트라 상태", expanded=True):
-    mode, auto_on, interval = _get_cosmic_switch()
+    mode, auto_on, interval = _get_switch()
     st.caption(f"스위처 읽음 → 모드: **{mode}** · 자동: **{auto_on}** · 주기: **{interval}s**")
 
-    # 모드 분기 실행 (함수 있으면 호출)
+    # 모드 분기 실행(존재 시)
     ran = False
     if mode == "R3(느슨)":
         st.write("🎛️ 실행: R3(느슨)")
         ran = _try_call("run_251R3")
         if not ran:
-            st.info("실행 훅(run_251R3)이 없어 표시만 합니다. (모듈에서 함수 제공 시 자동 실행)")
+            st.info("실행 훅(run_251R3)이 없어 표시만 합니다.")
     elif mode == "R4(엄격)":
         st.write("🎛️ 실행: R4(엄격)")
         ran = _try_call("run_252R4")
         if not ran:
-            st.info("실행 훅(run_252R4)이 없어 표시만 합니다. (모듈에서 함수 제공 시 자동 실행)")
+            st.info("실행 훅(run_252R4)이 없어 표시만 합니다.")
     else:
         st.write("⏸️ 모드 OFF (대기)")
 
-    # 자동 실행 루프
-    if auto_on:
-        # 다음 틱 스케줄
-        nxt_key = "m253o_next_tick"
+    # 자동 실행 스케줄링
+    nxt_key = "m253o_next_tick"
+    if auto_on and mode != "OFF":
         now = time.time()
         nxt = st.session_state.get(nxt_key, 0.0)
-        if now >= nxt:
+        allow = st.session_state.get("m253o_allow_rerun", True)
+
+        # 첫 스케줄 없으면 지금부터 interval 뒤
+        if nxt <= 0:
             st.session_state[nxt_key] = now + interval
-            # UI에 표시
-            st.caption(f"⏱️ 자동 실행 예약: {interval}s 후 재실행")
-            # 즉시 리런(한 번 돌고 다음 예약)
-            st.rerun()
+            nxt = st.session_state[nxt_key]
+
+        remain = max(0, int(nxt - now))
+        st.caption(f"⏱️ 다음 자동 실행까지 약 {remain}s")
+
+        # 위젯 변경 직후 런이면 이번엔 rerun 금지 → 플래그 복구만
+        if not allow:
+            st.session_state["m253o_allow_rerun"] = True
         else:
-            remain = int(max(0, nxt - now))
-            st.caption(f"⏱️ 다음 자동 실행까지 약 {remain}s")
+            if now >= nxt:
+                # 다음 틱 예약을 먼저 옮겨놓고 재실행
+                st.session_state[nxt_key] = now + interval
+                st.rerun()
     else:
         st.caption("자동 실행: OFF")
+        st.session_state.pop(nxt_key, None)
+        st.session_state["m253o_allow_rerun"] = True
 # ───────────────────────────────────────────────
