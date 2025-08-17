@@ -12798,3 +12798,225 @@ if st.button("자동 리페어 실행", use_container_width=True, key="arlv1_run
         pass
     st.caption(f"초검증 축 가점 반영: +{bonus} (사이드바/대시보드에서 확인)")
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [266] Reality-Link Strengthening (RLSN-v1)
+import streamlit as st, json, copy, re, random
+from typing import Dict, Any, List, Tuple
+
+st.markdown("#### [266] Reality-Link Strengthening — Trust Reweight + CE Normalize (RLSN-v1)")
+st.caption("출처 신뢰도 기반 재가중 + CE-그래프 정규화로 ① 현실연동 축을 강화")
+
+# (선택) 정책 게이트 로그
+if "spx_backbone_gate" in globals():
+    ok, msg = spx_backbone_gate("266 Trust Reweight + Normalize", "현실연동 축 강화")
+    st.caption(msg)
+
+# ---------- 유틸: CE 품질(폴백 지표) ----------
+def _q_cov(ce):
+    nodes = ce.get("nodes",[])
+    ev = sum(1 for n in nodes if n.get("kind")=="evidence")
+    md = sum(1 for n in nodes if n.get("kind")=="method")
+    tot = max(1, len(nodes))
+    return round((ev + (1 if md>0 else 0))/tot, 3)
+
+def _q_con(ce):
+    e = ce.get("edges",[])
+    return round(len(e)/max(1,len(e)), 3) if e else 0.0
+
+def _q_dup(ce):  # 간이 중복률: 동일 payload evidence 비율
+    seen, dup = set(), 0
+    for n in ce.get("nodes",[]):
+        if n.get("kind")!="evidence": 
+            continue
+        key = json.dumps(n.get("payload",{}), sort_keys=True, ensure_ascii=False)
+        if key in seen: dup += 1
+        else: seen.add(key)
+    ev = sum(1 for n in ce.get("nodes",[]) if n.get("kind")=="evidence")
+    return round((dup/max(1,ev)), 3) if ev else 0.0
+
+def _q_nov(ce):
+    doms = set()
+    for n in ce.get("nodes",[]):
+        if n.get("kind")=="evidence":
+            d = (n.get("payload") or {}).get("domain")
+            if d: doms.add(d)
+    ev = sum(1 for n in ce.get("nodes",[]) if n.get("kind")=="evidence")
+    return round(len(doms)/max(1,ev), 3) if ev else 0.0
+
+def _eval(ce):
+    cov, con, dup, nov = _q_cov(ce), _q_con(ce), _q_dup(ce), _q_nov(ce)
+    score = cov*0.4 + con*0.35 + nov*0.15 + (1.0-dup)*0.10
+    return {"coverage":cov, "consistency":con, "dup_rate":dup, "novelty":nov, "ce_quality":round(score,3)}
+
+# ---------- 입력 CE 선택 ----------
+def _pick_ce():
+    if "rlsi_ce_265" in st.session_state and st.session_state["rlsi_ce_265"]:
+        return copy.deepcopy(st.session_state["rlsi_ce_265"])
+    if "rlsi_ce_262" in st.session_state and st.session_state["rlsi_ce_262"]:
+        return copy.deepcopy(st.session_state["rlsi_ce_262"])
+    # 샘플
+    claim_id = "claim:sample"
+    nodes = [
+        {"id":claim_id,"kind":"claim","payload":{"text":"검증 가능한 실데이터로 현상을 재현할 수 있다"}},
+        {"id":"evi:arxiv","kind":"evidence","payload":{"title":"arXiv paper","domain":"arxiv.org","score":0.75}},
+        {"id":"evi:nist","kind":"evidence","payload":{"title":"NIST constants","domain":"nist.gov","score":0.80}},
+        {"id":"method:eq:gw","kind":"method","payload":{"statement":"h≈ΔL/L","source":"LIGO"}}
+    ]
+    edges=[
+        {"src":"evi:arxiv","dst":claim_id,"rel":"supports"},
+        {"src":"method:eq:gw","dst":claim_id,"rel":"measured_by"}
+    ]
+    return {"nodes":nodes,"edges":edges,"digest":"sample"}
+
+base = _pick_ce()
+base_q = _eval(base)
+st.json({"base_quality": base_q})
+
+# ---------- 신뢰도 맵 준비 (세션·기본·직접입력) ----------
+DEFAULT_TRUST = {
+    "nist.gov": 0.99, "iso.org": 0.95, "arxiv.org": 0.92, "doi.org": 0.94,
+    "nature.com": 0.93, "science.org": 0.93, "patentscope.wipo.int": 0.88,
+    "github.com": 0.80, "medium.com": 0.55
+}
+if "source_trust" not in st.session_state:
+    st.session_state["source_trust"] = DEFAULT_TRUST.copy()
+
+with st.expander("🔧 출처 신뢰도 맵 편집(옵션)"):
+    raw = st.text_area("도메인→신뢰도(JSON, 0~1)", value=json.dumps(st.session_state["source_trust"], ensure_ascii=False, indent=2), height=160)
+    if st.button("신뢰도 맵 적용", key="apply_trust"):
+        try:
+            mp = json.loads(raw)
+            if isinstance(mp, dict):
+                st.session_state["source_trust"] = mp
+                st.success("신뢰도 맵 갱신")
+        except Exception as e:
+            st.error(f"적용 실패: {e}")
+
+TRUST = st.session_state["source_trust"]
+
+# ---------- 정규화 + 재가중 ----------
+_dom_re = re.compile(r"([a-z0-9\.\-]+\.[a-z]{2,})", re.I)
+
+def _infer_domain(node):
+    p = node.get("payload",{}) if isinstance(node, dict) else {}
+    if p.get("domain"): return p["domain"]
+    for k in ("url","source","title"):
+        v = p.get(k)
+        if isinstance(v,str):
+            m = _dom_re.search(v)
+            if m: return m.group(1).lower()
+    return None
+
+def _reweight(ce:Dict[str,Any], changes:List[str], floor=0.70, weight=(0.7,0.3)):
+    """ evidence.score ← clamp( base* (w0 + w1*trust(domain)) ) """
+    for n in ce.get("nodes",[]):
+        if n.get("kind")!="evidence": 
+            continue
+        p = n.setdefault("payload",{})
+        base_sc = float(p.get("score", floor))
+        dom = _infer_domain(n)
+        trust = TRUST.get(dom, 0.6 if dom else 0.5)
+        new_sc = base_sc * (weight[0] + weight[1]*trust)
+        new_sc = max(0.0, min(1.0, round(new_sc,3)))
+        if abs(new_sc - base_sc) >= 0.01:
+            p["score"] = new_sc
+            if dom: p["domain"] = dom
+            changes.append(f"reweight: {n['id']}@{dom or 'unknown'} {base_sc}→{new_sc}")
+    return ce
+
+def _dedup_nodes(ce:Dict[str,Any], changes:List[str]):
+    seen = set(); keep=[]
+    for n in ce.get("nodes",[]):
+        if n.get("kind")!="evidence": 
+            keep.append(n); continue
+        key = json.dumps(n.get("payload",{}), sort_keys=True, ensure_ascii=False)
+        if key in seen:
+            changes.append(f"drop-dup-node: {n['id']}")
+            continue
+        seen.add(key); keep.append(n)
+    ce["nodes"]=keep; 
+    return ce
+
+def _dedup_edges(ce:Dict[str,Any], changes:List[str]):
+    seen=set(); keep=[]
+    for e in ce.get("edges",[]):
+        key=(e.get("src"),e.get("dst"),e.get("rel"))
+        if key in seen:
+            changes.append(f"drop-dup-edge: {key}")
+            continue
+        seen.add(key); keep.append(e)
+    ce["edges"]=keep; 
+    return ce
+
+def _ensure_method_binding(ce:Dict[str,Any], changes:List[str]):
+    claim = next((n["id"] for n in ce.get("nodes",[]) if n.get("kind")=="claim"), None)
+    if not claim: 
+        return ce
+    has_method = any(n.get("kind")=="method" for n in ce.get("nodes",[]))
+    if not has_method:
+        m = {"id":"method:eq:gw-strain","kind":"method","payload":{"statement":"h≈ΔL/L"}}
+        ce["nodes"].append(m)
+        changes.append("add-method-node: method:eq:gw-strain")
+    # 최소 1개 measured_by 보장
+    if not any(e.get("rel")=="measured_by" and e.get("dst")==claim for e in ce.get("edges",[])):
+        mid = next((n["id"] for n in ce.get("nodes",[]) if n.get("kind")=="method"), "method:eq:gw-strain")
+        ce["edges"].append({"src":mid,"dst":claim,"rel":"measured_by"})
+        changes.append(f"bind-method: {mid} -> {claim}")
+    return ce
+
+def _normalize_order(ce:Dict[str,Any]):
+    ce["nodes"] = sorted(ce.get("nodes",[]), key=lambda n: (n.get("kind",""), n.get("id","")))
+    ce["edges"] = sorted(ce.get("edges",[]), key=lambda e: (e.get("src",""), e.get("dst",""), e.get("rel","")))
+    return ce
+
+# ---------- UI 컨트롤 ----------
+colA, colB, colC = st.columns(3)
+with colA:
+    w0 = st.slider("가중 w0", 0.0, 1.0, 0.7, 0.05)
+with colB:
+    w1 = st.slider("가중 w1", 0.0, 1.0, 0.3, 0.05)
+with colC:
+    need_sort = st.toggle("정렬 정규화", value=True)
+
+if st.button("신뢰도 재가중 + 정규화 실행", use_container_width=True, key="rlsn_run"):
+    changes: List[str] = []
+    cur = copy.deepcopy(base)
+    before = _eval(cur)
+
+    # 파이프라인
+    cur = _reweight(cur, changes, weight=(w0,w1))
+    cur = _dedup_nodes(cur, changes)
+    cur = _dedup_edges(cur, changes)
+    cur = _ensure_method_binding(cur, changes)
+    if need_sort: cur = _normalize_order(cur)
+
+    after = _eval(cur)
+    delta = round(after["ce_quality"] - before["ce_quality"], 3)
+
+    st.metric("CE-Quality (before → after)", f"{before['ce_quality']:.3f} → {after['ce_quality']:.3f}", delta=delta)
+    st.write(f"coverage: {before['coverage']:.3f} → {after['coverage']:.3f} · "
+             f"consistency: {before['consistency']:.3f} → {after['consistency']:.3f} · "
+             f"dup_rate: {before['dup_rate']:.3f} → {after['dup_rate']:.3f} · "
+             f"novelty: {before['novelty']:.3f} → {after['novelty']:.3f}")
+
+    with st.expander("변경내역(diff)", expanded=True):
+        st.code("\n".join(changes) if changes else "변경 없음", language="text")
+
+    # 세션 저장
+    st.session_state["rlsi_ce_266"] = cur
+    st.session_state["ce_quality_266"] = after
+
+    st.download_button("📥 Reweighted CE(JSON)", data=json.dumps(cur, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="CE_graph_reweighted_266.json", mime="application/json", use_container_width=True)
+    st.download_button("📥 Before/After(JSON)", data=json.dumps({"before":before,"after":after,"changes":changes}, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="CE_quality_report_266.json", mime="application/json", use_container_width=True)
+
+    # ①축 자동 가점
+    bonus = 10 if delta>=0.12 else (8 if delta>=0.08 else (6 if delta>=0.05 else (4 if delta>0 else 0)))
+    try:
+        if "spx_backbone" in st.session_state:
+            st.session_state.spx_backbone["reality"] = min(100, st.session_state.spx_backbone["reality"] + bonus)
+    except Exception:
+        pass
+    st.caption(f"현실연동 축 가점 반영: +{bonus} (사이드바/대시보드에서 확인)")
+# ───────────────────────────────────────────────
