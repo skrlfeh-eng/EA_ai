@@ -10055,3 +10055,78 @@ with st.expander("250. 리포트 & 스냅샷", True):
             file_name="M245-250_Snapshots.json",
             mime="application/json",
             key="m245p5_snap_dl")
+            
+            # ───────────────────────────────────────────────
+# [251S/251O] 스위처·오케스트라 통합 (R3/R4 + 자동배치)
+# 키 프리픽스: m251_*
+import streamlit as st, time
+
+ss = st.session_state
+if "m251_cfg" not in ss:
+    ss.m251_cfg = {
+        "mode": "OFF",      # OFF | R3 | R4
+        "auto": False,      # 자동 실행
+        "interval": 10,     # 초
+        "batch": 5,         # 한 번에 처리 크기
+        "last_run": 0.0,    # 마지막 실행 시각
+    }
+
+# ── R3/R4 러너 (245–250을 호출)
+def _run_R3(batch:int):
+    # 느슨 탐지: 큐 일부를 CE에 반영
+    moved = 0
+    for _ in range(min(batch, len(ss.m245p5_queue))):
+        it = ss.m245p5_queue.pop(0)
+        ss.m245p5_ce["facts"].append({"text": it["hit"], "meta": it["meta"], "label": ss.m245p5_cfg["label"]})
+        moved += 1
+    return {"moved": moved, "mode":"R3"}
+
+def _run_R4(batch:int):
+    # 엄격 검증: 최근 facts 일부를 검증 verdict에 추가(스텁)
+    import random
+    sample = ss.m245p5_ce["facts"][-batch:]
+    verdicts=[]
+    for f in sample:
+        v = random.choice(["pass","contradicts","needs_more"])
+        verdicts.append({"fact": f["text"], "verdict": v, "ts": time.time()})
+    ss.m245p5_ce["verdicts"].extend(verdicts)
+    return {"verified": len(verdicts), "mode":"R4"}
+
+# ── UI
+st.markdown("### 251S/251O · 스위처/오케스트라 — 자동 배치 러너")
+mode = st.radio("모드", ["OFF","R3","R4"],
+                index=["OFF","R3","R4"].index(ss.m251_cfg["mode"]),
+                key="m251_mode")
+auto = st.toggle("자동 실행", value=ss.m251_cfg["auto"], key="m251_auto")
+interval = st.slider("주기(초)", 5, 120, ss.m251_cfg["interval"], key="m251_interval")
+batch = st.number_input("배치 크기", 1, 1000, ss.m251_cfg["batch"], key="m251_batch")
+
+# 변동사항 반영
+ss.m251_cfg.update({"mode": mode, "auto": auto, "interval": interval, "batch": int(batch)})
+
+# 수동 실행 버튼
+col1,col2 = st.columns(2)
+with col1:
+    if st.button("지금 실행", key="m251_run_now"):
+        if ss.m251_cfg["mode"]=="R3":
+            res = _run_R3(ss.m251_cfg["batch"])
+        elif ss.m251_cfg["mode"]=="R4":
+            res = _run_R4(ss.m251_cfg["batch"])
+        else:
+            res = {"info":"OFF"}
+        ss.m251_cfg["last_run"]=time.time()
+        st.success(f"수동 실행 결과: {res}")
+
+with col2:
+    st.caption(f"마지막 실행: {int(time.time()-ss.m251_cfg['last_run'])}초 전")
+
+# 자동 실행(폴링, 무한루프 금지)
+if ss.m251_cfg["auto"] and ss.m251_cfg["mode"] in ("R3","R4"):
+    elapsed = time.time() - ss.m251_cfg["last_run"]
+    if elapsed >= ss.m251_cfg["interval"]:
+        if ss.m251_cfg["mode"]=="R3":
+            res = _run_R3(ss.m251_cfg["batch"])
+        else:
+            res = _run_R4(ss.m251_cfg["batch"])
+        ss.m251_cfg["last_run"]=time.time()
+        st.toast(f"[{ss.m251_cfg['mode']}] 주기 실행 완료 · {res}", icon="⏱️")
