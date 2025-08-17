@@ -10130,3 +10130,155 @@ if ss.m251_cfg["auto"] and ss.m251_cfg["mode"] in ("R3","R4"):
             res = _run_R4(ss.m251_cfg["batch"])
         ss.m251_cfg["last_run"]=time.time()
         st.toast(f"[{ss.m251_cfg['mode']}] 주기 실행 완료 · {res}", icon="⏱️")
+        
+        # ─────────────────────────────────────────────────────────
+# [252] 우주정보장 연동: 증거/반례 큐 파이프라인 (Backbone v1)
+# 기능: 증거/HIT 수집 → 간이 검증(stub) → CE-Graph 반영(stub) → 로그/스냅샷
+# 충돌 방지: 모든 key는 m252_* 사용
+import streamlit as st, json, time, uuid
+from datetime import datetime
+
+# 안전가드: 헬퍼 없는 환경에서도 동작
+if "register_module" not in globals():
+    def register_module(num, name, desc): 
+        st.markdown(f"### **[{num}] {name}**")
+        st.caption(desc)
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle=""):
+        st.markdown(f"**[{num}] {title}**")
+        if subtitle: st.caption(subtitle)
+
+register_module("252", "우주정보장 연동: 증거/반례 큐 파이프라인", "수집→검증→CE-Graph 반영 · 스냅샷")
+
+# ── 세션 상태 초기화
+ss = st.session_state
+if "m252_q" not in ss:          # 대기 큐
+    ss.m252_q = []
+if "m252_log" not in ss:        # 처리 로그
+    ss.m252_log = []
+if "m252_cfg" not in ss:        # 기본 설정
+    ss.m252_cfg = {"auto_pull": False, "batch": 5, "max_ms": 1500}
+
+# ── 간이 검증/반영 Stub (뼈대)
+def _m252_validate(hit: dict) -> dict:
+    """
+    초검증 뼈대: 최소 스키마 확인 + 간단 정합성 체크
+    return: {"ok": bool, "reason": str, "contra": bool}
+    """
+    fields = ["source", "claim", "evidence", "ts"]
+    missing = [f for f in fields if f not in hit]
+    if missing:
+        return {"ok": False, "reason": f"missing:{missing}", "contra": False}
+    # 극단적 모순 문자열 감지(예시): "not", "contradicts"
+    s = (hit.get("claim","") + " " + hit.get("evidence","")).lower()
+    contra = any(tok in s for tok in ["contradict", "모순", "반박"])
+    return {"ok": True, "reason": "basic-pass", "contra": contra}
+
+def _m252_ce_ingest(hit: dict, verdict: dict) -> bool:
+    """
+    CE-Graph 반영 Stub: 실제 연동 전까지는 책갈피만 남김.
+    나중에 CE 클라이언트 연결 시 여기만 바꾸면 됨.
+    """
+    # NOTE: 실제 구현 시 여기서 그래프 노드/엣지 생성
+    return True
+
+def _m252_enqueue(hit: dict):
+    hit = dict(hit)
+    if "id" not in hit:
+        hit["id"] = str(uuid.uuid4())
+    if "ts" not in hit:
+        hit["ts"] = datetime.utcnow().isoformat() + "Z"
+    ss.m252_q.append(hit)
+
+def _m252_process_once():
+    if not ss.m252_q: 
+        return None
+    hit = ss.m252_q.pop(0)
+    verdict = _m252_validate(hit)
+    ok = verdict["ok"] and _m252_ce_ingest(hit, verdict)
+    rec = {
+        "id": hit["id"],
+        "ok": bool(ok),
+        "contra": bool(verdict.get("contra", False)),
+        "reason": verdict.get("reason",""),
+        "ts_proc": datetime.utcnow().isoformat()+"Z",
+        "hit": hit,
+    }
+    ss.m252_log.append(rec)
+    return rec
+
+# ── UI: 입력/큐/처리
+gray_line("252", "입력/큐 관리", "수동 입력 또는 프로그램적 주입")
+
+with st.expander("➕ 수동 입력(간단 폼)", expanded=False):
+    colA, colB = st.columns(2)
+    with colA:
+        src = st.text_input("source(출처)", key="m252_src", placeholder="R4-run, user, sensor ...")
+        claim = st.text_area("claim(주장)", key="m252_claim", height=80)
+    with colB:
+        evid = st.text_area("evidence(증거 요약/포인터)", key="m252_evid", height=80)
+        tag = st.text_input("tag(선택)", key="m252_tag", placeholder="r4,manual,probe")
+    if st.button("큐에 추가", key="m252_add"):
+        if src and claim and evid:
+            _m252_enqueue({"source": src, "claim": claim, "evidence": evid, "tag": tag})
+            st.success("큐에 추가됨")
+        else:
+            st.warning("source/claim/evidence를 모두 입력하세요.")
+
+with st.expander("📦 큐 현황 / 조작", expanded=True):
+    st.write(f"대기 큐: **{len(ss.m252_q)}** 건")
+    if ss.m252_q:
+        st.json(ss.m252_q[:20])
+    colQ1, colQ2, colQ3 = st.columns(3)
+    with colQ1:
+        if st.button("1건 처리", key="m252_do1"):
+            r = _m252_process_once()
+            st.info("처리결과: " + json.dumps(r, ensure_ascii=False) if r else "큐가 비어있음")
+    with colQ2:
+        n = st.number_input("N건 처리", 1, 100, value=ss.m252_cfg["batch"], key="m252_n")
+        if st.button("N건 처리 실행", key="m252_doN"):
+            done = 0
+            start = time.time()
+            for _ in range(int(n)):
+                r = _m252_process_once()
+                if not r: break
+                done += 1
+                if (time.time()-start)*1000 > ss.m252_cfg["max_ms"]:
+                    break
+            st.success(f"처리 {done}건 완료")
+    with colQ3:
+        if st.button("큐 비우기", key="m252_clear"):
+            ss.m252_q.clear()
+            st.warning("큐 초기화 완료")
+
+# ── 로그/스냅샷
+gray_line("252", "처리 로그 / 스냅샷", "검증/반영 이력 확인 및 다운로드")
+st.write(f"총 로그: **{len(ss.m252_log)}** 건")
+if ss.m252_log:
+    st.json(ss.m252_log[-10:])  # 최근 10건
+colL1, colL2 = st.columns(2)
+with colL1:
+    if st.button("로그 비우기", key="m252_log_clear"):
+        ss.m252_log.clear()
+        st.warning("로그 초기화")
+with colL2:
+    st.download_button(
+        "로그 JSON 다운로드",
+        data=json.dumps(ss.m252_log, ensure_ascii=False, indent=2).encode("utf-8"),
+        file_name="m252_logs.json",
+        mime="application/json",
+        key="m252_dl",
+    )
+
+# ── 설정
+gray_line("252", "설정", "나중에 오케스트라와 연결 시 이 값을 사용")
+colC1, colC2, colC3 = st.columns(3)
+with colC1:
+    ss.m252_cfg["auto_pull"] = st.toggle("외부 자동 Pull 허용(향후)", value=ss.m252_cfg["auto_pull"], key="m252_auto")
+with colC2:
+    ss.m252_cfg["batch"] = st.number_input("기본 배치 크기", 1, 100, value=ss.m252_cfg["batch"], key="m252_batch")
+with colC3:
+    ss.m252_cfg["max_ms"] = st.number_input("최대 처리시간(ms)", 200, 5000, value=ss.m252_cfg["max_ms"], step=100, key="m252_ms")
+
+st.caption(f"UTC {datetime.utcnow().isoformat()}Z · queue={len(ss.m252_q)} · logs={len(ss.m252_log)}")
+# ─────────────────────────────────────────────────────────
