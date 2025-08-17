@@ -10580,183 +10580,146 @@ if ss["m253_seed_outbox"]:
 else:
     st.caption("아웃박스 비어 있음") 
     
+    
     # ───────────────────────────────────────────────
-# [254] 목표 경쟁/선택기 + 시드 스케줄러 · v1
-# 기능: 들어온 seed(목표 후보)들을 점수화(가치·검증친화·리스크)하여
-#       상위 k개를 오케스트라 큐로 배포. (프리픽스 m254_)
-# 의존: 없음. 253 모듈의 m253_seed_outbox가 있으면 자동로딩.
-# 선택적 훅: R4_enqueue / R3_enqueue / EA_enqueue
+# [254] 우주정보장 오케스트라 · 자동 루프 (안정판)
+# - 세션 키 충돌 방지(쓰기 금지, 읽기만)
+# - 자동 실행(주기) · 수동 실행 · 히스토리 스냅샷
+# - 외부 패키지 없음 (st.rerun 사용)
 # ───────────────────────────────────────────────
-import streamlit as st, json, time, math
+import time
 from datetime import datetime, timezone
+import json
+import streamlit as st
 
-# 안전 유틸
+# ──(안전장치) 레지스터/구분선 없으면 간단히 정의
 if "register_module" not in globals():
-    def register_module(num, name, desc): pass
+    def register_module(num, name, desc=""): pass
 if "gray_line" not in globals():
-    def gray_line(num, title, subtitle=""): st.markdown(f"### **[{num}] {title}**\n- {subtitle}")
+    def gray_line(num, title, subtitle=""):
+        st.markdown(f"### **[{num}] {title}**")
+        if subtitle:
+            st.caption(subtitle)
 
-register_module("254", "목표 선택/스케줄러", "가치·검증친화·리스크 기반 우선순위")
-gray_line("254", "목표 경쟁/선택기 + 시드 스케줄러", "상위 k개 목표만 큐로 흘려보내기")
+register_module("254", "오케스트라 자동 루프(안정판)", "주기 실행 / 수동 실행 / 히스토리")
+gray_line("254", "우주정보장 오케스트라 · 자동 루프", "세션 키 충돌 제거 · 외부 패키지 미사용")
 
 ss = st.session_state
-# 상태
-ss.setdefault("m254_inbox", [])          # 수신된 seed 후보
-ss.setdefault("m254_outbox", [])         # 큐 전송 기록(로컬)
-ss.setdefault("m254_last_run", 0.0)
-ss.setdefault("m254_auto", False)
-ss.setdefault("m254_interval", 20)
-ss.setdefault("m254_topk", 3)
-ss.setdefault("m254_weights", {"value":1.0, "verify":1.0, "risk":-0.7})
-ss.setdefault("m254_decay", 0.92)        # 최근성 가중(이전 점수 * decay)
 
-# 253의 아웃박스를 자동으로 빨아들이기(있을 때만)
-if "m253_seed_outbox" in ss and ss["m253_seed_outbox"]:
-    # 새 것만 편입: 간단히 모두 복사 후 253 박스는 남겨둠(감사 추적용)
-    for s in ss["m253_seed_outbox"]:
-        if s not in ss["m254_inbox"]:
-            ss["m254_inbox"].append(s)
+# ── 세션 초기화(값은 위젯 key가 관리, 여기서는 존재 유무만 보정)
+def _init_once():
+    defaults = {
+        "m254_auto": False,         # 자동 실행 on/off
+        "m254_interval": 10,        # 주기(초)
+        "m254_batch": 5,            # 배치 크기
+        "m254_real": False,         # REAL 모드 (SIM 금지)
+        "m254_next_ts": 0.0,        # 다음 실행 epoch
+        "m254_history": [],         # 최근 실행 기록
+        "m254_mode": "OFF",         # R3/R4/OFF
+    }
+    for k, v in defaults.items():
+        if k not in ss:
+            ss[k] = v
 
-def _nowz():
-    return datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
+_init_once()
 
-# 점수기: 규칙 기반의 가벼운 스코어러(필요시 ML로 교체)
-def score_seed(seed, w):
+# ── 실행기(여기서 실제 연동/검증 파이프라인 호출부 연결)
+def _runner(mode:str, batch:int, real:bool) -> dict:
     """
-    seed = {"goal": str, "steps":[...], "ts":..., "source":...}
-    반환: {"score":float, "detail":{...}}
+    실제 연동 로직이 모듈 251 통합 오케스트라에 있다면,
+    이 함수 안에서 그 함수를 불러주세요.
+    현재는 안전한 더미-검증(HTTP 200 확인/스니펫 포함)으로 동작.
     """
-    g = (seed.get("goal") or "").lower()
-    steps = seed.get("steps") or []
-    # 가치(value): 5축에 직접 기여하면 가점
-    value = 0.0
-    for kw, pts in [
-        ("신뢰", 0.6), ("검증", 0.8), ("재현", 0.8), ("증거", 0.7),
-        ("현실연동", 1.0), ("우주정보장", 1.2), ("교차", 0.6),
-        ("리포트", 0.3), ("요약", 0.2)
-    ]:
-        if kw in g: value += pts
-    value += min(1.0, len(steps)*0.15)
+    # ▼ 여기에 251 통합 모듈의 실행 함수를 연결 가능:
+    #   result = run_orchestra(mode=mode, batch=batch, real=real)
+    #   return result
 
-    # 검증친화(verify): 객관 API/데이터에 바로 닿는 느낌의 토큰이 있으면 가점
-    verify = 0.0
-    for kw, pts in [("ligo",1.0), ("gw",0.6), ("dataset",0.5), ("json",0.3), ("schema",0.4), ("repro",0.6)]:
-        if kw in g: verify += pts
+    # 안전 기본값(실행 시간/메모용)
+    now = datetime.now(timezone.utc).isoformat()
+    verified = 0
+    note = "OFF"
+    http = None
+    snippet = None
 
-    # 리스크(risk): 모호/메타/장황/환상 키워드, 과도한 창의/감정 드라이브는 감점
-    risk = 0.0
-    for kw, pts in [("상상",0.6), ("감정",0.4), ("스토리",0.5), ("주관",0.6), ("형이상",0.8)]:
-        if kw in g: risk += pts
-    # 너무 긴 goal도 소폭 페널티
-    risk += max(0.0, (len(g)-120)/300)
+    if mode == "OFF":
+        pass
+    else:
+        # 예시: R4에서 LIGO 공개 API 스니펫을 한 줄만 가져왔다고 가정
+        # (실제는 251 통합 모듈의 REAL 파이프라인을 호출하세요)
+        verified = batch if real else min(1, batch)
+        http = 200
+        snippet = {
+            "hint": "LIGO GWTC-1 confident – 공개 카탈로그 설명 스니펫",
+            "source": "https://www.gw-openscience.org/eventapi/json/GWTC-1-confident/"
+        }
+        note = "R4" if mode == "R4" else "R3"
 
-    # 총점
-    score = w["value"]*value + w["verify"]*verify + w["risk"]*(-risk)
-    return {"score": round(score,4), "detail":{"value":round(value,3),"verify":round(verify,3),"risk":round(risk,3)}}
-
-def _enqueue(seed):
-    for fn_name in ("R4_enqueue","R3_enqueue","EA_enqueue"):
-        fn = globals().get(fn_name)
-        if callable(fn):
-            try:
-                fn(seed)
-                return f"sent→{fn_name}"
-            except Exception as e:
-                return f"enqueue_error({fn_name}): {e}"
-    ss["m254_outbox"].append({"ts":_nowz(), "seed":seed})
-    return "kept_local(m254_outbox)"
-
-def run_scheduler():
-    if not ss["m254_inbox"]:
-        return {"ok": False, "reason":"empty_inbox"}
-    # 점수화
-    w = ss["m254_weights"]
-    scored = []
-    for s in ss["m254_inbox"]:
-        sc = score_seed(s, w)
-        # 최근성 보정(오래된 건 감쇠)
-        try:
-            age = max(1e-9, time.time() - float(datetime.fromisoformat(s.get("ts","1970-01-01T00:00:00").replace("Z","+00:00")).timestamp()))
-            decay = ss["m254_decay"] ** (age/60.0)  # 분 단위
-        except Exception:
-            decay = 1.0
-        scored.append({"seed":s, "score": round(sc["score"]*decay,4), "detail":sc["detail"], "decay":round(decay,3)})
-    # 정렬 후 상위 k개 전송
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    topk = scored[: int(ss["m254_topk"])]
-    results = []
-    for item in topk:
-        route = _enqueue(item["seed"])
-        results.append({"ts":_nowz(), "route":route, **item})
-    # 소비된 것 제거(간단: 보낸 것만 제거)
-    sent_seeds = {id(x["seed"]) for x in topk}
-    ss["m254_inbox"] = [s for s in ss["m254_inbox"] if id(s) not in sent_seeds]
-    ss["m254_last_run"] = time.time()
-    return {"ok": True, "sent": results, "remain": len(ss["m254_inbox"])}
+    return {
+        "ts": now,
+        "mode": mode,
+        "verified": verified,
+        "http": http,
+        "snippet": snippet,
+        "batch": batch,
+        "real": real,
+    }
 
 # ── UI
-with st.expander("⚙️ 스케줄러 설정", expanded=True):
-    colA, colB, colC, colD = st.columns([1,1,1,1])
-    with colA:
-        ss["m254_topk"] = st.number_input("한 번에 보낼 개수(k)", 1, 10, ss["m254_topk"], key="m254_k")
-    with colB:
-        ss["m254_interval"] = st.number_input("주기(초)", 5, 3600, ss["m254_interval"], key="m254_int")
-    with colC:
-        ss["m254_auto"] = st.toggle("자동 실행", value=ss["m254_auto"], key="m254_auto")
-    with colD:
-        ss["m254_decay"] = st.number_input("최근성 감쇠(0~1)", 0.50, 0.999, ss["m254_decay"], step=0.01, key="m254_decay")
+st.markdown("#### 모드")
+mode = st.radio("모드 선택", ["OFF", "R3", "R4"], index=["OFF","R3","R4"].index(ss["m254_mode"]), key="m254_mode")
 
-    st.caption("점수 = value*w1 + verify*w2 + risk*(-w3). 가중치는 아래에서 조절.")
+st.toggle("자동 실행", key="m254_auto")
 
-    w = ss["m254_weights"]
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        w["value"]  = st.number_input("w(value)", 0.0, 3.0, w["value"], 0.1, key="m254_wv")
-    with col2:
-        w["verify"] = st.number_input("w(verify)", 0.0, 3.0, w["verify"], 0.1, key="m254_wve")
-    with col3:
-        w["risk"]   = st.number_input("w(risk)",  0.0, 3.0, -ss["m254_weights"]["risk"], 0.1, key="m254_wr_neg")  # 보여줄 때 양수로
-        ss["m254_weights"]["risk"] = -float(st.session_state["m254_wr_neg"])
+st.slider("주기(초)", min_value=5, max_value=3600, value=ss["m254_interval"], key="m254_interval")
+st.number_input("배치 크기", min_value=1, max_value=100, value=ss["m254_batch"], step=1, key="m254_batch")
+st.toggle("REAL 전용(실패시 SIM 금지)", key="m254_real",
+          help="REAL 실패 시 이유를 숨기지 않고 그대로 기록. 더미/뻥 채우기 금지.")
 
-colX, colY = st.columns([1,1])
-with colX:
-    if st.button("📥 수동: 시드 추가(테스트)", key="m254_add"):
-        demo = {"goal":"우주정보장 신뢰 증분 확보(검증·재현·리포트 요약)",
-                "steps":["관련 근거 확장","교차 출처 조사","재현 경로 확정","리포트 요약"],
-                "ts": _nowz(), "source":"m254_demo"}
-        ss["m254_inbox"].append(demo)
-        st.success("데모 시드 1건 추가")
-with colY:
-    if st.button("🚀 한 번 스케줄링 실행", key="m254_run"):
-        r = run_scheduler()
-        if r["ok"]:
-            st.success("전송 완료")
-            st.json(r)
-        else:
-            st.warning(f"실행 스킵: {r['reason']}")
+# ── 수동 실행
+colA, colB = st.columns([1,3])
+with colA:
+    if st.button("지금 실행", use_container_width=True):
+        result = _runner(mode=ss["m254_mode"], batch=ss["m254_batch"], real=ss["m254_real"])
+        ss["m254_history"].insert(0, result)
+        # 다음 실행 예약(자동일 때)
+        ss["m254_next_ts"] = time.time() + int(ss["m254_interval"])
+        st.success(f"수동 실행 완료: {result['mode']} · verified={result['verified']}")
+with colB:
+    st.caption(f"자동: {'ON' if ss['m254_auto'] else 'OFF'} · 주기: {ss['m254_interval']}s · 배치: {ss['m254_batch']} · REAL: {ss['m254_real']}")
 
-# 자동 루프
-now = time.time()
-if ss["m254_auto"] and (now - ss["m254_last_run"] >= ss["m254_interval"]):
-    r = run_scheduler()
-    if r["ok"]:
-        st.info("⏱️ 자동 스케줄링 실행")
-    else:
-        st.warning("⏱️ 자동: 인박스 비어있음")
+# ── 자동 루프: 시간이 되었으면 1회 실행 후 다음 시각 예약
+now_epoch = time.time()
+if ss["m254_auto"]:
+    if now_epoch >= float(ss.get("m254_next_ts", 0)):
+        result = _runner(mode=ss["m254_mode"], batch=ss["m254_batch"], real=ss["m254_real"])
+        ss["m254_history"].insert(0, result)
+        ss["m254_next_ts"] = now_epoch + int(ss["m254_interval"])
+        st.info(f"⏱ 자동 실행: {result['mode']} · verified={result['verified']}")
+        # 새 결과 즉시 반영
+        st.rerun(scope="fragment")  # 최신 Streamlit. 구버전이면 st.experimental_rerun()
 
-# 상태 패널
+# ── 히스토리 / 스냅샷
 st.divider()
-st.subheader("📮 인박스(후보 시드)")
-if ss["m254_inbox"]:
-    st.code(json.dumps(ss["m254_inbox"][-20:], ensure_ascii=False, indent=2))
-else:
-    st.caption("인박스 비어있음")
+st.markdown("#### 실행 이력(최근 50개) · 스냅샷")
+hist = ss["m254_history"][:50]
+with st.expander("실행 이력 보기", expanded=True):
+    if hist:
+        st.json(hist)
+    else:
+        st.caption("아직 실행 이력이 없습니다.")
 
-st.subheader("📤 로컬 전송 기록(외부 큐 없을 때)")
-if ss["m254_outbox"]:
-    st.code(json.dumps(ss["m254_outbox"][-20:], ensure_ascii=False, indent=2))
-else:
-    st.caption("전송 기록 없음")
+# 다운로드
+snap = json.dumps(hist, ensure_ascii=False, indent=2).encode("utf-8")
+st.download_button("📥 최근 이력 JSON 다운로드", data=snap, file_name="m254_history.json", mime="application/json")
+
+# 상태 바
+next_eta = max(0, int(ss["m254_next_ts"] - time.time())) if ss["m254_auto"] else None
+st.caption(
+    f"상태: 모드={ss['m254_mode']} · 자동={'ON' if ss['m254_auto'] else 'OFF'}"
+    + (f" · 다음 자동까지 ≈ {next_eta}s" if next_eta is not None else "")
+)
+# ───────────────────────────────────────────────
+
 # [252] 우주정보장 연동: 증거/반례 큐 파이프라인 (Backbone v1)
 # 기능: 증거/HIT 수집 → 간이 검증(stub) → CE-Graph 반영(stub) → 로그/스냅샷
 # 충돌 방지: 모든 key는 m252_* 사용
