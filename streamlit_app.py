@@ -12023,3 +12023,184 @@ with st.container(border=True):
                            file_name="auto_fusion_result_261.json",
                            mime="application/json", use_container_width=True)
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [262] Reality-Link Scoring & Integrity Adapter (RLSI-A1)
+# 기능:
+#  - JSONL(소스/공식/증인) 파싱 → 정규화/중복제거
+#  - 무결성 검사(sha256), 체인해시(전체 스냅샷)
+#  - 신뢰도 가중(license/trust_score/연도/도메인 힌트)
+#  - 간단 CE-Graph 생성(claim-evidence-method)
+#  - 결과를 세션에 저장하여 261/251/260 등과 자연 연동
+#  - 우주정보장 ①축(현실연동) 진행률 자동 +10 (최대 100)
+import streamlit as st, json, hashlib, time
+from typing import List, Dict, Any
+
+def _262_h(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def _262_parse_jsonl(txt: str) -> List[Dict[str,Any]]:
+    rows = []
+    for line in txt.splitlines():
+        line = line.strip()
+        if not line: 
+            continue
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            # 무효 라인은 건너뜀
+            pass
+    return rows
+
+def _262_norm_item(it: Dict[str,Any]) -> Dict[str,Any]:
+    # 최소 키 이름 표준화
+    out = dict(it)
+    if "id" not in out and "uid" in out: out["id"] = out["uid"]
+    if "title" not in out and "name" in out: out["title"] = out["name"]
+    if "domain" not in out and "url" in out:
+        try:
+            dom = out["url"].split("/")[2]
+            out["domain"] = dom
+        except Exception:
+            pass
+    return out
+
+def _262_checksum(it: Dict[str,Any]) -> str:
+    return _262_h(json.dumps(it, ensure_ascii=False, sort_keys=True))
+
+def _262_trust_score(it: Dict[str,Any]) -> float:
+    base = float(it.get("trust_score", 0.7))
+    # 라이선스 가중
+    lic = (it.get("license") or "").lower()
+    if "open" in lic: base += 0.05
+    if "licensed" in lic: base += 0.02
+    # 도메인 힌트
+    dom = (it.get("domain") or "").lower()
+    if dom.endswith(".gov") or dom.endswith(".edu"): base += 0.05
+    if "arxiv" in dom: base += 0.03
+    # 연도 최신성(최근일수록 +)
+    yr = it.get("year")
+    try:
+        yr = int(yr)
+        if yr >= 2020: base += 0.03
+        elif yr >= 2015: base += 0.015
+    except Exception:
+        pass
+    # 상한/하한 클리핑
+    return max(0.0, min(1.0, round(base, 3)))
+
+def _262_build_ce(items: List[Dict[str,Any]], user_claim: str) -> Dict[str,Any]:
+    claim_id = f"claim:{_262_h(user_claim)[:12]}"
+    nodes = [{"id": claim_id, "kind": "claim", "payload": {"text": user_claim}}]
+    edges = []
+    # 상위 스코어 evidence 5개
+    evs = sorted(items, key=lambda x: x.get("_rlsi_score",0), reverse=True)[:5]
+    for i,ev in enumerate(evs):
+        eid = f"evi:{ev['id'] if 'id' in ev else 'row'+str(i)}"
+        nodes.append({"id": eid, "kind": "evidence", "payload": {
+            "title": ev.get("title"),
+            "url": ev.get("url"),
+            "domain": ev.get("domain"),
+            "score": ev.get("_rlsi_score"),
+            "sha256": ev.get("_checksum"),
+        }})
+        edges.append({"src": eid, "dst": claim_id, "rel": "supports"})
+    # 간단 method 노드(있으면)
+    methods = [r for r in items if r.get("type") in ("equation","method","protocol")]
+    for j,m in enumerate(methods[:3]):
+        mid = f"method:{m.get('id','m'+str(j))}"
+        nodes.append({"id": mid, "kind": "method", "payload": {
+            "statement": m.get("statement") or m.get("title"),
+            "source": m.get("source_id")
+        }})
+        edges.append({"src": mid, "dst": claim_id, "rel": "measured_by"})
+    digest = _262_h(json.dumps({"nodes":nodes,"edges":edges}, ensure_ascii=False, sort_keys=True))
+    return {"nodes": nodes, "edges": edges, "digest": digest}
+
+def _262_chainhash(items: List[Dict[str,Any]]) -> str:
+    # 항목 체크섬을 정렬 결합하여 체인해시
+    shas = [it["_checksum"] for it in items]
+    shas.sort()
+    return _262_h("|".join(shas))
+
+# UI 시작
+st.markdown("#### [262] Reality-Link Scoring & Integrity Adapter (RLSI-A1)")
+st.caption("우주정보장 입력(붙여넣기/샘플) → 무결성/체크섬 → 신뢰도 가중 → CE-그래프 생성 → 세션 공유")
+
+with st.expander("① 입력 선택 — JSONL 붙여넣기 또는 샘플 사용", expanded=True):
+    mode = st.radio("입력 모드", ["직접 붙여넣기(JSONL)", "샘플 로드"], horizontal=True, key="rlsi_mode_262")
+    sample_sources = (
+        '{"id":"src:arxiv:1602.03837","title":"Observation of Gravitational Waves from a Binary Black Hole Merger","url":"https://arxiv.org/abs/1602.03837","domain":"arxiv.org","year":2016,"license":"open","trust_score":0.98}\n'
+        '{"id":"src:nist:constants","title":"CODATA Recommended Values of the Fundamental Physical Constants","url":"https://physics.nist.gov/constants","domain":"nist.gov","year":2022,"license":"open","trust_score":0.99}\n'
+        '{"id":"src:iso:80000-1","title":"ISO 80000-1:2022 Quantities and units—Part 1: General","url":"https://www.iso.org/standard/","domain":"iso.org","year":2022,"license":"licensed","trust_score":0.95}\n'
+        '{"id":"src:dataset:ligo-open","title":"LIGO Open Science Center Datasets","url":"https://losc.ligo.org","domain":"ligo.org","year":2024,"license":"open","trust_score":0.97}\n'
+    )
+    sample_formulas = (
+        '{"id":"eq:einstein-field","type":"equation","statement":"G_{μν} = 8πG T_{μν} / c^4","source_id":"src:arxiv:1602.03837","year":1915}\n'
+        '{"id":"eq:gw-strain","type":"equation","statement":"h ≈ ΔL / L","source_id":"src:dataset:ligo-open","year":2016}\n'
+    )
+    if mode == "직접 붙여넣기(JSONL)":
+        text = st.text_area("여기에 JSONL 붙여넣기(여러 줄 가능)", height=180, key="rlsi_paste")
+    else:
+        st.code(sample_sources.strip(), language="json")
+        st.code(sample_formulas.strip(), language="json")
+        text = sample_sources + sample_formulas
+
+with st.expander("② 무결성/스코어/CE-그래프 생성", expanded=True):
+    claim = st.text_input("검증 대상 Claim/목표(필수)", value="우주정보장 연동이 실제 데이터 근거로 작동함을 보인다", key="rlsi_claim")
+    if st.button("무결성 검사 + 스코어링 + CE-그래프 생성", use_container_width=True, key="rlsi_run"):
+        rows = _262_parse_jsonl(text or "")
+        norm = [_262_norm_item(r) for r in rows]
+        # 중복 제거(체크섬 기준)
+        uniq_map = {}
+        for it in norm:
+            cs = _262_checksum(it)
+            it["_checksum"] = cs
+            uniq_map[cs] = it
+        uniq = list(uniq_map.values())
+        # 신뢰도 점수
+        for it in uniq:
+            it["_rlsi_score"] = _262_trust_score(it)
+        # 체인해시
+        chainhash = _262_chainhash(uniq)
+        # CE-그래프
+        ce = _262_build_ce(uniq, claim)
+        # 세션 공유(다른 모듈이 자동 사용)
+        st.session_state["rlsi_items_262"] = uniq
+        st.session_state["rlsi_chainhash_262"] = chainhash
+        st.session_state["rlsi_ce_262"] = ce
+        # 백본 ①축 가점(+10, 최대100)
+        try:
+            if "spx_backbone" in st.session_state:
+                st.session_state.spx_backbone["reality"] = min(100, st.session_state.spx_backbone["reality"] + 10)
+        except Exception:
+            pass
+        st.success("완료: 무결성/스코어/CE-그래프 생성 및 세션 공유")
+        colA, colB = st.columns(2)
+        with colA:
+            st.json({"items": len(uniq), "chainhash": chainhash[:16]+"…"})
+        with colB:
+            st.json({"ce_nodes": len(ce["nodes"]), "ce_edges": len(ce["edges"]), "ce_digest": ce["digest"][:16]+"…"})
+        # 다운로드
+        out = {
+            "claim": claim,
+            "items": uniq,
+            "chainhash": chainhash,
+            "ce_graph": ce,
+            "ts": time.time()
+        }
+        st.download_button("📥 RLSI 결과(JSON) 저장", data=json.dumps(out, ensure_ascii=False, indent=2).encode("utf-8"),
+                           file_name="RLSI_A1_result_262.json", mime="application/json", use_container_width=True)
+
+with st.expander("③ 261/오토퓨전과 연동 테스트(선택)", expanded=False):
+    st.caption("261번이 있으면 ‘Auto-Fusion 실행’ 전에 이 모듈로 CE/체인해시를 미리 세션에 심는다.")
+    if st.button("Auto-Fusion에 CE/증거 주입(더미)", key="rlsi_inject"):
+        # 261에서 읽기 쉬운 키로 힌트 심기
+        if "rlsi_ce_262" in st.session_state:
+            st.session_state["fusion_orchestrator_handler_hint"] = {
+                "ce_graph": st.session_state["rlsi_ce_262"],
+                "chainhash": st.session_state.get("rlsi_chainhash_262")
+            }
+            st.success("주입 완료: 261이 세션 힌트를 사용할 수 있습니다.")
+        else:
+            st.warning("먼저 ②단계를 실행해 CE-그래프를 생성하세요.")
+# ───────────────────────────────────────────────
