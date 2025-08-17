@@ -9911,354 +9911,263 @@ if st.button("반례사냥 실행", key="adv244_run"):
         ok, msg = True, "게이트 확인 중 예외 → 코어로 진행"
     st.caption(f"Gate: {msg}")
 
-# ───────────────────────────────────────────────
-# ───────────────────────────────────────────────
-# [245–250 Reset v5] CE-HIT & 검증 통합 (No-Dup, label [v5], key m245p5_*)
-# 원인: 245 블록의 잔여 위젯이 246 입력들과 충돌 → 전 구간 리셋
-import streamlit as st, time, json
-from datetime import datetime
-
-# 안전장치(없으면 no-op)
-if "register_module" not in globals():
-    def register_module(num,name,desc): pass
-if "gray_line" not in globals():
-    def gray_line(num,title,subtitle):
-        st.markdown(f"**[{num}] {title}** — {subtitle}")
-
-# ===== 245. CE-Graph 기본 설정/게이트 [v5] =====
-register_module("245-v5", "CE-Graph 기본설정/게이트", "입력 정책/라벨/간선타입 제어")
-gray_line("245-v5", "CE-Graph 설정", "라벨/간선타입/정책 토글(충돌 방지용) [v5]")
-
-if "m245p5_cfg" not in st.session_state:
-    st.session_state.m245p5_cfg = {
-        "default_edge": "contradicts",
-        "allow_auto_add": False,
-        "label_prefix": "CE",
-    }
-
-c1,c2,c3 = st.columns(3)
-with c1:
-    st.session_state.m245p5_cfg["default_edge"] = st.selectbox(
-        "기본 간선 타입 [v5]", ["contradicts","supports","refutes","relates"],
-        index=["contradicts","supports","refutes","relates"].index(st.session_state.m245p5_cfg["default_edge"]),
-        key="m245p5_edge")
-with c2:
-    st.session_state.m245p5_cfg["allow_auto_add"] = st.toggle(
-        "적재 시 자동 그래프추가 허용 [v5]", value=st.session_state.m245p5_cfg["allow_auto_add"],
-        key="m245p5_auto")
-with c3:
-    st.session_state.m245p5_cfg["label_prefix"] = st.text_input(
-        "노드 라벨 프리픽스 [v5]", st.session_state.m245p5_cfg["label_prefix"], key="m245p5_labelpre")
-
-st.caption(f"설정: {st.session_state.m245p5_cfg}")
-
-# 공용 큐(기존 잔여와 호환되는 이름 우선)
-_qkey = "hit_queue" if "hit_queue" in st.session_state else ("ce_hit_queue" if "ce_hit_queue" in st.session_state else "hit_queue")
-if _qkey not in st.session_state:
-    st.session_state[_qkey] = []
-
-# ===== 246. HIT 작성 [v5] =====
-with st.expander("🧱 246. HIT 작성 [v5]", expanded=True):
-    claim = st.text_area("주장(Claim) [v5]", key="m245p5_claim")
-    evid = st.text_area("증거 요약(Evidence) [v5]", key="m245p5_evi")
-    pass_cons = st.number_input("PASS 제약 개수 [v5]", 0, 999, 1, 1, key="m245p5_pass")
-    fail_cons = st.number_input("FAIL 제약 개수 [v5]", 0, 999, 0, 1, key="m245p5_fail")
-    conf = st.slider("신뢰도(0.0~1.0) [v5]", 0.0, 1.0, 0.70, 0.01, key="m245p5_conf")
-    src = st.text_input("출처/근거 링크(선택) [v5]", key="m245p5_src")
-    add_to_graph = st.checkbox(
-        f"CE-Graph에 '{st.session_state.m245p5_cfg['default_edge']}' 간선으로 추가 [v5]",
-        value=st.session_state.m245p5_cfg["allow_auto_add"], key="m245p5_add")
-
-    cA,cB = st.columns(2)
-    with cA:
-        if st.button("HIT 큐에 적재 [v5]", key="m245p5_push"):
-            st.session_state[_qkey].append({
-                "id": f"HIT-{int(time.time()*1000)}",
-                "ts": datetime.utcnow().isoformat()+"Z",
-                "claim": (claim or "").strip(),
-                "evidence": (evid or "").strip(),
-                "pass_cons": int(pass_cons),
-                "fail_cons": int(fail_cons),
-                "confidence": float(conf),
-                "source": (src or "").strip(),
-                "edge": st.session_state.m245p5_cfg["default_edge"],
-                "label_prefix": st.session_state.m245p5_cfg["label_prefix"],
-                "add_to_graph": bool(add_to_graph),
-            })
-            st.success(f"적재 완료: {_qkey} size = {len(st.session_state[_qkey])}")
-    with cB:
-        if st.button("작성 입력 초기화 [v5]", key="m245p5_reset"):
-            for k in ("m245p5_claim","m245p5_evi","m245p5_pass","m245p5_fail","m245p5_conf","m245p5_src","m245p5_add"):
-                st.session_state.pop(k, None)
-            st.experimental_rerun()
-
-# ===== 247. 큐 미리보기/관리 [v5] =====
-with st.expander("👀 247. 큐 미리보기/관리 [v5]", expanded=False):
-    st.caption(f"큐 크기: {len(st.session_state[_qkey])}")
-    if st.session_state[_qkey]:
-        st.json(st.session_state[_qkey][-1], expanded=False)
-        d1,d2 = st.columns(2)
-        with d1:
-            if st.button("큐 전체 보기 [v5]", key="m245p5_view_all"):
-                st.json(st.session_state[_qkey], expanded=False)
-        with d2:
-            if st.button("큐 비우기 [v5]", key="m245p5_clear"):
-                st.session_state[_qkey].clear()
-                st.info("큐를 비웠습니다.")
-
-# ===== 248. 그래프 반영 Stub [v5] =====
-with st.expander("🕸️ 248. CE-Graph 반영(Stub) [v5]", expanded=False):
-    st.caption("실그래프 엔진 연결 전에는 로그만 남김.")
-    if st.button("그래프 반영 시뮬레이트 [v5]", key="m245p5_apply"):
-        applied = [h for h in st.session_state[_qkey] if h.get("add_to_graph")]
-        st.write(f"추가 후보: {len(applied)}개 (edge='{st.session_state.m245p5_cfg['default_edge']}')")
-        st.code(json.dumps(applied, ensure_ascii=False, indent=2))
-        st.success("반영 시뮬레이션 완료 [v5]")
-
-# ===== 249. 검증 러너 Stub [v5] =====
-with st.expander("🧪 249. 검증 러너(Stub) [v5]", expanded=False):
-    th_fail = st.slider("FAIL 허용 상한(개) [v5]", 0, 10, 0, key="m245p5_th_fail")
-    th_conf = st.slider("최소 신뢰도 [v5]", 0.0, 1.0, 0.6, 0.01, key="m245p5_th_conf")
-    if st.button("검증 실행 [v5]", key="m245p5_run"):
-        results = [{**h, "ok": (h["fail_cons"] <= th_fail) and (h["confidence"] >= th_conf)}
-                   for h in st.session_state[_qkey]]
-        st.session_state["m245p5_results"] = results
-        st.success(f"검증 완료: {sum(1 for r in results if r['ok'])}/{len(results)} pass")
-        st.json(results, expanded=False)
-
-
-
-# 251R3 — 우주정보장 연동 (느슨/탐지형)
-register_module("251R3", "우주정보장 연동 (느슨/탐지형)", "탐지 위주, 간섭 회피 / 키 충돌 제거")
-
-import streamlit as st, time, random
-
-NS251R3 = "m251r3"
-def k251r3(s): return f"{NS251R3}_{s}"
-
-with st.expander("251R3. 우주정보장 연동 (느슨/탐지형)", expanded=False):
-    st.caption("느슨한 연결 모드: 탐지 위주 + 간섭 최소화")
-
-    auto = st.toggle("자동 탐지 실행", value=False, key=k251r3("auto"))
-    interval = st.select_slider("탐지 주기(초)", [5,10,15,30], value=10, key=k251r3("interval"))
-
-    # 🔗 스위처 연동
-    cfg = st.session_state.get("cosmic_switch", {})
-    if cfg.get("mode","").startswith("R3"):
-        auto = cfg.get("auto", auto)
-        interval = cfg.get("interval", interval)
-
-    if auto:
-        st.info(f"느슨 모드 자동 탐지 주기 {interval}초")
-        if st.button("수동 탐지 실행", key=k251r3("manual")):
-            st.write("🌌 우주정보장 신호(느슨) 탐지 실행 → 결과 샘플")
-            st.json({"signal": random.random(), "mode":"loose"})
-    else:
-        if st.button("탐지 실행", key=k251r3("run")):
-            st.write("🌌 우주정보장 느슨 탐지 1회 실행")
-            st.json({"signal": random.random(), "mode":"loose"})
-            
-  # 252R4 — 우주정보장 연동 (엄격/검증형)
-register_module("252R4", "우주정보장 연동 (엄격/검증형)", "검증/반례/재현성 강화 / 키 충돌 제거")
-
-import streamlit as st, random, time
-
-NS252R4 = "m252r4"
-def k252r4(s): return f"{NS252R4}_{s}"
-
-with st.expander("252R4. 우주정보장 연동 (엄격/검증형)", expanded=False):
-    st.caption("엄격 검증 모드: 반례/재현성 중점")
-
-    auto = st.toggle("자동 검증 실행", value=False, key=k252r4("auto"))
-    interval = st.select_slider("검증 주기(초)", [5,10,20,30,60], value=20, key=k252r4("interval"))
-    depth = st.slider("검증 강도", 1, 10, 5, key=k252r4("depth"))
-
-    # 🔗 스위처 연동
-    cfg = st.session_state.get("cosmic_switch", {})
-    if cfg.get("mode","").startswith("R4"):
-        auto = cfg.get("auto", auto)
-        interval = cfg.get("interval", interval)
-
-    if auto:
-        st.info(f"엄격 모드 자동 검증: 주기 {interval}초 · 강도 {depth}")
-        if st.button("수동 검증 실행", key=k252r4("manual")):
-            st.write("🛡 우주정보장 엄격 검증 1회 실행")
-            st.json({"verified": bool(random.getrandbits(1)), "depth": depth, "mode":"strict"})
-    else:
-        if st.button("검증 실행", key=k252r4("run")):
-            st.write("🛡 우주정보장 엄격 검증 수동 실행")
-            st.json({"verified": bool(random.getrandbits(1)), "depth": depth, "mode":"strict"})
-            
-          # ======================================================================
-# [공통 유틸] — 세션 스위치 안전 게터 / 세션 리셋 버튼 (1회 정의)
-# ======================================================================
-import time
+# ─────────────────────────────────────────────────────────
+# [245~251 v5] CE-HIT + 검증 + 스위처/오케스트라 통합(안전키/세션보강)
+# 프리픽스: m245v5_*, m251v5_*
+# 이 블록 하나로 245~251 기존 코드를 전부 교체하세요.
+# ─────────────────────────────────────────────────────────
+import time, json
 import streamlit as st
 from datetime import datetime
 
-def get_cosmic_switch_cfg():
-    """
-    우주정보장 연동 스위치 설정을 세션에서 안전하게 읽는다.
-    - 기본값은 항상 '리터럴'로 지정(자기참조 금지)
-    - interval 가드(3~300초)
-    """
-    cfg = st.session_state.get("cosmic_switch", {})
-    mode = cfg.get("mode", "OFF")                      # "OFF" | "R3" | "R4"
-    auto = bool(cfg.get("auto", False))                # True/False
-    interval = int(cfg.get("interval", 10))            # 초
-    interval = max(3, min(300, interval))
-    return {"mode": mode, "auto": auto, "interval": interval}
+# ── 안전: 없으면 no-op로 대체
+if "register_module" not in globals():
+    def register_module(num, name, desc=""): pass
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle=""):
+        st.markdown(f"**[{num}] {title}** — {subtitle}")
 
-# (선택) 비상 리셋
-with st.sidebar:
-    if st.button("🔄 세션 리셋(비상)", key="SYS_reset_all"):
-        st.session_state.clear()
-        st.success("세션 전부 초기화 완료 — 앱이 새로고침 됩니다.")
-        st.experimental_rerun()
+# ── 세션 상태 기본값 (여기서 전부 초기화/보강)
+st.session_state.setdefault("m245v5_cfg", {
+    "policy": "strict",           # 입력 정책 (예시)
+    "label_style": "v5",          # 라벨 스타일
+    "itime": 5,                   # 입력 간선 타임 제어(sec)
+    "dedup": True,                # 중복 제거
+})
+st.session_state.setdefault("m245v5_hits", [])     # CE-HIT 수집 큐
+st.session_state.setdefault("m249v5_logs", [])     # 검증 러너 로그
+st.session_state.setdefault("m251v5_cfg", {
+    "mode": "OFF",                # OFF | R3 | R4
+    "auto": False,                # 자동 실행 여부
+    "interval": 10,               # 자동 주기(sec)
+    "last_tick": 0.0,             # 마지막 실행 체크 시각
+})
+st.session_state.setdefault("m251v5_runs", [])     # 오케스트라 실행 로그(스냅샷용)
 
+# ─────────────────────────────────────────────────────────
+# 245. CE-Graph 설정/게이트 [v5]
+# ─────────────────────────────────────────────────────────
+register_module("245-v5", "CE-Graph 기본 설정/게이트", "입력 정책/라벨/간선타임/중복제거")
+gray_line("245-v5", "CE-Graph 설정", "게이트 & 파라미터")
 
-# ======================================================================
-# [251S] 우주정보장 연동 스위처 — 완전 교체본
-# - 모드 전환 + 자동 실행 토글 + 주기
-# - 세션키 프리픽스: S251_*
-# ======================================================================
-try:
-    register_module("251S", "우주정보장 연동 스위처", "모드 전환 + 자동/주기")
-    gray_line("251S", "연동_스위처", "모드 전환 + 자동 주기 / 키 충돌 제거판")
-except Exception:
-    pass
+cfg245 = st.session_state["m245v5_cfg"]
+colA, colB, colC = st.columns(3)
+with colA:
+    cfg245["policy"] = st.selectbox("입력 정책", ["strict","lenient","sandbox"],
+                                    index=["strict","lenient","sandbox"].index(cfg245["policy"]),
+                                    key="m245v5_policy")
+with colB:
+    cfg245["label_style"] = st.selectbox("라벨 스타일", ["v5","raw","full"],
+                                         index=["v5","raw","full"].index(cfg245["label_style"]),
+                                         key="m245v5_label")
+with colC:
+    cfg245["itime"] = st.slider("간선 타임(sec)", 1, 60, int(cfg245["itime"]), key="m245v5_itime")
+cfg245["dedup"] = st.toggle("중복 제거", value=bool(cfg245["dedup"]), key="m245v5_dedup")
 
-with st.expander("251S. 우주정보장 연동 스위처", expanded=True):
-    cfg = get_cosmic_switch_cfg()
+st.caption(f"현재 설정: {cfg245}")
 
-    st.caption("※ OFF/R3(느슨)/R4(엄격) 중 택1 · 자동 실행은 오케스트라가 주기적으로 실행하도록 함")
-    mode = st.radio("모드 선택", ["OFF", "R3(느슨)", "R4(엄격)"], horizontal=True,
-                    index={"OFF":0,"R3":1,"R4":2}.get(cfg["mode"],0), key="S251_mode_radio")
-    # 표시값 → 내부코드
-    mode_code = "OFF" if mode == "OFF" else ("R3" if mode.startswith("R3") else "R4")
+st.divider()
 
-    auto = st.toggle("공통 자동 실행", value=cfg["auto"], key="S251_auto_toggle")
-    interval = st.slider("공통 주기(초)", min_value=3, max_value=300, value=cfg["interval"],
-                         step=1, key="S251_interval_slider")
+# ─────────────────────────────────────────────────────────
+# 246. CE-HIT 간선 추가(간섭/중복 안전) [v5]
+# ─────────────────────────────────────────────────────────
+register_module("246-v5", "CE-HIT 추가", "간선/패스/증거 기록(중복 방지)")
+gray_line("246-v5", "CE-HIT 추가", "입력 → HIT 큐에 적재")
 
-    # 세션 저장(자기참조 금지)
-    st.session_state["cosmic_switch"] = {
-        "mode": mode_code,
-        "auto": bool(auto),
-        "interval": int(interval)
-    }
-
-    st.info(f"현재: 모드 **{mode_code}**, 자동 **{bool(auto)}**, 주기 **{int(interval)}s**")
-
-
-# ======================================================================
-# [253O] 우주정보장 오케스트라 v4 — 완전 교체본
-# - 자동 실행은 st_autorefresh 이용(비차단)
-# - 내부 실행 훅: run_251R3 / run_252R4 (없으면 안전 더미 실행)
-# - 세션키 프리픽스: O253_*
-# ======================================================================
-try:
-    register_module("253O", "우주정보장 오케스트라 v4", "스위치에 따라 자동 주기 실행")
-    gray_line("253O", "연동_오케스트라 v4", "자동 주기 실행 / 비차단 리프레시")
-except Exception:
-    pass
-
-# 안전 더미 훅(사용자 정의 함수가 이미 있다면 이 부분은 호출되지 않음)
-def _fallback_R3():
-    st.write("🧪 [R3] 느슨 모드 더미 실행 — 실제 구현 훅이 없어서 더미로 대체됨.")
-
-def _fallback_R4():
-    st.write("🧪 [R4] 엄격 모드 더미 실행 — 실제 구현 훅이 없어서 더미로 대체됨.")
-
-def _get_runner(mode_code: str):
-    # 사용자가 이미 정의한 훅이 있으면 그걸 사용
-    if mode_code == "R3":
-        return globals().get("run_251R3", _fallback_R3)
-    if mode_code == "R4":
-        return globals().get("run_252R4", _fallback_R4)
-    return None
-
-with st.expander("253O. 우주정보장 오케스트라 v4", expanded=True):
-    from streamlit import experimental_rerun
-    from streamlit.runtime.scriptrunner import add_script_run_ctx
-    from streamlit_autorefresh import st_autorefresh if False else None  # 안전: 라이브러리 없을 수 있음
-
-    cfg = get_cosmic_switch_cfg()
-    mode, auto, interval = cfg["mode"], cfg["auto"], cfg["interval"]
-
-    st.write(f"🧭 **스위치 상태** → 모드: `{mode}` · 자동: `{auto}` · 주기: `{interval}s`")
-
-    runner = _get_runner(mode)
-    can_run = (mode in ("R3", "R4")) and (runner is not None)
-
-    # 수동 실행 버튼
-    c1, c2 = st.columns(2)
+with st.expander("HIT 입력", expanded=False):
+    c1, c2 = st.columns([3,1])
     with c1:
-        if st.button("▶ 수동 실행(1회)", key="O253_manual_run"):
-            if can_run:
-                runner()
-                st.success(f"완료 · {datetime.utcnow().isoformat()}Z")
+        h_src = st.text_input("원인/근거(Source)", key="m246v5_src")
+        h_dst = st.text_input("귀결(Target)", key="m246v5_dst")
+        h_rel = st.selectbox("관계", ["supports","contradicts","relates"], key="m246v5_rel")
+        h_meta = st.text_area("메타/증거(json 가능)", key="m246v5_meta")
+    with c2:
+        if st.button("HIT 추가", key="m246v5_add"):
+            hit = {
+                "src": h_src.strip(), "dst": h_dst.strip(),
+                "rel": h_rel, "meta": h_meta.strip(),
+                "ts": datetime.utcnow().isoformat()+"Z"
+            }
+            if cfg245["dedup"]:
+                # 간단 dedup: 동일 key면 skip
+                sig = json.dumps(hit, sort_keys=True)
+                if sig in [json.dumps(x, sort_keys=True) for x in st.session_state["m245v5_hits"]]:
+                    st.info("중복 HIT → 스킵")
+                else:
+                    st.session_state["m245v5_hits"].append(hit)
+                    st.success("HIT 추가 완료")
             else:
-                st.warning("실행할 모드가 없거나 러너가 정의되지 않았습니다.")
+                st.session_state["m245v5_hits"].append(hit)
+                st.success("HIT 추가 완료")
 
-    # 자동 실행(비차단): st_autorefresh가 없으면 내부 타임스탬프 기반 재렌더
-    if auto and can_run:
-        st.caption("⏱ 자동 실행 ON — 주기마다 1회 실행")
-        # 방법 A) st_autorefresh 사용 가능 시
-        try:
-            from streamlit_autorefresh import st_autorefresh
-            # 프리픽스 키로 충돌 방지
-            st_autorefresh(interval=interval * 1000, key="O253_auto_refresh")
-            # 매 렌더마다 1회 실행(짧은 작업 가정). 무거우면 내부에서 시간 분기 추가.
-            runner()
-            st.success(f"[auto] 완료 · {datetime.utcnow().isoformat()}Z")
-        except Exception:
-            # 방법 B) 라이브러리 없을 때: 마지막 실행시간을 체크해 주기 도달 시 실행
-            now = time.time()
-            last = st.session_state.get("O253_last_run", 0)
-            if now - last >= interval:
-                runner()
-                st.session_state["O253_last_run"] = now
-                st.success(f"[auto(fallback)] 완료 · {datetime.utcnow().isoformat()}Z")
-            else:
-                remain = int(interval - (now - last))
-                st.info(f"[auto(fallback)] 다음 실행까지 ~{max(remain,0)}s")
+st.caption(f"HIT 큐 길이: {len(st.session_state['m245v5_hits'])}")
 
+st.divider()
 
-# ======================================================================
-# [250] 상태 리포트(JSON) v5-fix — 완전 교체본
-# - NameError 원인 제거(자기참조 금지)
-# - 세션키 프리픽스: R250_*
-# ======================================================================
-try:
-    register_module("250", "상태 리포트(JSON) [v5-fix]", "스위치/큐/검증 상태 요약")
-    gray_line("250", "상태 리포트", "스위치/큐/검증 상태 요약(JSON)")
-except Exception:
-    pass
+# ─────────────────────────────────────────────────────────
+# 247. 큐 미리보기/관리 [v5]
+# ─────────────────────────────────────────────────────────
+register_module("247-v5", "큐 미리보기/관리", "HIT 큐 확인/정리")
+gray_line("247-v5", "큐 미리보기/관리", "HIT, 러너 로그")
 
-import json
-if "R250_snaps" not in st.session_state:
-    st.session_state["R250_snaps"] = []
+with st.expander("HIT 큐 보기", expanded=False):
+    if st.session_state["m245v5_hits"]:
+        st.json(st.session_state["m245v5_hits"])
+        if st.button("큐 비우기", key="m247v5_clear"):
+            st.session_state["m245v5_hits"].clear()
+            st.success("HIT 큐 초기화")
+    else:
+        st.info("HIT 큐 비어있음")
 
-with st.expander("250. 상태 리포트(JSON) [v5-fix]", expanded=True):
-    c = get_cosmic_switch_cfg()
-    report = {
-        "ts": int(time.time()),
-        "switch": {"mode": c["mode"], "auto": c["auto"], "interval": c["interval"]},
-        # 필요 시 여기서 큐/검증 등의 다른 상태도 합쳐서 내보내면 됨.
-    }
-    st.json(report)
+with st.expander("검증 러너 로그", expanded=False):
+    if st.session_state["m249v5_logs"]:
+        st.json(st.session_state["m249v5_logs"])
+        if st.button("러너 로그 비우기", key="m247v5_log_clear"):
+            st.session_state["m249v5_logs"].clear()
+            st.success("로그 초기화")
+    else:
+        st.info("로그 없음")
 
-    colA, colB = st.columns(2)
-    with colA:
-        if st.button("스냅샷 저장", key="R250_save"):
-            st.session_state["R250_snaps"].append(report)
-            st.success("스냅샷 저장 완료.")
-    with colB:
-        st.download_button(
-            "모든 스냅샷 다운로드",
-            data=json.dumps(st.session_state["R250_snaps"], ensure_ascii=False, indent=2),
-            file_name="ea_state_snapshots.json",
-            mime="application/json",
-            key="R250_dl"
-        )
+st.divider()
+
+# ─────────────────────────────────────────────────────────
+# 248. CE-Graph 반영(Stub) [v5]
+# ─────────────────────────────────────────────────────────
+register_module("248-v5", "CE-Graph 반영(Stub)", "실반영 연결부 자리표시")
+gray_line("248-v5", "반영 Stub", "실 시스템 연결 전 안전 스텁")
+
+if st.button("Stub 반영 실행(모의)", key="m248v5_apply"):
+    st.success(f"반영 스텁 실행 완료 · 반영대상 {len(st.session_state['m245v5_hits'])}건(모의)")
+
+st.divider()
+
+# ─────────────────────────────────────────────────────────
+# 249. 검증 러너(Stub) [v5]
+# ─────────────────────────────────────────────────────────
+register_module("249-v5", "검증 러너(Stub)", "반례/재현성 검증 모의")
+gray_line("249-v5", "검증 Stub", "간단 모의 러너")
+
+def _runner_stub(label:str):
+    log = {"label": label, "hits": len(st.session_state["m245v5_hits"]),
+           "ts": datetime.utcnow().isoformat()+"Z", "result": "ok"}
+    st.session_state["m249v5_logs"].append(log)
+    st.success(f"검증 Stub 완료: {log}")
+
+col_r3, col_r4 = st.columns(2)
+with col_r3:
+    if st.button("R3(느슨) 모의 실행", key="m249v5_r3"):
+        _runner_stub("R3")
+with col_r4:
+    if st.button("R4(엄격) 모의 실행", key="m249v5_r4"):
+        _runner_stub("R4")
+
+st.divider()
+
+# ─────────────────────────────────────────────────────────
+# 250. 상태 리포트(JSON) [v5]
+# ─────────────────────────────────────────────────────────
+register_module("250-v5", "상태 리포트(JSON)", "스냅샷/내보내기")
+gray_line("250-v5", "상태 리포트", "구성·큐·로그를 JSON으로")
+
+report = {
+    "snapshot": datetime.utcnow().isoformat()+"Z",
+    "cfg245": st.session_state["m245v5_cfg"],
+    "hits": st.session_state["m245v5_hits"],
+    "runner_logs": st.session_state["m249v5_logs"],
+    "orchestrator_runs": st.session_state["m251v5_runs"][-20:],  # 최근 20개만
+}
+st.json(report)
+
+cA, cB = st.columns(2)
+with cA:
+    st.download_button("리포트 JSON 다운로드",
+                       data=json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="EA_state_report_v5.json",
+                       mime="application/json",
+                       key="m250v5_dl")
+with cB:
+    if st.button("스냅샷 저장(세션)", key="m250v5_snap"):
+        st.session_state.setdefault("m250v5_snaps", []).append(report)
+        st.success("스냅샷 저장 완료")
+
+st.divider()
+
+# ─────────────────────────────────────────────────────────
+# 251R3. 우주정보장 연동(느슨/탐지형)
+# 251R4. 우주정보장 연동(엄격/검증형)
+# ─────────────────────────────────────────────────────────
+register_module("251R3", "우주정보장 연동(느슨)", "탐지·회피 프리셋")
+register_module("251R4", "우주정보장 연동(엄격)", "검증·반례 우선 프리셋")
+gray_line("251R3/251R4", "연동 프리셋", "필요시 수동 실행")
+
+def run_R3_once():
+    _runner_stub("R3")
+    st.session_state["m251v5_runs"].append({"mode":"R3","ts": time.time()})
+
+def run_R4_once():
+    _runner_stub("R4")
+    st.session_state["m251v5_runs"].append({"mode":"R4","ts": time.time()})
+
+c3,c4 = st.columns(2)
+with c3:
+    if st.button("R3 한 번 실행", key="m251v5_r3_once"):
+        run_R3_once()
+with c4:
+    if st.button("R4 한 번 실행", key="m251v5_r4_once"):
+        run_R4_once()
+
+st.divider()
+
+# ─────────────────────────────────────────────────────────
+# 251S. 스위처 (OFF / R3 / R4) + 자동 주기
+# ─────────────────────────────────────────────────────────
+register_module("251S", "우주정보장 연동 스위처", "모드 전환 + 자동 실행")
+gray_line("251S", "스위처", "모드/자동/주기")
+
+cfgS = st.session_state["m251v5_cfg"]
+
+m_col1, m_col2 = st.columns([2,1])
+with m_col1:
+    cfgS["mode"] = st.radio("모드 선택", ["OFF","R3","R4"],
+                            index=["OFF","R3","R4"].index(cfgS["mode"]),
+                            key="m251v5_mode")
+with m_col2:
+    cfgS["auto"] = st.toggle("공통 자동 실행", value=bool(cfgS["auto"]),
+                             key="m251v5_auto")
+
+cfgS["interval"] = st.slider("공통 주기(초)", 3, 60, int(cfgS["interval"]),
+                             key="m251v5_interval")
+
+st.info(f"현재: 모드 {cfgS['mode']} · 자동 {cfgS['auto']} · 주기 {cfgS['interval']}s")
+
+st.divider()
+
+# ─────────────────────────────────────────────────────────
+# 251O. 오케스트라(비차단 자동러너)
+#   - 매 렌더링 시점에 time 체크 → 기준 넘으면 한 번 실행 → last_tick 갱신
+#   - sleep/무한루프/블로킹 없음 → 앱 멈춤 방지
+# ─────────────────────────────────────────────────────────
+register_module("251O", "오케스트라", "스위처에 따라 자동 실행")
+gray_line("251O", "오케스트라", "비차단 자동 실행")
+
+now = time.time()
+if cfgS["auto"] and cfgS["mode"] in ("R3","R4"):
+    due = (now - float(cfgS.get("last_tick", 0))) >= float(cfgS["interval"])
+    st.caption(f"오토체크: last={round(now-cfgS.get('last_tick',0),1)}s 경과 / 주기={cfgS['interval']}s")
+    if due:
+        if cfgS["mode"] == "R3":
+            run_R3_once()
+        else:
+            run_R4_once()
+        cfgS["last_tick"] = now
+        # rerun은 선택적. 주기가 짧을 때만 사용 권장.
+        # st.experimental_rerun()
+
+# 최근 실행 이력 간단 표시
+if st.session_state["m251v5_runs"]:
+    last = st.session_state["m251v5_runs"][-1]
+    ts_str = datetime.fromtimestamp(last["ts"]).strftime("%H:%M:%S")
+    st.success(f"최근 실행: {last['mode']} @ {ts_str}")
+else:
+    st.info("오케스트라 실행 이력 없음")
+# ─────────────────────────────────────────────────────────
