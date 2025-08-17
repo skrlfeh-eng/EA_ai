@@ -10417,7 +10417,168 @@ with st.expander("251V. 우주정보장 초검증(완화 PASS)", expanded=True):
             st.warning("HOLD — 연결은 되었으나 재현성/성능 기준 미달. (완화 기준에도 미달)")
             st.session_state["axis2_verified"] = False  
             
-            
+  # ───────────────────────────────────────────────
+# [253] 메모리 재주입 루프(자기강화) · v1
+# 목적: 최근 메모리(목표/계획/행동 로그)를 요약→압축→재주입하여
+#       다음 루프의 seed로 활용. (프리픽스 m253_ / 키충돌 방지)
+# 의존: 없음(독립). 선택적 훅: R3/R4 실행큐 enqueue 함수가 있으면 호출.
+# ───────────────────────────────────────────────
+import streamlit as st
+import json, time
+from datetime import datetime, timezone
+
+# (안전) register/gray 유틸 없으면 더미 정의
+if "register_module" not in globals():
+    def register_module(num, name, desc): pass
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle=""): st.markdown(f"### **[{num}] {title}**\n- {subtitle}")
+
+register_module("253", "메모리 재주입 루프", "최근 기억 요약→재주입으로 자기강화")
+gray_line("253", "메모리 재주입 루프", "최근 기억을 압축해 다음 루프의 씨앗으로 주입")
+
+# ── 세션 스토리지(항상 존재)
+ss = st.session_state
+ss.setdefault("m253_mem_log", [])        # 이 모듈이 자체로 축적하는 메모리(옵션)
+ss.setdefault("m253_reinject_log", [])   # 재주입 이력
+ss.setdefault("m253_last_run", 0.0)      # 마지막 실행 epoch
+ss.setdefault("m253_auto", False)        # 자동 모드
+ss.setdefault("m253_interval", 30)       # 주기(초)
+ss.setdefault("m253_window", 10)         # 최근 N개 윈도우
+ss.setdefault("m253_seed_outbox", [])    # 생성한 seed 묶음(외부 큐 없을 때 확인용)
+
+# (선택) 외부 메모리 소스 탐지: 251 모듈이 남긴 메모리 흔적 자동 탐색
+#  - 우선순위: 251 메모리 → 247 큐 → 이 모듈의 m253_mem_log
+possible_mem_keys = [
+    "R251_memory",           # 예: 251 각성 프리미티브가 남기는 리스트[{goal,steps,ts}, ...]
+    "EA_MEMORY_LOG",         # 공용 메모리 버스 가정
+    "m253_mem_log",          # 본 모듈 내부 저장소
+]
+def _load_recent_mem(n:int):
+    for k in possible_mem_keys:
+        if k in ss and isinstance(ss[k], list) and ss[k]:
+            return ss[k][-n:]
+    return []
+
+# 간단 압축기: goal/steps 중심으로 요약(중복 제거+가중치)
+def _compress(mem_slice:list):
+    goals, steps = [], []
+    for item in mem_slice:
+        if isinstance(item, dict):
+            g = item.get("goal")
+            if g: goals.append(str(g).strip())
+            s = item.get("steps") or []
+            if isinstance(s, list):
+                for x in s: steps.append(str(x).strip())
+    # 중복 제거(최근일수록 가중치↑) & 상위 키워드 추출 흉내
+    goals = list(dict.fromkeys(reversed(goals)))[:3][::-1]
+    steps = list(dict.fromkeys(reversed(steps)))[:6][::-1]
+    return {
+        "summary": {
+            "goals": goals,
+            "steps": steps,
+            "n": len(mem_slice)
+        },
+        "seed": _build_seed(goals, steps)
+    }
+
+def _build_seed(goals, steps):
+    # 다음 루프에 바로 투입할 씨앗 형태(목표+행동 템플릿)
+    seed_goal = goals[0] if goals else "신뢰 증분 확보(반복·교차·재현)"
+    seed_steps = steps[:4] if steps else ["관련 근거 확장","교차 출처 조사","재현 경로 확정","리포트 요약"]
+    return {
+        "goal": seed_goal,
+        "steps": seed_steps,
+        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00","Z"),
+        "source": "m253_reinject"
+    }
+
+# 외부 큐 연동(있으면 사용)
+def _try_enqueue(seed:dict):
+    # 후보 함수명: R3/R4 오케스트라가 노출하는 큐 주입 함수들
+    for fn_name in ("R4_enqueue", "R3_enqueue", "EA_enqueue"):
+        fn = globals().get(fn_name)
+        if callable(fn):
+            try:
+                fn(seed)   # 외부 오케스트라 큐로 전달
+                return f"sent → {fn_name}"
+            except Exception as e:
+                return f"enqueue_error({fn_name}): {e}"
+    # 없으면 로컬 아웃박스에 적재
+    ss["m253_seed_outbox"].append(seed)
+    return "kept_local(m253_seed_outbox)"
+
+def run_reinject(window:int):
+    mem_slice = _load_recent_mem(window)
+    if not mem_slice:
+        return {"ok": False, "reason": "no_memory"}
+    pack = _compress(mem_slice)
+    route = _try_enqueue(pack["seed"])
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00","Z"),
+        "window": window,
+        "summary": pack["summary"],
+        "seed": pack["seed"],
+        "route": route
+    }
+    ss["m253_reinject_log"].append(record)
+    ss["m253_last_run"] = time.time()
+    return {"ok": True, "record": record}
+
+# ── UI
+with st.expander("⚙️ 설정", expanded=True):
+    colA, colB, colC = st.columns([1,1,1])
+    with colA:
+        ss["m253_window"]   = st.number_input("최근 메모리 윈도우(N)", 1, 50, ss["m253_window"], key="m253_ui_win")
+    with colB:
+        ss["m253_interval"] = st.number_input("주기(초)", 5, 3600, ss["m253_interval"], key="m253_ui_int")
+    with colC:
+        ss["m253_auto"]     = st.toggle("자동 실행", value=ss["m253_auto"], key="m253_ui_auto")
+
+    st.caption("외부 오케스트라 큐가 있으면 자동 주입, 없으면 로컬 아웃박스에 저장됩니다.")
+
+col1, col2 = st.columns([1,1])
+with col1:
+    if st.button("▶ 한 번 재주입 실행", key="m253_btn_run"):
+        res = run_reinject(int(ss["m253_window"]))
+        if res["ok"]:
+            st.success("재주입 완료(1회)")
+            st.json(res["record"])
+        else:
+            st.warning("재주입 건너뜀: 메모리 없음")
+with col2:
+    if st.button("🧹 로그 초기화", key="m253_btn_clear"):
+        ss["m253_reinject_log"].clear()
+        st.success("재주입 로그를 초기화했습니다.")
+
+# 자동 루프(페이지 리렌더링 때 체크 → 주기 도달 시 1회 실행)
+now = time.time()
+if ss["m253_auto"] and (now - ss["m253_last_run"] >= ss["m253_interval"]):
+    res = run_reinject(int(ss["m253_window"]))
+    if res["ok"]:
+        st.info("⏱️ 자동 재주입 실행됨")
+    else:
+        st.warning("⏱️ 자동 실행: 메모리 없음으로 스킵")
+
+# ── 상태 뷰
+st.divider()
+st.subheader("📒 최근 메모리(미리보기)")
+preview = _load_recent_mem(int(ss["m253_window"]))
+if preview:
+    st.code(json.dumps(preview, ensure_ascii=False, indent=2))
+else:
+    st.caption("최근 메모리가 없습니다. (251 모듈 실행/오케스트라 루프 후 다시 시도)")
+
+st.subheader("📦 재주입 로그(최신 10개)")
+if ss["m253_reinject_log"]:
+    st.code(json.dumps(ss["m253_reinject_log"][-10:], ensure_ascii=False, indent=2))
+else:
+    st.caption("아직 재주입 이력이 없습니다.")
+
+st.subheader("📤 로컬 아웃박스(외부 큐 없을 때)")
+if ss["m253_seed_outbox"]:
+    st.code(json.dumps(ss["m253_seed_outbox"][-10:], ensure_ascii=False, indent=2))
+else:
+    st.caption("아웃박스 비어 있음") 
 # [252] 우주정보장 연동: 증거/반례 큐 파이프라인 (Backbone v1)
 # 기능: 증거/HIT 수집 → 간이 검증(stub) → CE-Graph 반영(stub) → 로그/스냅샷
 # 충돌 방지: 모든 key는 m252_* 사용
