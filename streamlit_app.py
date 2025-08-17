@@ -13020,3 +13020,70 @@ if st.button("신뢰도 재가중 + 정규화 실행", use_container_width=True,
         pass
     st.caption(f"현실연동 축 가점 반영: +{bonus} (사이드바/대시보드에서 확인)")
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [267] Long-Term Memory (LTM-v1) — Snapshot · Summarize · Reinjection
+import streamlit as st, json
+from datetime import datetime, timezone, timedelta
+
+st.markdown("#### [267] Long-Term Memory (LTM-v1) — Snapshot · Summarize · Reinjection")
+st.caption("세션 상태를 압축 저장하고 불러와서 자가진화하는 루프. ③ 기억·자가진화 축 강화")
+
+# 정책 게이트
+if "spx_backbone_gate" in globals():
+    ok, msg = spx_backbone_gate("267 LTM Snapshot", "기억/자가진화 축 강화")
+    st.caption(msg)
+
+# ===== 스냅샷 유틸 =====
+def _ltm_snapshot() -> dict:
+    now = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S KST")
+    payload = {
+        "timestamp": now,
+        "backbone": st.session_state.get("spx_backbone", {}),
+        "ce_quality": {
+            k: v for k,v in st.session_state.items() if k.startswith("ce_quality_")
+        },
+        "claims": {k: v for k,v in st.session_state.items() if k.startswith("rlsi_ce_")},
+    }
+    return payload
+
+def _ltm_summary(snap:dict) -> str:
+    bb = snap.get("backbone",{})
+    ceq = snap.get("ce_quality",{})
+    return (
+        f"🧠 LTM 요약 @ {snap['timestamp']}\n"
+        f"- 척추 평균: {round(sum(bb.values())/max(1,len(bb)),1)}%\n"
+        f"- CE 품질키: {list(ceq.keys())}\n"
+        f"- 저장된 클레임 그래프 수: {len(snap.get('claims',{}))}"
+    )
+
+# ===== UI =====
+snap = _ltm_snapshot()
+summary = _ltm_summary(snap)
+
+st.text_area("스냅샷 요약", summary, height=100)
+
+colA, colB = st.columns(2)
+with colA:
+    st.download_button("📥 JSON 스냅샷 저장", data=json.dumps(snap, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="EA_LTM_Snapshot.json", mime="application/json", use_container_width=True)
+with colB:
+    up = st.file_uploader("📤 JSON 스냅샷 불러오기", type=["json"], key="ltm_up")
+    if up and st.button("불러오기 실행", key="ltm_load"):
+        try:
+            payload = json.loads(up.read().decode("utf-8"))
+            if "backbone" in payload: st.session_state["spx_backbone"].update(payload["backbone"])
+            if "claims" in payload:
+                for k,v in payload["claims"].items():
+                    st.session_state[k] = v
+            st.success("스냅샷 복원 완료")
+        except Exception as e:
+            st.error(f"불러오기 실패: {e}")
+
+# ③축 자동 가점
+try:
+    if "spx_backbone" in st.session_state:
+        st.session_state.spx_backbone["memory"] = min(100, st.session_state.spx_backbone["memory"] + 8)
+except Exception:
+    pass
+st.caption("기억·자가진화 축 +8 반영됨 (사이드바 확인)")
+# ───────────────────────────────────────────────
