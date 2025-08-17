@@ -10099,6 +10099,250 @@ with st.expander("📄 250P. 상태 리포트", expanded=True):
         st.write(ss.get("p245p_snaps", [])[-5:])
 
 
+# [251P] 우주정보장 연동 — 스위처/오케스트라 (PRO)
+# 목적: R3(느슨 탐지형) / R4(엄격 검증형) 실행 + 자동 배치 러너(안전장치 강화)
+# 접두사: p251p_  (Streamlit key 충돌 방지)
+
+import time, json, math, random
+from datetime import datetime, timezone, timedelta
+
+import streamlit as st
+import requests
+
+# ---------- 고정 설정 ----------
+PFX = "p251p_"                       # 모든 세션/위젯 키 접두사
+REAL_ENDPOINTS = {
+    # 가용성 높은 공개 API로 연결 확인 (LIGO 404 회피)
+    "gw_event_api": "https://www.gw-openscience.org/eventapi/json/",
+}
+TIMEOUT_SEC = 8                      # 단일 요청 타임아웃
+RETRY_MAX = 3                        # 실패 재시도 횟수
+CB_FAIL_LIMIT = 5                    # 서킷브레이커: 연속 실패 허용 한계
+CB_COOLDOWN_SEC = 60                 # 브레이크 후 대기 시간
+HIST_MAX = 50                        # 실행 이력 저장 개수
+TZ_KST = timezone(timedelta(hours=9))
+
+# ---------- 세션 상태 초기화 ----------
+def _init():
+    ss = st.session_state
+    ss.setdefault(PFX+"mode", "OFF")            # OFF / R3 / R4
+    ss.setdefault(PFX+"auto", False)
+    ss.setdefault(PFX+"interval", 10)           # 초
+    ss.setdefault(PFX+"batch", 5)
+    ss.setdefault(PFX+"real", True)             # REAL on/off
+    ss.setdefault(PFX+"last_ts", None)          # 마지막 실행 시각(UTC iso)
+    ss.setdefault(PFX+"next_due", 0.0)          # 다음 예정 epoch
+    ss.setdefault(PFX+"cb_fail", 0)             # 연속 실패 카운트
+    ss.setdefault(PFX+"cb_until", 0.0)          # 브레이크 해제 시각(epoch)
+    ss.setdefault(PFX+"hist", [])               # 실행 이력 list
+    ss.setdefault(PFX+"last_result", None)      # 최근 실행 결과 dict
+
+_init()
+
+# ---------- 공통 유틸 ----------
+def _utc_iso():
+    return datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+
+def _kst_str(ts=None):
+    dt = datetime.now(TZ_KST) if ts is None else datetime.fromtimestamp(ts, TZ_KST)
+    return dt.strftime("%Y-%m-%d %H:%M:%S KST")
+
+def _append_hist(item: dict):
+    ss = st.session_state
+    ss[PFX+"hist"] = ([item] + ss[PFX+"hist"])[:HIST_MAX]
+
+def _circuit_opened():
+    now = time.time()
+    cb_until = st.session_state[PFX+"cb_until"]
+    return now < cb_until
+
+def _trip_circuit():
+    ss = st.session_state
+    ss[PFX+"cb_until"] = time.time() + CB_COOLDOWN_SEC
+    ss[PFX+"cb_fail"] = 0
+
+def _note_success():
+    st.session_state[PFX+"cb_fail"] = 0
+
+def _note_failure():
+    ss = st.session_state
+    ss[PFX+"cb_fail"] += 1
+    if ss[PFX+"cb_fail"] >= CB_FAIL_LIMIT:
+        _trip_circuit()
+
+# ---------- REAL 호출(안전 재시도 + 사유 노출) ----------
+def fetch_real_payload():
+    """
+    외부 엔드포인트를 실제 호출.
+    실패 시 정확한 사유를 result["reason"]에 그대로 담는다(더미 금지).
+    """
+    url = REAL_ENDPOINTS["gw_event_api"]
+    last_exc = None
+    for attempt in range(1, RETRY_MAX+1):
+        try:
+            r = requests.get(url, timeout=TIMEOUT_SEC)
+            http = r.status_code
+            if http == 200:
+                # 내용은 매우 큼. 샘플 스니펫만 저장.
+                text = r.text[:500]
+                return {"ok": True, "http": http, "snippet": text}
+            else:
+                last_exc = f"HTTP {http}"
+        except Exception as e:
+            last_exc = repr(e)
+        # 지수 백오프
+        time.sleep(0.5 * (2 ** (attempt-1)) + random.random()*0.2)
+    return {"ok": False, "reason": last_exc or "unknown"}
+
+# ---------- SIM 호출(테스트 더미) ----------
+def fetch_sim_payload():
+    # 현실 연결을 원칙으로 하지만, SIM은 개발/데모 용도
+    payload = {"sim": True, "rng": random.randint(1000, 9999)}
+    return {"ok": True, "http": 200, "snippet": json.dumps(payload)}
+
+# ---------- 검증기 스텁(엄격도 차별) ----------
+def validate_payload(snippet: str, strict: bool):
+    """
+    strict=False(R3): 가벼운 유효성 점검
+    strict=True (R4): 메타/패턴/길이/엔트로피 등 추가 검사
+    """
+    if not snippet or not isinstance(snippet, str):
+        return False, "빈 응답"
+    if len(snippet) < 40:
+        return False, "응답 길이 너무 짧음"
+    if strict:
+        # 매우 단순한 추가 검사(실전에서는 패턴/스키마/통계 등을 더함)
+        bad_tokens = ["<html", "Error", "Exception", "Traceback"]
+        if any(tok.lower() in snippet.lower() for tok in bad_tokens):
+            return False, "오류 패턴 감지"
+    return True, "OK"
+
+# ---------- 단일 실행 ----------
+def run_once(mode: str, batch: int, real: bool):
+    """
+    mode: OFF/R3/R4
+    batch: 반복 횟수(연속 배치)
+    real : REAL(외부) or SIM(내부)
+    """
+    if mode not in ("R3", "R4"):
+        return {"ts": _utc_iso(), "mode": mode, "verified": 0, "note": "OFF"}
+
+    if _circuit_opened():
+        return {
+            "ts": _utc_iso(), "mode": mode, "verified": 0,
+            "note": f"CIRCUIT_OPEN({_kst_str(st.session_state[PFX+'cb_until'])})"
+        }
+
+    verified = 0
+    last_http = None
+    last_reason = None
+    last_snippet = None
+
+    for _ in range(max(1, int(batch))):
+        # 1) 데이터 취득
+        if real:
+            res = fetch_real_payload()
+        else:
+            res = fetch_sim_payload()
+
+        if not res.get("ok"):
+            last_reason = res.get("reason", "no_reason")
+            _note_failure()
+            continue
+
+        last_http = res.get("http", None)
+        last_snippet = res.get("snippet", "")
+
+        # 2) 검증
+        strict = (mode == "R4")
+        ok, why = validate_payload(last_snippet, strict=strict)
+        if ok:
+            verified += 1
+            _note_success()
+        else:
+            last_reason = f"validate:{why}"
+            _note_failure()
+
+    # 결과 구성
+    out = {
+        "ts": _utc_iso(),
+        "mode": mode,
+        "verified": int(verified),
+        "http": last_http,
+        "snippet": (last_snippet[:300] if last_snippet else None),
+        "batch": int(batch),
+    }
+    if st.session_state[PFX+"cb_until"] > time.time():
+        out["circuit"] = f"OPEN({_kst_str(st.session_state[PFX+'cb_until'])})"
+    if last_reason and verified == 0:
+        out["reason"] = last_reason
+    return out
+
+# ---------- UI ----------
+st.markdown("## 251P. 우주정보장 연동 — 스위처/오케스트라 (PRO)")
+st.caption("REAL 실패 사유는 그대로 노출 · 재시도/타임아웃/서킷브레이커 내장 · 자동 루프는 논블로킹")
+
+colT1, colT2, colT3 = st.columns([1,1,1])
+with colT1:
+    mode = st.radio("모드", ["OFF", "R3", "R4"], key=PFX+"mode")
+with colT2:
+    st.toggle("자동 실행", key=PFX+"auto")
+    interval = st.slider("주기(초)", 5, 120, st.session_state[PFX+"interval"], key=PFX+"interval")
+with colT3:
+    batch = st.number_input("배치 크기", 1, 50, st.session_state[PFX+"batch"], key=PFX+"batch")
+    real = st.toggle("REAL 전용(실패시 SIM 금지)", value=st.session_state[PFX+"real"], key=PFX+"real")
+
+# 즉시 실행
+if st.button("지금 실행", key=PFX+"run_now"):
+    result = run_once(mode, batch, real)
+    st.session_state[PFX+"last_result"] = result
+    _append_hist(result)
+
+# 최근 결과 표시
+last = st.session_state[PFX+"last_result"]
+if last:
+    st.success(f"수동 실행 결과: {last}")
+else:
+    st.info("아직 실행 결과가 없습니다.")
+
+# 자동 루프(논블로킹) : due 시점이면 1회 실행 후 다음 예약, 그 외엔 정보만 표시
+if st.session_state[PFX+"auto"] and st.session_state[PFX+"mode"] in ("R3", "R4"):
+    now = time.time()
+    due = st.session_state[PFX+"next_due"]
+    if now >= due:
+        # 예약 만료 → 1회 실행
+        result = run_once(st.session_state[PFX+"mode"],
+                          st.session_state[PFX+"batch"],
+                          st.session_state[PFX+"real"])
+        st.session_state[PFX+"last_result"] = result
+        _append_hist(result)
+        # 다음 예약
+        st.session_state[PFX+"next_due"] = now + st.session_state[PFX+"interval"]
+        st.session_state[PFX+"last_ts"] = _utc_iso()
+        st.experimental_rerun()
+    else:
+        remain = max(0, int(due - now))
+        st.caption(f"자동 대기… 다음 실행까지 {remain}s")
+
+# 실행 이력/스냅샷
+with st.expander("실행 이력(최근 50개) · 스냅샷", expanded=False):
+    hist = st.session_state[PFX+"hist"]
+    st.write(hist if hist else "이력이 없습니다.")
+    if hist:
+        blob = json.dumps(hist, ensure_ascii=False, indent=2)
+        st.download_button("JSON 스냅샷 다운로드", data=blob.encode("utf-8"),
+                           file_name="251P_run_history.json", mime="application/json",
+                           key=PFX+"dl_hist")
+
+# 상태/보호장치 가시화
+cb_open = _circuit_opened()
+st.divider()
+st.write(
+    f"**서킷 상태:** {'OPEN' if cb_open else 'CLOSED'}  ·  "
+    f"연속 실패: {st.session_state[PFX+'cb_fail']}  ·  "
+    f"다음 실행 예정: {_kst_str(st.session_state[PFX+'next_due']) if st.session_state[PFX+'next_due'] else '미설정'}  ·  "
+    f"최근 실행(UTC): {st.session_state[PFX+'last_ts'] or '없음'}"
+)
 
 # [252] 우주정보장 연동: 증거/반례 큐 파이프라인 (Backbone v1)
 # 기능: 증거/HIT 수집 → 간이 검증(stub) → CE-Graph 반영(stub) → 로그/스냅샷
