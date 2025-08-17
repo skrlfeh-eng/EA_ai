@@ -11624,3 +11624,176 @@ if run_all:
         if key: ss[key] = min(100, ss[key]+5)
 
 # ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# [260] 우주정보장 초검증–연동 브릿지
+# 목적: CE-Graph digest ↔ 검증 리포트(재현성/반례/리페어) 결합 체인해시 생성·보관
+import streamlit as st, json, time, hashlib
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict
+
+# 헬퍼가 없으면 간이 정의
+if "register_module" not in globals():
+    def register_module(num, name, desc): st.markdown(f"### **[{num}] {name}**"); st.caption(desc)
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle=""): st.markdown(f"**[{num}] {title}**"); st.caption(subtitle)
+
+register_module("260", "우주정보장 초검증–연동 브릿지", "CE-Graph digest ↔ 검증 리포트 체인해시(Attestation) 결합/스냅샷")
+gray_line("260", "CE-Graph ↔ 검증 결합", "입력/가져오기 → 병합 → 해시 고정 → 스냅샷 출력")
+
+ss = st.session_state
+
+# ===== 유틸 =====
+def m260_sha256(text_or_bytes: Any) -> str:
+    if isinstance(text_or_bytes, bytes):
+        b = text_or_bytes
+    else:
+        b = str(text_or_bytes).encode("utf-8")
+    return hashlib.sha256(b).hexdigest()
+
+def m260_now_kst_str() -> str:
+    kst = timezone(timedelta(hours=9))
+    return datetime.now(kst).strftime("%Y-%m-%d %H:%M:%S KST")
+
+# 세션 키 초기화
+if "m260_last_attestation" not in ss: ss.m260_last_attestation = None
+if "m260_ce_digest" not in ss: ss.m260_ce_digest = ""
+
+# ===== 1) CE-Graph Digest 수집(세 가지 경로) =====
+st.subheader("① CE-Graph Digest 수집")
+tab_inp, tab_pull, tab_file = st.tabs(["직접 입력", "내부 모듈에서 가져오기", "파일 업로드(JSON)"])
+
+with tab_inp:
+    ss.m260_ce_digest = st.text_input("CE-Graph Digest(직접 입력)", value=ss.m260_ce_digest, placeholder="예: 5e8f... (hex)")
+    st.caption("상상력/연동 파이프라인에서 계산된 CE-Graph의 digest 값을 붙여넣으세요.")
+
+with tab_pull:
+    # 245~251 등에서 CE-Graph를 계산/보관했다면 세션에 남아 있을 수 있음
+    ce_guess = ss.get("ce_graph_digest") or ss.get("last_ce_digest") or ""
+    st.text_input("내부 저장된 digest(읽기전용)", value=ce_guess, key="m260_ce_guess", disabled=True)
+    if st.button("이 값으로 사용", key="m260_use_guess"):
+        ss.m260_ce_digest = ce_guess
+        st.success("CE-Graph digest를 내부 값으로 설정했습니다.")
+
+with tab_file:
+    up = st.file_uploader("CE-Graph JSON 업로드(선택)", type=["json"], key="m260_ce_file")
+    if up and st.button("업로드에서 digest 추출", key="m260_extract"):
+        try:
+            payload = json.loads(up.read().decode("utf-8"))
+            # 관례: payload["digest"] 또는 payload["ce_graph"]["digest"]
+            dig = payload.get("digest") or (payload.get("ce_graph", {}) or {}).get("digest")
+            if dig:
+                ss.m260_ce_digest = dig
+                st.success(f"추출 성공: {dig[:16]}…")
+            else:
+                st.warning("digest 필드를 찾지 못했습니다. JSON 구조를 확인하세요.")
+        except Exception as e:
+            st.error(f"파싱 실패: {e}")
+
+st.write(f"**현재 CE-Graph digest:** `{(ss.m260_ce_digest or '미설정')}`")
+
+st.divider()
+
+# ===== 2) 검증 리포트 결합 =====
+st.subheader("② 검증 리포트 결합(재현성/반례/리페어)")
+
+# 259 모듈이 남긴 값을 읽거나 사용자가 직접 입력
+colA, colB = st.columns(2)
+with colA:
+    repro_ratio = float(ss.get("m259_last_repro_ratio") or 0.0)  # 259가 세션에 남겼다면 사용
+    repro_ratio = st.number_input("재현성 비율(0~1)", min_value=0.0, max_value=1.0,
+                                  value=repro_ratio if repro_ratio>0 else 0.0, step=0.001, key="m260_repro_ratio")
+with colB:
+    adv_found = int(ss.get("m259_last_adv_found") or 0)
+    adv_found = st.number_input("반례(Adversarial) 발견 수", min_value=0, max_value=100000,
+                                value=adv_found, step=1, key="m260_adv_found")
+
+# REPAIR 제안(수정 가능)
+default_tips = ss.get("m259_last_repair") or [
+    "재현성 0.93 미만 시 테스트 스위트 확대 및 시드/정밀도 고정",
+    "반례 발견 시 단위 정상화(ISO 80000)·허용오차 재설계"
+]
+repair_text = st.text_area("REPAIR 제안(편집 가능)", value="\n".join(default_tips), height=120, key="m260_repair_text")
+
+# ===== 3) 결합 → 체인해시(Attestation) 생성 =====
+st.subheader("③ 결합 Attestation 생성")
+
+def m260_build_attestation() -> Dict[str,Any]:
+    ce_digest = ss.m260_ce_digest or ""
+    repro = float(ss.m260_repro_ratio)
+    adv   = int(ss.m260_adv_found)
+    tips  = [t.strip() for t in (ss.m260_repair_text or "").split("\n") if t.strip()]
+    stamp = m260_now_kst_str()
+
+    # 결합 본문(JSON) → 체인해시
+    body = {
+        "ts_kst": stamp,
+        "ce_graph_digest": ce_digest,
+        "verification": {
+            "repro_ratio": repro,
+            "adv_found": adv,
+            "repair_suggestions": tips
+        },
+        # 정책 힌트: 5축 중 validation 퍼센트/정책 상태가 있다면 함께 묶어 고정 가능
+        "policy_hint": {
+            "backbone_total": int(round(sum(ss.get("bb_backbone",{}).values())/5)) if "bb_backbone" in ss else None,
+            "block_flesh": bool(ss.get("bb_block_flesh")) if "bb_block_flesh" in ss else None
+        }
+    }
+    body_json = json.dumps(body, ensure_ascii=False, separators=(",",":"))
+    attest_hash = m260_sha256(body_json)
+    return {"attestation": body, "hash": attest_hash}
+
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("🔐 결합 체인해시 생성", key="m260_make"):
+        if not ss.m260_ce_digest:
+            st.error("CE-Graph digest가 비어 있습니다. ①에서 설정하세요.")
+        else:
+            res = m260_build_attestation()
+            ss.m260_last_attestation = res
+            st.success(f"체인해시 생성: `{res['hash']}`")
+with col2:
+    if st.button("♻️ 최신 값으로 재생성", key="m260_remake"):
+        if not ss.m260_ce_digest:
+            st.error("CE-Graph digest가 비어 있습니다.")
+        else:
+            res = m260_build_attestation()
+            ss.m260_last_attestation = res
+            st.info(f"재생성 완료: `{res['hash']}`")
+
+# 미리보기/다운로드
+if ss.m260_last_attestation:
+    st.markdown("#### 미리보기")
+    st.json(ss.m260_last_attestation, expanded=False)
+
+    md = (
+f"## 🧾 Attestation Snapshot\n"
+f"- 생성시각: **{ss.m260_last_attestation['attestation']['ts_kst']}**\n"
+f"- CE-Graph digest: `{ss.m260_last_attestation['attestation']['ce_graph_digest']}`\n"
+f"- 재현성 비율: **{ss.m260_last_attestation['attestation']['verification']['repro_ratio']:.3f}**\n"
+f"- 반례 발견: **{ss.m260_last_attestation['attestation']['verification']['adv_found']}**\n"
+f"- 체인해시: `{ss.m260_last_attestation['hash']}`\n"
+    )
+    colD, colE = st.columns(2)
+    with colD:
+        st.download_button("📥 Markdown 저장", data=md.encode("utf-8"),
+                           file_name="GEA_Attestation.md", mime="text/markdown", key="m260_dl_md")
+    with colE:
+        blob = json.dumps(ss.m260_last_attestation, ensure_ascii=False, indent=2).encode("utf-8")
+        st.download_button("📦 JSON 저장", data=blob,
+                           file_name="GEA_Attestation.json", mime="application/json", key="m260_dl_json")
+
+st.divider()
+
+# ===== 4) 정책 연동(선택): 척추 5축에 결과 반영 =====
+st.subheader("④ 정책 연동(선택)")
+apply_policy = st.checkbox("검증 결과가 양호하면 '초검증(validation)' 퍼센트 +5 자동 반영", value=True, key="m260_apply_policy")
+if apply_policy and ss.m260_last_attestation:
+    v = ss.m260_last_attestation["attestation"]["verification"]
+    ok = (v["repro_ratio"] >= 0.93) and (v["adv_found"] == 0)
+    st.write(f"- 정책 판단: {'양호 ✅(+5)' if ok else '보류 ⛔'}")
+    if ok and "bb_validation" in ss:
+        ss.bb_validation = min(100, ss.bb_validation + 5)
+        st.caption("초검증(validation) 슬라이더를 +5 상승시켰습니다.")
+
+# ─────────────────────────────────────────────────────────
