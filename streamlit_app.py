@@ -10805,3 +10805,220 @@ with st.expander("✅ 전환 승인 기준(권장)", expanded=True):
 
 st.caption(f"UTC {datetime.utcnow().isoformat()}Z · target={ss.m255_cfg['target_driver']} · retries={ss.m255_cfg['max_retries']} · base_backoff={ss.m255_cfg['base_backoff_ms']}ms")
 # ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# [256] Neo4j 실제 드라이버 어댑터 — 접속/트랜잭션/예외 매핑 스켈레톤
+# 목적: 255(전환 체크리스트) 통과 후, 실제 드라이버 경로로 안전하게 연결.
+# 동작: 패키지 없으면 스텁으로 강등. 있으면 read/write 트랜잭션, 업서트/커밋 제공.
+import streamlit as st, os, uuid, json, time
+from dataclasses import dataclass
+
+# UI 헬퍼가 없다면 간이 정의
+if "register_module" not in globals():
+    def register_module(num, name, desc): st.markdown(f"### **[{num}] {name}**"); st.caption(desc)
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle=""): st.markdown(f"**[{num}] {title}**"); st.caption(subtitle)
+
+register_module("256", "Neo4j 실제 드라이버 어댑터", "접속/업서트/예외 매핑 · 패키지 없으면 스텁")
+
+# ── 드라이버 가용성 체크
+try:
+    from neo4j import GraphDatabase, basic_auth
+    m256_driver_available = True
+except Exception as e:
+    m256_driver_available = False
+    m256_import_err = str(e)
+
+# ── 설정 상태
+ss = st.session_state
+if "m256_cfg" not in ss:
+    ss.m256_cfg = {
+        "uri": os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+        "user": os.getenv("NEO4J_USER", "neo4j"),
+        "password": os.getenv("NEO4J_PASSWORD", ""),
+        "database": os.getenv("NEO4J_DATABASE", "neo4j"),
+        "encrypted": False,
+        "conn_timeout_s": 5,
+        "tx_timeout_s": 10,
+    }
+if "m256_driver" not in ss: ss.m256_driver = None
+if "m256_conn_status" not in ss: ss.m256_conn_status = {"ok": False, "msg": "disconnected"}
+
+# ── 어댑터 정의
+@dataclass
+class M256Result:
+    ok: bool
+    msg: str
+    payload: dict = None
+
+class Neo4jRealAdapter:
+    """ 실제 neo4j 어댑터 (패키지 필요). """
+    def __init__(self, uri, user, password, database, encrypted, conn_timeout_s=5, tx_timeout_s=10):
+        self.uri = uri; self.user = user; self.password = password
+        self.database = database; self.encrypted = encrypted
+        self.conn_timeout_s = conn_timeout_s; self.tx_timeout_s = tx_timeout_s
+        # 드라이버 생성
+        auth = basic_auth(self.user, self.password)
+        self.driver = GraphDatabase.driver(self.uri, auth=auth, encrypted=self.encrypted)
+    def close(self):
+        try:
+            if self.driver: self.driver.close()
+        except: pass
+    def ping(self) -> M256Result:
+        try:
+            def _work(tx): return tx.run("RETURN 1 AS ok").single()["ok"]
+            with self.driver.session(database=self.database) as session:
+                v = session.execute_read(_work, timeout=self.tx_timeout_s)
+            return M256Result(True, "ping ok", {"value": v})
+        except Exception as e:
+            return M256Result(False, f"ping fail: {e}")
+    # 업서트(간이 키 규약: Label:key)
+    def upsert_node(self, label:str, key:str, props:dict) -> M256Result:
+        cypher = f"""
+        MERGE (n:{label} {{id:$id}})
+        SET n += $props
+        RETURN n.id AS id
+        """
+        try:
+            with self.driver.session(database=self.database) as session:
+                rec = session.execute_write(
+                    lambda tx: tx.run(cypher, id=key, props=props).single(),
+                    timeout=self.tx_timeout_s
+                )
+            return M256Result(True, "node upsert ok", {"id": rec["id"]})
+        except Exception as e:
+            return M256Result(False, f"node upsert fail: {e}", {"cypher": cypher})
+    def upsert_edge(self, rel:str, src_label:str, src_id:str, dst_label:str, dst_id:str, props:dict=None) -> M256Result:
+        cypher = f"""
+        MATCH (s:{src_label} {{id:$sid}}), (d:{dst_label} {{id:$did}})
+        MERGE (s)-[r:{rel}]->(d)
+        SET r += $props
+        RETURN type(r) AS rel
+        """
+        try:
+            with self.driver.session(database=self.database) as session:
+                rec = session.execute_write(
+                    lambda tx: tx.run(cypher, sid=src_id, did=dst_id, props=props or {}).single(),
+                    timeout=self.tx_timeout_s
+                )
+            return M256Result(True, "edge upsert ok", {"rel": rec["rel"]})
+        except Exception as e:
+            return M256Result(False, f"edge upsert fail: {e}", {"cypher": cypher})
+    def run_query(self, cypher:str, params:dict=None, read=True) -> M256Result:
+        try:
+            with self.driver.session(database=self.database) as session:
+                if read:
+                    records = session.execute_read(lambda tx: list(tx.run(cypher, **(params or {}))),
+                                                   timeout=self.tx_timeout_s)
+                else:
+                    records = session.execute_write(lambda tx: list(tx.run(cypher, **(params or {}))),
+                                                    timeout=self.tx_timeout_s)
+            rows = [r.data() for r in records]
+            return M256Result(True, "query ok", {"rows": rows, "n": len(rows)})
+        except Exception as e:
+            return M256Result(False, f"query fail: {e}", {"cypher": cypher})
+
+class Neo4jStubAdapter:
+    """ 패키지/접속 불가 시 대체 스텁(메모리). 255와 호환되는 더미 동작. """
+    def __init__(self): self.nodes = {}; self.edges = []
+    def close(self): pass
+    def ping(self) -> M256Result: return M256Result(True, "stub ping ok")
+    def upsert_node(self, label, key, props)->M256Result:
+        self.nodes[(label,key)] = {**props}
+        return M256Result(True, "stub node", {"id": key})
+    def upsert_edge(self, rel, src_label, src_id, dst_label, dst_id, props=None)->M256Result:
+        self.edges.append((rel, src_label, src_id, dst_label, dst_id, props or {}))
+        return M256Result(True, "stub edge", {"rel": rel})
+    def run_query(self, cypher, params=None, read=True)->M256Result:
+        # 간이 응답
+        return M256Result(True, "stub query", {"rows":[{"stub": True}], "n":1})
+
+# ── UI: 연결 설정
+gray_line("256", "연결 설정", "환경변수(NEO4J_*) 또는 여기서 직접 입력")
+c1, c2, c3 = st.columns(3)
+with c1:
+    ss.m256_cfg["uri"] = st.text_input("URI", ss.m256_cfg["uri"], key="m256_uri")
+    ss.m256_cfg["database"] = st.text_input("Database", ss.m256_cfg["database"], key="m256_db")
+with c2:
+    ss.m256_cfg["user"] = st.text_input("User", ss.m256_cfg["user"], key="m256_user")
+    ss.m256_cfg["encrypted"] = st.toggle("Encrypted", value=ss.m256_cfg["encrypted"], key="m256_enc")
+with c3:
+    ss.m256_cfg["password"] = st.text_input("Password", ss.m256_cfg["password"], type="password", key="m256_pw")
+    ss.m256_cfg["conn_timeout_s"] = st.number_input("Conn Timeout(s)", 1, 60, ss.m256_cfg["conn_timeout_s"], key="m256_cto")
+
+# ── 드라이버 준비/종료
+cA, cB, cC = st.columns([1,1,2])
+with cA:
+    if st.button("드라이버 초기화", key="m256_init"):
+        # 기존 닫기
+        try:
+            if ss.m256_driver: ss.m256_driver.close()
+        except: pass
+        if m256_driver_available:
+            try:
+                ss.m256_driver = Neo4jRealAdapter(
+                    ss.m256_cfg["uri"], ss.m256_cfg["user"], ss.m256_cfg["password"],
+                    ss.m256_cfg["database"], ss.m256_cfg["encrypted"], ss.m256_cfg["conn_timeout_s"]
+                )
+                ss.m256_conn_status = {"ok": True, "msg": "driver ready(real)"}
+            except Exception as e:
+                ss.m256_driver = Neo4jStubAdapter()
+                ss.m256_conn_status = {"ok": False, "msg": f"real init fail → stub: {e}"}
+        else:
+            ss.m256_driver = Neo4jStubAdapter()
+            ss.m256_conn_status = {"ok": False, "msg": f"neo4j 패키지 없음 → stub ({m256_import_err})"}
+        st.toast(ss.m256_conn_status["msg"])
+with cB:
+    if st.button("드라이버 종료", key="m256_close"):
+        try:
+            if ss.m256_driver: ss.m256_driver.close()
+            ss.m256_driver = None
+            ss.m256_conn_status = {"ok": False, "msg": "closed"}
+        except Exception as e:
+            ss.m256_conn_status = {"ok": False, "msg": f"close err: {e}"}
+with cC:
+    st.json(ss.m256_conn_status)
+
+# ── 핑/업서트/질의 스모크
+gray_line("256", "스모크 테스트", "핑 → 노드/엣지 업서트 → 간이 질의")
+d = ss.get("m256_driver")
+colx, coly, colz = st.columns(3)
+with colx:
+    if st.button("PING", key="m256_ping"):
+        if not d: st.warning("드라이버를 먼저 초기화하세요.")
+        else:
+            r = d.ping(); (st.success if r.ok else st.error)(r.msg); st.json(r.payload or {})
+with coly:
+    if st.button("UPSERT NODE", key="m256_up_node"):
+        if not d: st.warning("드라이버를 먼저 초기화하세요.")
+        else:
+            key = f"claim-{uuid.uuid4().hex[:6]}"
+            r = d.upsert_node("Claim", key, {"text":"hello-claim","score":0.42})
+            (st.success if r.ok else st.error)(r.msg); st.json(r.payload or {})
+            ss["m256_last_node"] = ("Claim", key)
+with colz:
+    if st.button("UPSERT EDGE", key="m256_up_edge"):
+        if not d: st.warning("드라이버를 먼저 초기화하세요.")
+        else:
+            # 보조 Evidence 노드도 보장
+            evk = f"evi-{uuid.uuid4().hex[:6]}"
+            d.upsert_node("Evidence", evk, {"text":"hello-evidence"})
+            src = ss.get("m256_last_node", ("Claim", f"claim-{uuid.uuid4().hex[:6]}"))
+            r = d.upsert_edge("EVIDENCES", src[0], src[1], "Evidence", evk, {"w":1.0})
+            (st.success if r.ok else st.error)(r.msg); st.json(r.payload or {})
+
+# 간이 질의 박스
+st.text_area("Cypher", value="MATCH (n) RETURN n.id AS id LIMIT 5", key="m256_cypher")
+if st.button("RUN READ", key="m256_run_read"):
+    if not d: st.warning("드라이버를 먼저 초기화하세요.")
+    else:
+        r = d.run_query(st.session_state["m256_cypher"], read=True)
+        (st.success if r.ok else st.error)(r.msg); st.json(r.payload or {})
+if st.button("RUN WRITE", key="m256_run_write"):
+    if not d: st.warning("드라이버를 먼저 초기화하세요.")
+    else:
+        r = d.run_query(st.session_state["m256_cypher"], read=False)
+        (st.success if r.ok else st.error)(r.msg); st.json(r.payload or {})
+
+# 253/254/255와의 연결(있다면) — 다음 모듈들이 ss.m256_driver를 소비
+st.caption("다음 모듈은 ss.m256_driver(실/스텁)를 직접 사용합니다. 255의 리포트와 함께 전환하세요.")
+# ─────────────────────────────────────────────────────────
