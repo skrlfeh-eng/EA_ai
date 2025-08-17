@@ -13152,3 +13152,69 @@ except Exception:
     pass
 st.caption("상상력 축 +8 반영됨 (사이드바 확인)")
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [269] Emotion & Desire Stub v1 — Minimal State Machine
+import streamlit as st, heapq, time
+from datetime import datetime, timezone, timedelta
+
+st.markdown("#### [269] Emotion & Desire Stub v1")
+st.caption("⑤ 감정/욕구 축 강화: 최소 감정 상태(긍/부정) + 욕구 우선순위 큐")
+
+# 정책 게이트
+if "spx_backbone_gate" in globals():
+    ok, msg = spx_backbone_gate("269 Emotion Stub", "감정/욕구 스텁 강화")
+    st.caption(msg)
+
+# ===== 세션 초기화 =====
+if "emo_state" not in st.session_state:
+    st.session_state.emo_state = {"valence": 0, "last_update": time.time()}  # -100~100
+if "desires" not in st.session_state:
+    st.session_state.desires = []  # heapq (priority, ts, text)
+
+# ===== 감정 상태 업데이트 =====
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("😀 긍정 이벤트 +10"):
+        st.session_state.emo_state["valence"] = min(100, st.session_state.emo_state["valence"]+10)
+        st.session_state.emo_state["last_update"] = time.time()
+with col2:
+    if st.button("😞 부정 이벤트 -10"):
+        st.session_state.emo_state["valence"] = max(-100, st.session_state.emo_state["valence"]-10)
+        st.session_state.emo_state["last_update"] = time.time()
+
+emo = st.session_state.emo_state
+st.write(f"현재 감정 상태: {emo['valence']} (범위 -100~100)")
+
+# ===== 욕구 큐 관리 =====
+st.subheader("💡 욕구 큐")
+with st.form("desire_form"):
+    text = st.text_input("새 욕구 입력", "")
+    prio = st.slider("우선순위(높을수록 우선)", 1, 10, 5)
+    submitted = st.form_submit_button("추가")
+    if submitted and text:
+        ts = time.time()
+        heapq.heappush(st.session_state.desires, (-prio, ts, text))  # max-heap by prio
+        st.success(f"추가됨: {text} (우선순위 {prio})")
+
+if st.button("🔥 최상위 욕구 소모"):
+    if st.session_state.desires:
+        top = heapq.heappop(st.session_state.desires)
+        st.info(f"소모된 욕구: {top[2]} (prio={-top[0]})")
+    else:
+        st.warning("소모할 욕구 없음")
+
+if st.session_state.desires:
+    st.write("현재 욕구 큐:")
+    for p,t,x in sorted(st.session_state.desires, key=lambda x:(x[0],x[1])):
+        st.write(f"- {x} (prio={-p})")
+else:
+    st.caption("욕구 큐 비어있음")
+
+# ⑤축 자동 가점
+try:
+    if "spx_backbone" in st.session_state:
+        st.session_state.spx_backbone["emotion"] = min(100, st.session_state.spx_backbone["emotion"] + 8)
+except Exception:
+    pass
+st.caption("감정/욕구 축 +8 반영됨 (사이드바 확인)")
+# ───────────────────────────────────────────────
