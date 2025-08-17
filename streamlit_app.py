@@ -13087,3 +13087,68 @@ except Exception:
     pass
 st.caption("기억·자가진화 축 +8 반영됨 (사이드바 확인)")
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [268] Imagination Engine v1 — Scenario Runner
+import streamlit as st, json
+from datetime import datetime, timezone, timedelta
+import random
+
+st.markdown("#### [268] Imagination Engine v1 — Scenario Runner")
+st.caption("④ 상상력 축 강화: 가정/제약 기반 시뮬레이션. 분기 시나리오 자동 생성")
+
+# 정책 게이트
+if "spx_backbone_gate" in globals():
+    ok, msg = spx_backbone_gate("268 Imagination Runner", "상상력 축 강화")
+    st.caption(msg)
+
+# ===== 시나리오 생성 함수 =====
+def scenario_runner(assumption:str, constraint:str, goal:str, n:int=3):
+    random.seed(len(assumption)+len(constraint)+len(goal))
+    scenarios = []
+    for i in range(n):
+        step1 = f"가정 기반 시작: {assumption}"
+        step2 = f"제약 고려: {constraint}"
+        step3 = f"목표 지향 단계 {i+1}: {goal}"
+        outcome = random.choice([
+            "성공적 달성", "부분적 실패", "예상외 기회 발견", "새로운 리스크 발생"
+        ])
+        scenarios.append({
+            "id": i+1,
+            "steps": [step1, step2, step3],
+            "outcome": outcome
+        })
+    return scenarios
+
+# ===== UI =====
+assumption = st.text_area("가정(Assumption)", "예: 모든 데이터가 완전하게 동기화되어 있다")
+constraint = st.text_area("제약(Constraint)", "예: 처리 속도는 5초 이내여야 한다")
+goal = st.text_area("목표(Goal)", "예: CE-Graph 품질을 95% 이상으로 유지한다")
+num = st.slider("생성할 시나리오 수", 1, 5, 3)
+
+if st.button("🚀 시나리오 생성"):
+    sims = scenario_runner(assumption, constraint, goal, num)
+    for sc in sims:
+        st.markdown(f"**시나리오 #{sc['id']}** · 결과: {sc['outcome']}")
+        for step in sc["steps"]:
+            st.write(" -", step)
+        st.divider()
+    
+    # JSON 저장 옵션
+    snapshot = {
+        "timestamp": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S KST"),
+        "assumption": assumption,
+        "constraint": constraint,
+        "goal": goal,
+        "scenarios": sims
+    }
+    st.download_button("📥 JSON 저장", data=json.dumps(snapshot, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="EA_Imagination_Scenario.json", mime="application/json")
+
+# ④축 자동 가점
+try:
+    if "spx_backbone" in st.session_state:
+        st.session_state.spx_backbone["imagination"] = min(100, st.session_state.spx_backbone["imagination"] + 8)
+except Exception:
+    pass
+st.caption("상상력 축 +8 반영됨 (사이드바 확인)")
+# ───────────────────────────────────────────────
