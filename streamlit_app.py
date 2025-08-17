@@ -10144,3 +10144,99 @@ with st.expander("251S. 우주정보장 연동 스위처", expanded=True):
     }
 
     st.info(f"현재 모드: {mode} | 자동: {auto} | 주기: {interval}초")
+    
+    # 253 — 우주정보장 연동 오케스트레이터(런타임 루프)
+# 역할: 251S(스위처)의 설정을 읽어 251R3/252R4를 주기적으로/수동으로 실행
+# 연결: 251R3/252R4에서 run 함수를 아래 이름으로 세션에 등록해 주세요.
+#   st.session_state["m251r3_runner"] = your_run_func
+#   st.session_state["m252r4_runner"] = your_run_func
+
+register_module("253", "우주정보장 연동 오케스트레이터", "스위처 상태를 읽어 자동/수동 실행을 조율")
+
+import streamlit as st
+from datetime import datetime, timedelta
+
+NS253 = "m253"
+def k253(s): return f"{NS253}_{s}"
+
+with st.expander("253. 우주정보장 연동 오케스트레이터", expanded=True):
+    st.caption("스위처(251S)의 모드/자동/주기 값을 읽어 251R3·252R4 실행을 조율합니다.")
+
+    # 스위처 상태 읽기
+    cfg = st.session_state.get("cosmic_switch", {}) or {}
+    mode = cfg.get("mode", "OFF")
+    auto = bool(cfg.get("auto", False))
+    interval = int(cfg.get("interval", 10))
+
+    st.write(f"🔧 현재 스위치 — 모드: **{mode}**, 자동: **{auto}**, 주기: **{interval}초**")
+
+    # 러너 등록 확인
+    r3_runner = st.session_state.get("m251r3_runner", None)
+    r4_runner = st.session_state.get("m252r4_runner", None)
+
+    # 상태 초기화
+    if k253("tick") not in st.session_state:
+        st.session_state[k253("tick")] = 0
+    if k253("last_run") not in st.session_state:
+        st.session_state[k253("last_run")] = None
+
+    # 수동 실행 버튼들(키 충돌 방지)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("▶ 수동 실행 (현재 모드)", key=k253("run_now")):
+            st.session_state[k253("tick")] += 1
+    with c2:
+        if st.button("▶ R3 강제 실행", key=k253("run_r3")):
+            st.session_state[k253("tick")] += 1
+            mode = "R3(느슨)"
+    with c3:
+        if st.button("▶ R4 강제 실행", key=k253("run_r4")):
+            st.session_state[k253("tick")] += 1
+            mode = "R4(엄격)"
+
+    # 자동 실행(주기)
+    if auto and mode != "OFF":
+        # st_autorefresh는 같은 키만 쓰면 Duplicate가 날 수 있어 tick으로 네임스페이스 분리
+        st_autorefresh_key = k253("auto_refresh")
+        _ = st.experimental_rerun  # 호스트에 따라 st_autorefresh 미지원 대비
+        try:
+            st_autorefresh = getattr(st, "autorefresh", None) or getattr(st, "experimental_rerun", None)
+        except Exception:
+            st_autorefresh = None
+        # 표준 API
+        if hasattr(st, "autorefresh"):
+            st.autorefresh(interval=interval * 1000, key=st_autorefresh_key)
+        else:
+            # autorefresh 불가 환경에선 안내만
+            st.info("이 환경에서는 자동 새로고침 API가 제한적입니다. 수동 실행을 사용해 주세요.")
+
+    # 실행 디스패처
+    def _dispatch(_mode: str):
+        if _mode == "R3(느슨)":
+            if callable(r3_runner):
+                r3_runner()  # 251R3 내부 run 함수
+                return "R3"
+            else:
+                st.warning("R3 러너가 등록되지 않았습니다. (st.session_state['m251r3_runner'])")
+                return None
+        elif _mode == "R4(엄격)":
+            if callable(r4_runner):
+                r4_runner()  # 252R4 내부 run 함수
+                return "R4"
+            else:
+                st.warning("R4 러너가 등록되지 않았습니다. (st.session_state['m252r4_runner'])")
+                return None
+        return None
+
+    # 트리거 판단: 수동 버튼 또는 자동 모드 활성 시
+    did = None
+    if mode in ("R3(느슨)", "R4(엄격)"):
+        # 자동표시는 안내만, 실제 트리거는 수동 버튼/사용자 인터랙션 시마다 디스패치
+        # (Streamlit 특성상 백그라운드 스레드 없이 주기적 리프레시에서 실행)
+        did = _dispatch(mode)
+
+    # 메타 정보
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if did:
+        st.session_state[k253("last_run")] = f"{ts} · {did}"
+    st.caption(f"최근 실행: {st.session_state.get(k253('last_run')) or '없음'}")
