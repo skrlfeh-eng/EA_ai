@@ -10282,3 +10282,175 @@ with colC3:
 
 st.caption(f"UTC {datetime.utcnow().isoformat()}Z · queue={len(ss.m252_q)} · logs={len(ss.m252_log)}")
 # ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# [253] CE-Graph 어댑터 뼈대 (Backbone v1)
+# 기능: 그래프 클라이언트 표준 인터페이스 정의 + 인메모리 모의 구현 + 252번과 연결 훅
+# 모든 상태/키: m253_* (충돌 방지)
+import streamlit as st, json, uuid
+from datetime import datetime
+
+# 안전가드
+if "register_module" not in globals():
+    def register_module(num, name, desc): 
+        st.markdown(f"### **[{num}] {name}**"); st.caption(desc)
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle=""):
+        st.markdown(f"**[{num}] {title}**");  st.caption(subtitle)
+
+register_module("253", "CE-Graph 어댑터 뼈대", "표준 I/F + 인메모리 모의 그래프 · 252와 연결 가능")
+
+# ── 세션 초기화
+ss = st.session_state
+if "m253_cfg" not in ss:
+    ss.m253_cfg = {
+        "driver": "inmem",   # inmem / (향후)neo4j, janus, tiger 등
+        "dry_run": False,    # True면 실제 반영 대신 로그만
+        "auto_link_252": True,  # 252 파이프라인이 있으면 자동 연결
+    }
+if "m253_graph" not in ss:
+    ss.m253_graph = {"nodes": {}, "edges": {}}  # in-memory store
+if "m253_logs" not in ss:
+    ss.m253_logs = []
+
+# ── 표준 I/F
+class CEGraphAdapter:
+    def __init__(self, driver="inmem", dry_run=False):
+        self.driver = driver
+        self.dry_run = dry_run
+        # in-memory backend
+        self._nodes = ss.m253_graph["nodes"]
+        self._edges = ss.m253_graph["edges"]
+
+    # 건전성 체크
+    def health(self) -> dict:
+        return {
+            "driver": self.driver,
+            "dry_run": self.dry_run,
+            "nodes": len(self._nodes),
+            "edges": len(self._edges),
+            "ts": datetime.utcnow().isoformat()+"Z",
+        }
+
+    # 노드/엣지 key 규격화
+    def _nk(self, label:str, key:str):
+        return f"{label}:{key}"
+
+    def upsert_node(self, label:str, key:str, props:dict) -> str:
+        nid = self._nk(label, key)
+        if not self.dry_run:
+            cur = self._nodes.get(nid, {})
+            cur.update({"label": label, "key": key, **(props or {})})
+            self._nodes[nid] = cur
+        ss.m253_logs.append({"op":"upsert_node","id":nid,"props":props,"ts":datetime.utcnow().isoformat()+"Z"})
+        return nid
+
+    def upsert_edge(self, rel:str, src_id:str, dst_id:str, props:dict=None) -> str:
+        eid = f"{rel}:{src_id}->{dst_id}"
+        if not self.dry_run:
+            cur = self._edges.get(eid, {})
+            cur.update({"rel":rel,"src":src_id,"dst":dst_id, **(props or {})})
+            self._edges[eid] = cur
+        ss.m253_logs.append({"op":"upsert_edge","id":eid,"ts":datetime.utcnow().isoformat()+"Z"})
+        return eid
+
+    def commit(self):
+        # 외부 드라이버라면 트랜잭션 커밋 지점
+        ss.m253_logs.append({"op":"commit","ts":datetime.utcnow().isoformat()+"Z"})
+        return True
+
+# ── 어댑터 싱글톤 제공(다른 모듈에서 가져다 쓰기)
+def get_ce_adapter() -> CEGraphAdapter:
+    if "m253_adapter" not in ss:
+        ss.m253_adapter = CEGraphAdapter(driver=ss.m253_cfg["driver"], dry_run=ss.m253_cfg["dry_run"])
+    return ss.m253_adapter
+
+# ── 252번 파이프라인과 느슨한 연결 훅(있으면 사용)
+def _maybe_wire_with_252():
+    if not ss.m253_cfg.get("auto_link_252"): 
+        return False
+    # 252가 없으면 패스(조용히)
+    if "m252_log" not in ss or "m252_q" not in ss:
+        return False
+    # 252에서 사용하는 내부 반영 함수를 어댑터 기반으로 대체할 수 있게 글로벌 심(seatbelt)
+    # 252 코드가 _m252_ce_ingest(hit, verdict) 를 호출한다면, 여길 경유하도록 교체 안내용
+    ss.m253_linked_252 = True
+    return True
+_maybe_wire_with_252()
+
+# ── UI 패널: 상태/조작/내보내기
+gray_line("253", "어댑터 상태", "드라이버/드라이런 · 헬스 체크")
+colA, colB, colC = st.columns(3)
+with colA:
+    ss.m253_cfg["driver"] = st.selectbox("드라이버", ["inmem"], index=0, key="m253_driver")
+with colB:
+    ss.m253_cfg["dry_run"] = st.toggle("Dry Run(반영 안 함, 로그만)", value=ss.m253_cfg["dry_run"], key="m253_dry")
+with colC:
+    st.write("252 자동연결:", "ON" if ss.m253_cfg["auto_link_252"] else "OFF")
+
+adp = get_ce_adapter()
+health = adp.health()
+st.json(health)
+
+# ── 간단 입력 → 그래프 반영(수동 테스트)
+with st.expander("➕ 수동 반영 테스트(노드/엣지)", expanded=False):
+    st.caption("노드 upsert → (선택) 엣지 upsert → commit")
+    nl, nk = st.columns(2)
+    with nl:
+        label = st.text_input("노드 라벨", "Claim", key="m253_nlabel")
+    with nk:
+        nkey = st.text_input("노드 키", value=str(uuid.uuid4())[:8], key="m253_nkey")
+    props = st.text_area("노드 속성(JSON)", value='{"text":"hello","score":0.9}', key="m253_nprops")
+    edge_on = st.toggle("엣지도 만들기", key="m253_eon")
+
+    if st.button("반영 실행", key="m253_apply"):
+        try:
+            p = json.loads(props) if props.strip() else {}
+        except Exception as e:
+            st.error(f"노드 속성 JSON 파싱 실패: {e}")
+            p = {}
+        nid = adp.upsert_node(label, nkey, p)
+        eid = None
+        if edge_on:
+            # 예시: (Claim)-[EVIDENCES]->(Evidence)
+            src = nid
+            dst = adp.upsert_node("Evidence", str(uuid.uuid4())[:8], {"note":"stub"})
+            eid = adp.upsert_edge("EVIDENCES", src, dst, {"w":1.0})
+        adp.commit()
+        st.success(f"반영 완료 · node={nid} · edge={eid or '-'}")
+
+# ── 그래프 내용 미리보기 & 내보내기
+gray_line("253", "그래프 미리보기/내보내기", "인메모리 내용 확인")
+nodes = list(ss.m253_graph["nodes"].items())
+edges = list(ss.m253_graph["edges"].items())
+st.write(f"노드 {len(nodes)} · 엣지 {len(edges)}")
+colV1, colV2 = st.columns(2)
+with colV1:
+    st.json(dict(nodes[:20]))
+with colV2:
+    st.json(dict(edges[:20]))
+
+colD1, colD2, colD3 = st.columns(3)
+with colD1:
+    st.download_button(
+        "노드 JSON 다운로드",
+        data=json.dumps(ss.m253_graph["nodes"], ensure_ascii=False, indent=2).encode("utf-8"),
+        file_name="cegraph_nodes.json",
+        mime="application/json",
+        key="m253_dn_nodes",
+    )
+with colD2:
+    st.download_button(
+        "엣지 JSON 다운로드",
+        data=json.dumps(ss.m253_graph["edges"], ensure_ascii=False, indent=2).encode("utf-8"),
+        file_name="cegraph_edges.json",
+        mime="application/json",
+        key="m253_dn_edges",
+    )
+with colD3:
+    if st.button("그래프 초기화(주의)", key="m253_reset"):
+        ss.m253_graph["nodes"].clear()
+        ss.m253_graph["edges"].clear()
+        st.warning("인메모리 그래프 초기화 완료")
+
+st.caption(f"UTC {datetime.utcnow().isoformat()}Z · driver={ss.m253_cfg['driver']} · dry={ss.m253_cfg['dry_run']}")
+# ─────────────────────────────────────────────────────────
