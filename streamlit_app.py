@@ -12204,3 +12204,171 @@ with st.expander("③ 261/오토퓨전과 연동 테스트(선택)", expanded=Fa
         else:
             st.warning("먼저 ②단계를 실행해 CE-그래프를 생성하세요.")
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [263] CE-Quality & Units Spot-Checker (CEQU-U1)
+# 기능:
+#  - 262 생성 CE-그래프를 받아 coverage/consistency/dup-rate/novelty 스코어 산출
+#  - 수식/단위 최소 일관성(차원 무차원 여부 등) 스팟체크
+#  - 결과를 세션에 저장하고, 백본 ②축(초검증) 진행률 자동 가점(+10~+15)
+import streamlit as st, json, time, math
+from typing import Dict, Any, List, Tuple
+
+st.markdown("#### [263] CE-Quality & Units Spot-Checker (CEQU-U1)")
+st.caption("262의 CE-그래프 품질평가 + 단위/차원 간이검사 → 초검증 축 전진")
+
+# ---------- 유틸 ----------
+def _263_pick_ce() -> Dict[str,Any]:
+    # 262 산출물이 있으면 우선 사용
+    if "rlsi_ce_262" in st.session_state and st.session_state["rlsi_ce_262"]:
+        return st.session_state["rlsi_ce_262"]
+    # 없으면 샘플 CE-그래프
+    claim_id = "claim:sample"
+    nodes = [
+        {"id": claim_id, "kind": "claim", "payload": {"text": "중력파 검출은 실측 데이터로 재현 가능하다"}},
+        {"id": "evi:arxiv1602", "kind": "evidence", "payload":{"title":"GW Observation","domain":"arxiv.org","score":0.97}},
+        {"id": "evi:nist", "kind":"evidence", "payload":{"title":"CODATA constants","domain":"nist.gov","score":0.95}},
+        {"id": "method:eq:gw-strain", "kind":"method", "payload":{"statement":"h≈ΔL/L","source":"LIGO"}}
+    ]
+    edges = [
+        {"src":"evi:arxiv1602","dst":claim_id,"rel":"supports"},
+        {"src":"evi:nist","dst":claim_id,"rel":"supports"},
+        {"src":"method:eq:gw-strain","dst":claim_id,"rel":"measured_by"},
+    ]
+    return {"nodes":nodes,"edges":edges,"digest":"sample"}
+
+def _263_nodes_by_kind(ce: Dict[str,Any]) -> Dict[str,List[Dict[str,Any]]]:
+    kinds = {}
+    for n in ce.get("nodes",[]):
+        kinds.setdefault(n.get("kind","other"), []).append(n)
+    return kinds
+
+def _263_coverage(ce: Dict[str,Any]) -> float:
+    # coverage ~ (evidence 수 + method 연결 여부) / (evidence+method+claim)
+    nodes = ce.get("nodes",[])
+    if not nodes: return 0.0
+    kinds = _263_nodes_by_kind(ce)
+    ev = len(kinds.get("evidence",[]))
+    md = len(kinds.get("method",[]))
+    cl = len(kinds.get("claim",[]))
+    raw = (ev + (1 if md>0 else 0)) / max(1, ev + md + cl)
+    return round(min(1.0, raw), 3)
+
+def _263_consistency(ce: Dict[str,Any]) -> float:
+    # 간이 일관성: supports 비율, self-loop 없음, 미정의 노드 참조 없음
+    edges = ce.get("edges",[])
+    nodes = {n["id"] for n in ce.get("nodes",[])}
+    if not edges: return 0.0
+    ok = 0
+    for e in edges:
+        if e.get("rel") not in ("supports","measured_by"): 
+            continue
+        src, dst = e.get("src"), e.get("dst")
+        if src in nodes and dst in nodes and src != dst:
+            ok += 1
+    return round(ok / len(edges), 3)
+
+def _263_dup_rate(ce: Dict[str,Any]) -> float:
+    # 증거 title/domain/sha256 키 최소 중복률(낮을수록 좋음) — 간이
+    seen = set(); dup = 0; total = 0
+    for n in ce.get("nodes",[]):
+        if n.get("kind")!="evidence": continue
+        p = n.get("payload",{})
+        key = (p.get("title"), p.get("domain"), p.get("sha256"))
+        total += 1
+        if key in seen: dup += 1
+        else: seen.add(key)
+    return round((dup / total) if total else 0.0, 3)
+
+def _263_novelty(ce: Dict[str,Any]) -> float:
+    # 간이 신규성: evidence 도메인 다양도(고유 domain 수 / evidence 수)
+    kinds = _263_nodes_by_kind(ce)
+    evs = kinds.get("evidence",[])
+    if not evs: return 0.0
+    doms = set()
+    for n in evs:
+        d = (n.get("payload") or {}).get("domain")
+        if d: doms.add(d)
+    return round(len(doms) / max(1,len(evs)), 3)
+
+# 단위/차원 간이 검사(무차원·기본 단위 매칭)
+def _263_units_spot(items: List[Dict[str,Any]]) -> Dict[str,Any]:
+    checks = []
+    ok = 0; total = 0
+    for it in items:
+        if it.get("type")!="equation": 
+            continue
+        total += 1
+        stmt = (it.get("statement") or "").replace(" ", "")
+        # 아주 단순 규칙: "ΔL/L" 형태 → 무차원 판정
+        if "ΔL/L" in stmt or "dL/L" in stmt or "L/L" in stmt:
+            checks.append({"id":it.get("id"),"rule":"ratio→dimensionless","result":"pass"})
+            ok += 1
+        else:
+            checks.append({"id":it.get("id"),"rule":"basic-scan","result":"unknown"})
+    score = round(ok / total, 3) if total else 1.0
+    return {"total_equations": total, "pass": ok, "score": score, "details": checks}
+
+def _263_fetch_items() -> List[Dict[str,Any]]:
+    if "rlsi_items_262" in st.session_state and st.session_state["rlsi_items_262"]:
+        return st.session_state["rlsi_items_262"]
+    # 샘플(간소)
+    return [
+        {"id":"eq:gw-strain","type":"equation","statement":"h ≈ ΔL / L"},
+        {"id":"eq:einstein-field","type":"equation","statement":"G_{μν} = 8πG T_{μν} / c^4"}
+    ]
+
+# ---------- UI ----------
+with st.expander("① CE-그래프 선택", expanded=True):
+    ce_graph = _263_pick_ce()
+    st.json({"nodes": len(ce_graph.get("nodes",[])), "edges": len(ce_graph.get("edges",[])), "digest": ce_graph.get("digest","")[:16]+"…"})
+
+with st.expander("② 품질 평가 실행", expanded=True):
+    if st.button("CE-품질 스코어 계산", use_container_width=True, key="ceq_calc"):
+        cov = _263_coverage(ce_graph)
+        con = _263_consistency(ce_graph)
+        dup = _263_dup_rate(ce_graph)
+        nov = _263_novelty(ce_graph)
+        items = _263_fetch_items()
+        units = _263_units_spot(items)
+        # 종합 점수(가중 합; dup는 페널티)
+        score = cov*0.35 + con*0.35 + nov*0.20 + (1.0 - dup)*0.10
+        score = round(max(0.0, min(1.0, score)), 3)
+        report = {
+            "coverage": cov,
+            "consistency": con,
+            "dup_rate": dup,
+            "novelty": nov,
+            "units_spot": units,
+            "ce_quality": score,
+            "ts": time.time()
+        }
+        st.session_state["ce_quality_263"] = report
+        st.success("품질 평가 완료")
+        colA, colB = st.columns(2)
+        with colA: st.metric("CE-Quality", f"{score:.3f}")
+        with colB: st.metric("Units spot", f"{units['score']:.3f}", help="무차원 비율 등 간이검사 스코어")
+        st.json(report)
+        # 다운로드
+        st.download_button("📥 품질 리포트(JSON)", data=json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"),
+                           file_name="CEQU_U1_report_263.json", mime="application/json", use_container_width=True)
+        # ②축 자동 가점: 기본 +10, 품질>0.85면 +15
+        bonus = 15 if score >= 0.85 else 10
+        try:
+            if "spx_backbone" in st.session_state:
+                st.session_state.spx_backbone["validation"] = min(100, st.session_state.spx_backbone["validation"] + bonus)
+        except Exception:
+            pass
+        st.caption(f"초검증 축 가점 반영: +{bonus} (현재 값은 사이드바/대시보드에서 확인)")
+
+with st.expander("③ 게이트 힌트(선택)", expanded=False):
+    st.caption("다음 단계(정식 초검증 모듈)로 넘길 요약 힌트를 세션에 심습니다.")
+    if st.button("세션 힌트 저장", key="ceq_hint"):
+        if "ce_quality_263" in st.session_state:
+            st.session_state["validation_gate_hint"] = {
+                "quality": st.session_state["ce_quality_263"],
+                "source": "263-CEQU-U1"
+            }
+            st.success("저장 완료: validation_gate_hint")
+        else:
+            st.warning("먼저 ② 품질 평가를 실행하세요.")
+# ───────────────────────────────────────────────
