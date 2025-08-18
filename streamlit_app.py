@@ -14771,146 +14771,97 @@ with cB:
 
 st.caption(f"SPX-274 · {spx274_now_kst()} · 표준 게이트 준비 완료")
 
-
-# ===== 275. EP-275 · 우주정보장 실연동 핑/검증(ONLINE 전용 · R6) =====
-# 기능: LIGO EventAPI를 실제로 호출(ONLINE) → 응답 수신 → 소프트 스키마 검증 → 결과/이력 기록
-# 포커스: 1축(현실연동) + 2축(초검증 최소요건) 확인. 더미/시뮬레이션 절대 사용 안 함.
-# 키 충돌 방지용 prefix: m275_
-
+# === EP-275 · LIGO ONLINE 실연동 (REAL) · R6.1 ===
+# 키 프리픽스: m275_
+import json, time, requests
 import streamlit as st
-import time, json
-from datetime import datetime, timezone
 
-# 안전장치: 상위 유틸이 없을 때를 대비
-if "register_module" not in globals():
-    def register_module(num, name, desc): 
-        st.markdown(f"### **[{num}] {name}**")
-        st.caption(desc)
+SECTION = "275-ONLINE · LIGO ONLINE 실연동 (REAL) · R6.1"
+st.markdown(f"### {SECTION}")
 
-if "gray_line" not in globals():
-    def gray_line(num, title, subtitle=""):
-        st.markdown(f"**{num} · {title}**  \n<sub>{subtitle}</sub>", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────────────────────
-# 실제 ONLINE 어댑터: LIGO EventAPI
-# ─────────────────────────────────────────────────────────────
-import requests
-
-_LIGO_BASE = "https://www.gw-openscience.org/eventapi/json/GWTC-1-confident"
-
-def m275_fetch_ligo(event_id: str, timeout: int = 15):
-    """GWTC-1-confident 개별 이벤트를 ONLINE으로 실제 요청한다."""
-    url = f"{_LIGO_BASE}/{event_id.strip()}/"
-    try:
-        resp = requests.get(url, timeout=timeout)
-        payload = None
-        try:
-            payload = resp.json()
-        except Exception:
-            payload = None
-        return {
-            "ok": resp.ok,
-            "status": resp.status_code,
-            "url": url,
-            "json": payload,
-            "text": resp.text[:2000] if resp.text else ""
-        }
-    except Exception as e:
-        return {
-            "ok": False, "status": None, "url": url,
-            "error": str(e), "json": None, "text": ""
-        }
-
-# 소프트 스키마 검증(완화형): event / events 형태 모두 허용, 최소키만 확인
-def m275_soft_validate(payload: dict):
+def _deep_get_events(payload: dict):
+    """event/events 를 최상위/하위 어디서든 찾아 dict/list 모두 수용."""
     if not isinstance(payload, dict):
-        return False, {"reason": "not_dict"}
+        return []
+    # 최상위 우선
+    if "events" in payload:
+        ev = payload["events"]
+        if isinstance(ev, dict):  # {"GW150914-v3": {...}}
+            return list(ev.values())
+        if isinstance(ev, list):
+            return ev
+    if "event" in payload:  # 단수
+        return [payload["event"]]
+    # 하위 컨테이너 탐색
+    for k in ("data", "result", "response", "payload"):
+        v = payload.get(k)
+        if isinstance(v, dict):
+            got = _deep_get_events(v)
+            if got:
+                return got
+    return []
 
-    ev = None
-    if "event" in payload and isinstance(payload["event"], dict):
-        ev = payload["event"]
-    elif "events" in payload and isinstance(payload["events"], list) and payload["events"]:
-        ev = payload["events"][0]
-    else:
-        return False, {"missing": "event_or_events"}
+def _verify_minimal(ev: dict):
+    """LIGO 이벤트 최소 신뢰 필드 중 1개 이상 있으면 True."""
+    if not isinstance(ev, dict):
+        return False
+    keys_any = ("GPS", "gracedb_id", "jsonurl")
+    return any(k in ev for k in keys_any)
 
-    missing = [k for k in ("GPS", "Instruments") if k not in ev]
-    return (len(missing) == 0), ({} if not missing else {"missing": missing})
-
-# ─────────────────────────────────────────────────────────────
-# UI
-# ─────────────────────────────────────────────────────────────
-register_module(
-    "275",
-    "EP-275 · 우주정보장 실연동 핑/검증 (ONLINE · R6)",
-    "LIGO EventAPI를 실요청 → 응답 상태/본문 확인 → 소프트 스키마 검증 → 이력 저장"
-)
-gray_line("275-ONLINE", "LIGO ONLINE 실연동", "실제 요청 · 더미 금지 · 고유 키 사용")
-
-# 입력부
-colA, colB = st.columns([2,1])
-with colA:
-    m275_event_id = st.text_input("이벤트 ID", "GW150914", key="m275_event")
-with colB:
-    m275_timeout = st.number_input("타임아웃(초)", min_value=5, max_value=60, value=15, step=1, key="m275_timeout")
-
-col1, col2 = st.columns([1,1])
-with col1:
-    m275_auto = st.toggle("AUTO 주기 실행", key="m275_auto")
-with col2:
-    m275_interval = st.slider("주기(초)", min_value=5, max_value=180, value=30, key="m275_interval")
-
-m275_run = st.button("ONLINE 실행", key="m275_run")
-
-# 상태/이력 저장소
-if "m275_history" not in st.session_state:
-    st.session_state["m275_history"] = []
-if "m275_last_ts" not in st.session_state:
-    st.session_state["m275_last_ts"] = 0.0
-
-# 트리거 판단
-do_run = False
-now_s = time.time()
-if m275_run:
-    do_run = True
-elif m275_auto and (now_s - st.session_state["m275_last_ts"] >= m275_interval):
-    do_run = True
-
-# 실행
-if do_run:
-    res = m275_fetch_ligo(m275_event_id, m275_timeout)
-    row = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+def _normalize_report(url: str, status: int, payload: dict):
+    events = _deep_get_events(payload)
+    ok_min = any(_verify_minimal(e) for e in events)
+    report = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "mode": "ONLINE",
-        "url": res.get("url"),
-        "status": res.get("status")
+        "url": url,
+        "status": status,
+        "reality": (status == 200),
+        "verify": bool(events) and ok_min,
+        "why": {}
     }
+    if not events:
+        report["why"]["missing"] = "event_or_events"
+    elif not ok_min:
+        report["why"]["missing"] = "minimal_fields(GPS|gracedb_id|jsonurl)"
+    return report, events
 
-    if res.get("ok") and res.get("json") is not None:
-        v_ok, why = m275_soft_validate(res["json"])
-        row.update({"reality": True, "verify": v_ok, "why": why})
-        st.success("✅ ONLINE 연결 성공")
-    else:
-        err = res.get("error") or f"http {res.get('status')}"
-        row.update({"reality": False, "verify": False, "error": err})
-        st.error(f"❌ ONLINE 실패: {err}")
+# ---- UI ----
+event_id = st.text_input("이벤트 ID", value="GW150914", key="m275_event_id")
+timeout = st.number_input("타임아웃(초)", 5, 60, 15, key="m275_timeout")
+auto = st.toggle("AUTO 주기 실행", key="m275_auto")
+period = st.slider("주기(초)", 10, 120, 20, key="m275_period")
 
-    # 이력 저장(최대 50)
-    st.session_state["m275_history"] = [row] + st.session_state["m275_history"][:49]
-    st.session_state["m275_last_ts"] = now_s
+btn = st.button("ONLINE 실행", key="m275_run")
 
-    # 결과 표시
-    st.subheader("실행 결과")
-    st.json(row, expanded=False)
+def run_once(_eid: str):
+    url = f"https://www.gw-openscience.org/eventapi/json/GWTC-1-confident/{_eid}/"
+    try:
+        r = requests.get(url, timeout=timeout)
+        try:
+            payload = r.json()
+        except Exception:
+            payload = {"raw": r.text}
+        report, events = _normalize_report(url, r.status_code, payload if isinstance(payload, dict) else {})
+        st.success("ONLINE 연결 성공" if report["reality"] else "ONLINE 연결 실패")
+        st.json(report)
+        with st.expander("응답 스니펫(원문)"):
+            st.json(payload if isinstance(payload, dict) else {"raw": payload})
+        if report["verify"]:
+            st.info(f"검증 성공 · 이벤트 수: {len(events)}")
+        else:
+            st.warning("검증 미통과")
+        return report
+    except Exception as e:
+        st.error(f"요청 실패: {e}")
+        return {"error": str(e), "mode": "ONLINE", "reality": False, "verify": False}
 
-    st.subheader("응답 스니펫(원문)")
-    st.code(res.get("text", ""), language="json")
+if btn:
+    run_once(event_id)
 
-    # AUTO 모드면 즉시 리런
-    if m275_auto:
-        st.rerun()
-
-# 이력
-st.markdown("—")
-st.caption("최근 50건 이력")
-st.json(st.session_state["m275_history"])
+if auto:
+    ph = st.empty()
+    while True:
+        with ph.container():
+            run_once(event_id)
+        time.sleep(period)
