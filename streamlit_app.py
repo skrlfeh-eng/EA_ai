@@ -1,246 +1,174 @@
 # -*- coding: utf-8 -*-
-# EA · Ultra — single-file (mobile-friendly + API adapters + multi-round fetch)
-
-import os, sys, re, time, json, random, hashlib, traceback
+# EA · Ultra — ChatGPT-like UI / API auto-detect / response-level control
+import os, sys, re, json, time, hashlib, random, traceback
 from pathlib import Path
 from datetime import datetime
 import streamlit as st
 
-APP_NAME = "EA · Ultra"
-BUILD_TAG = "EA-ULTRA-20250818"
-DATA_DIR = Path("data")
+APP_NAME   = "EA · Ultra"
+BUILD_TAG  = "EA-ULTRA-20250818"
+DATA_DIR   = Path("data")
 STATE_PATH = DATA_DIR / "state.json"
 
 def ensure_dirs():
-    try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    try: DATA_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception: pass
 
 def nowz(): return datetime.utcnow().isoformat()+"Z"
 
-# --- tiny state store (file -> session fallback) ---
+# ---------------- State (file -> session fallback) ----------------
 def _state_read():
     try:
-        with STATE_PATH.open("r", encoding="utf-8") as f:
-            return json.load(f)
+        with STATE_PATH.open("r", encoding="utf-8") as f: return json.load(f)
     except Exception:
-        return st.session_state.get("_state_fallback", {})
+        return st.session_state.get("_state", {})
 
 def _state_write(obj):
     try:
         ensure_dirs()
         tmp = STATE_PATH.with_suffix(".tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=2)
+        with tmp.open("w", encoding="utf-8") as f: json.dump(obj, f, ensure_ascii=False, indent=2)
         tmp.replace(STATE_PATH)
     except Exception:
-        st.session_state["_state_fallback"] = obj
+        st.session_state["_state"] = obj
 
-def sget(key, default=None):
-    return _state_read().get(key, default)
-
-def sset(key, val):
-    s = _state_read(); s[key] = val; _state_write(s)
+def sget(k, d=None): return _state_read().get(k, d)
+def sset(k, v): s = _state_read(); s[k] = v; _state_write(s)
 
 def add_msg(role, content):
     msgs = sget("messages", [])
     msgs.append({"t": nowz(), "role": role, "content": content})
     sset("messages", msgs)
 
-def last_msgs(n=50): return sget("messages", [])[-n:]
 def clear_msgs(): sset("messages", [])
 
-# ----------------------- adapters -----------------------
+# ---------------- Utilities ----------------
+def dedupe(text: str):
+    # 연속 중복 토큰 제거 (나나나/너너너 패턴 방지)
+    text = re.sub(r'(.)\1{2,}', r'\1', text)          # 글자 반복
+    text = re.sub(r'\b(\w+)(\s+\1){1,}\b', r'\1', text) # 단어 반복
+    return text
+
+def clamp_len(text: str, n=4096):
+    return text if len(text) <= n else text[:n] + " …"
+
+# ---------------- Adapters ----------------
 class MockAdapter:
-    def __init__(self, name="mock"):
-        self.name = name
-    def generate(self, prompt, max_tokens=512):
+    name = "Mock"
+    def generate(self, prompt, max_tokens=600):
         words = (prompt or "").split()
-        seed = int(hashlib.sha256(prompt.encode("utf-8")).hexdigest(), 16)
-        rng = random.Random(seed)
-        extra = ["에아", "우주", "정보장", "핵심", "요약"]
-        mix = words + rng.sample(extra, k=min(len(extra), max(1, len(words)//3 or 1)))
-        rng.shuffle(mix)
-        txt = " ".join(mix)
-        return f"에아(Mock): {txt[:max_tokens]}"
+        seed  = int(hashlib.sha256(prompt.encode("utf-8")).hexdigest(), 16)
+        rng   = random.Random(seed)
+        filler = ["핵심만", "간단히", "정리하면", "포인트:", "한줄요약:"]
+        pre = rng.choice(filler)
+        body = " ".join(words[: max(8, len(words))])
+        return f"{pre} {body}".strip()
 
 class OpenAIAdapter:
+    name = "OpenAI"
     def __init__(self):
-        try:
-            from openai import OpenAI  # type: ignore
-            self.OpenAI = OpenAI
-        except Exception as e:
-            raise RuntimeError(f"openai 라이브러리 없음: {e}")
-        self.api_key = os.getenv("OPENAI_API_KEY")
-        if not self.api_key:
-            raise RuntimeError("OPENAI_API_KEY 환경변수가 필요합니다.")
-        self.client = self.OpenAI(api_key=self.api_key)
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-    def generate(self, prompt, max_tokens=512):
-        try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role":"user","content":prompt}],
-                max_tokens=max_tokens,
-                temperature=0.6,
-            )
-            return resp.choices[0].message.content or ""
-        except Exception as e:
-            return f"(OpenAI 오류) {e}"
+        from openai import OpenAI  # type: ignore
+        key = os.getenv("OPENAI_API_KEY")
+        if not key: raise RuntimeError("OPENAI_API_KEY 필요")
+        self.client = OpenAI(api_key=key)
+        self.model  = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    def generate(self, prompt, max_tokens=600):
+        r = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role":"user","content":prompt}],
+            max_tokens=max_tokens, temperature=0.7
+        )
+        return r.choices[0].message.content or ""
 
 class GeminiAdapter:
+    name = "Gemini"
     def __init__(self):
-        try:
-            import google.generativeai as genai  # type: ignore
-            self.genai = genai
-        except Exception as e:
-            raise RuntimeError(f"google-generativeai 라이브러리 없음: {e}")
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise RuntimeError("GEMINI_API_KEY 환경변수가 필요합니다.")
-        self.genai.configure(api_key=api_key)
-        self.model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-pro-latest")
-        self.model = self.genai.GenerativeModel(self.model_name)
+        import google.generativeai as genai  # type: ignore
+        key = os.getenv("GEMINI_API_KEY")
+        if not key: raise RuntimeError("GEMINI_API_KEY 필요")
+        genai.configure(api_key=key)
+        self.model = genai.GenerativeModel(os.getenv("GEMINI_MODEL","gemini-1.5-pro-latest"))
+    def generate(self, prompt, max_tokens=600):
+        r = self.model.generate_content(
+            prompt, generation_config={"temperature":0.7, "max_output_tokens":max_tokens}
+        )
+        return getattr(r, "text", "") or ""
 
-    def generate(self, prompt, max_tokens=512):
-        try:
-            resp = self.model.generate_content(
-                prompt,
-                generation_config={"temperature":0.6, "max_output_tokens":max_tokens},
-                safety_settings=None,
-            )
-            return resp.text or ""
-        except Exception as e:
-            return f"(Gemini 오류) {e}"
+def resolve_adapter(want: str):
+    if want == "OpenAI":
+        try: return OpenAIAdapter(), True
+        except Exception as e: st.toast(f"OpenAI 불가 → Mock: {e}", icon="⚠️")
+    if want == "Gemini":
+        try: return GeminiAdapter(), True
+        except Exception as e: st.toast(f"Gemini 불가 → Mock: {e}", icon="⚠️")
+    return MockAdapter(), False
 
-def pick_adapter(kind: str):
-    # 실패시 Mock으로 폴백
-    try:
-        if kind == "OpenAI":
-            return OpenAIAdapter()
-        if kind == "Gemini":
-            return GeminiAdapter()
-    except Exception as e:
-        st.toast(f"{kind} 어댑터 실패 → Mock 사용: {e}", icon="⚠️")
-    return MockAdapter()
-
-# ----------------------- helpers -----------------------
-def dedupe_repeats(text: str):
-    tokens = re.findall(r"\S+|\s+", text)
-    out, prev = [], None
-    for t in tokens:
-        if t == prev and t.strip():
-            continue
-        out.append(t); prev = t
-    return "".join(out)
-
-def intent(text: str):
-    t = text.strip().lower()
-    if t.startswith("/clear"): return "clear"
-    if t.startswith("/summary"): return "summary"
-    if t.endswith("?"): return "question"
-    return "chat"
-
-def multi_round_generate(adapter, prompt, level=3, rounds=1):
-    # level → token budget
-    level = int(level)
-    token_map = {1:256, 2:512, 3:800, 4:1200, 5:1600}
-    max_tokens = token_map.get(level, 800)
-
+# ---------------- Multi-round (long answer) ----------------
+def long_answer(adapter, prompt, level=3, rounds=2):
+    # 레벨→토큰 할당
+    token_map = {1:300, 2:600, 3:900, 4:1300, 5:1800}
+    max_tokens = token_map.get(int(level), 900)
     acc = ""
-    p = prompt
-    for i in range(rounds):
-        chunk = adapter.generate(p, max_tokens=max_tokens)
+    base = prompt.strip()
+    for i in range(int(rounds)):
+        p = base if i == 0 else base + "\n(이어서 자세히 계속)"
+        chunk = dedupe(adapter.generate(p, max_tokens=max_tokens))
         if not chunk: break
-        acc += ("\n" if acc else "") + chunk
-        # 다음 라운드는 "계속" 신호
-        p = f"{prompt}\n(계속해서 이어서 자세히 써줘. 이전에 멈춘 곳부터)"
-        # 너무 빠른 과금/호출 방지 및 UX
+        acc += (("\n\n" if acc else "") + clamp_len(chunk, n=max_tokens+500))
         time.sleep(0.05)
     return acc.strip()
 
-# ----------------------- UI -----------------------
+# ---------------- UI ----------------
 def render_app():
-    st.set_page_config(page_title=APP_NAME, page_icon="✨", layout="wide")
-    st.title("EA · Ultra")
-    st.caption("모바일 친화: Enter 전송 / 멀티라인 에디터 · API 어댑터 선택 · 여러 라운드 미리 수집")
+    st.set_page_config(page_title=APP_NAME, page_icon="✨", layout="centered")
+    st.markdown(f"### {APP_NAME}")
+    st.caption("ChatGPT 스타일 UI · API 자동연동 · 응답 레벨/길이 제어")
 
-    with st.sidebar:
-        st.subheader("응답 설정")
-        provider = st.selectbox("Adapter", ["Mock","OpenAI","Gemini"], index=0)
-        level = st.slider("응답 레벨(토큰 예산)", 1, 5, 3, help="레벨↑ = 더 길게")
-        rounds = st.number_input("미리 받을 라운드 수", min_value=1, max_value=6, value=2, step=1)
-        input_mode = st.radio("입력 방식", ["Enter 전송(권장)","멀티라인 에디터"], index=0)
-        editor_h = st.slider("에디터 높이(멀티라인)", 80, 600, 200)
-        st.divider()
-        if st.button("대화 초기화"):
-            clear_msgs(); st.toast("초기화 완료")
+    # ---- top controls
+    colA, colB, colC = st.columns([1,1,1])
+    with colA:
+        provider = st.selectbox("Provider", ["OpenAI","Gemini","Mock"], index=0)
+    with colB:
+        level = st.slider("응답 레벨", 1, 5, 3, help="레벨↑ = 더 길고 자세함")
+    with colC:
+        rounds = st.number_input("연결 라운드", 1, 6, 2, step=1, help="긴 답변을 여러 번 이어받기")
 
-    # 출력 영역
-    out_box = st.container()
+    adapter, api_ok = resolve_adapter(provider)
+    status = f"🔌 {adapter.name} {'(연결됨)' if api_ok else '(모의)'} · L{level} · R{int(rounds)}"
+    st.info(status)
 
-    # 입력
-    user_text = ""
-    submitted = False
-    if input_mode == "Enter 전송(권장)":
-        # 모바일에서 Enter로 바로 전송됨
-        user_text = st.chat_input("메시지를 입력하고 Enter")
-        submitted = user_text is not None and user_text != ""
-    else:
-        with st.form("multi_form", clear_on_submit=False):
-            user_text = st.text_area("메시지", sget("draft",""), height=editor_h, placeholder="여러 줄 입력 가능")
-            colA, colB = st.columns([1,1])
-            send = colA.form_submit_button("Send")
-            save = colB.form_submit_button("임시 저장")
-            if save:
-                sset("draft", user_text); st.toast("임시 저장됨")
-            submitted = send
+    # ---- chat history
+    if "messages" not in st.session_state: sset("messages", [])
+    for m in sget("messages", []):
+        with st.chat_message("user" if m["role"]=="user" else "assistant"):
+            st.markdown(m["content"])
 
-    if submitted:
-        txt = dedupe_repeats(user_text or "")
-        add_msg("user", txt)
+    # ---- input
+    user_text = st.chat_input("메시지를 입력하고 Enter")
+    if user_text:
+        user_text = dedupe(user_text.strip())
+        add_msg("user", user_text)
+        with st.chat_message("user"): st.markdown(user_text)
 
-        # 어댑터 선택/생성
-        adapter = pick_adapter(provider)
-
-        # 여러 라운드 미리 받아 붙이기
-        with out_box:
-            ph = st.empty()
+        with st.chat_message("assistant"):
             try:
-                result = multi_round_generate(adapter, txt, level=level, rounds=rounds)
+                ans = long_answer(adapter, user_text, level=level, rounds=rounds)
             except Exception:
-                result = "(내부 오류) " + traceback.format_exc()
-            add_msg("assistant", result)
-            ph.success(result)
+                ans = "(내부 오류)\n\n" + "```\n" + traceback.format_exc() + "\n```"
+            st.markdown(ans)
+        add_msg("assistant", ans)
 
-    # 최근 로그
-    st.divider()
-    st.subheader("대화")
-    cols = st.columns(2)
-    with cols[0]:
-        st.caption("입력(최근)")
-        for m in reversed([m for m in last_msgs(20) if m["role"]=="user"]):
-            st.write(f"🧑 {m['content']}")
-    with cols[1]:
-        st.caption("출력(최근)")
-        for m in reversed([m for m in last_msgs(20) if m["role"]=="assistant"]):
-            st.write(f"🤖 {m['content']}")
+    # tools
+    with st.expander("도구"):
+        c1, c2, c3 = st.columns(3)
+        if c1.button("대화 초기화"): clear_msgs(); st.experimental_rerun()
+        if c2.button("요약 보기"):
+            msgs = sget("messages", [])[-8:]
+            summ = " / ".join(f"{m['role']}: {m['content']}" for m in msgs)
+            st.success(summ or "기록이 거의 없어요.")
+        st.code(f"build={BUILD_TAG} · py={sys.version.split()[0]} · state={STATE_PATH}", language="text")
 
-    # 시스템 탭 비슷한 정보
-    st.divider()
-    with st.expander("System / Debug"):
-        st.write({
-            "build": BUILD_TAG,
-            "python": sys.version.split()[0],
-            "cwd": str(Path.cwd()),
-            "state_file": str(STATE_PATH),
-            "messages": len(sget("messages", [])),
-            "adapter": provider,
-        })
-        st.code("Tip: /clear, /summary 사용 가능. 멀티라인 모드에서 길게 작성 → Send.", language="text")
-
-# ----------------------- entry -----------------------
+# ---------------- entry ----------------
 if __name__ == "__main__":
     render_app()
+    
