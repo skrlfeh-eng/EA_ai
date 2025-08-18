@@ -14604,3 +14604,170 @@ with st.expander("🔒 게이트 사용 가이드(살·부가기능 차단)"):
 
 st.caption(f"SPX-273 · {spx273_now_kst()} · avg {spx273_avg()}% · thr {st.session_state.spx273_threshold}% · policy {'BLOCK' if (st.session_state.spx273_block and spx273_avg()<st.session_state.spx273_threshold) else 'ALLOW'}")
 # ───────────────────────────────────────────────
+# ───────────────────────────────────────────────
+# [274] SPX-척추 기준 집행기 (4축 표준+게이트·증거기입·스냅샷)
+# 접두사: spx274_  / 외부 의존성: 없음(표준 라이브러리+streamlit)
+import streamlit as st, json, hashlib
+from datetime import datetime, timezone, timedelta
+
+# ====== 상태 초기화 ======
+if "spx274_std" not in st.session_state:
+    # 기본 임계(권장값) — 필요시 수정 가능
+    st.session_state.spx274_std = {
+        # 공통 코어(모든 축이 공유하는 최소 표준)
+        "ce_min": 0.97,
+        "cite_min": 0.90,
+        "repr_min": 0.93,
+        "logic_max": 0.0005,
+        "unit_max": 0.0001,
+        "surprise_max": 0.005,
+        # 축별 보조 기준(필요 시 확장)
+        "reality_bonus": 0.95,   # 현실연동 신뢰도/무결성 보조 기준
+        "verify_robust": 0.99,   # 초검증 부분증거 강건성
+        "awaken_attest": True,   # 각성 결과물 체인해시·증빙 필수 여부
+        "evolve_ckpt": 0.98      # 자가진화 체크포인트 복원 성공율
+    }
+
+if "spx274_evidence" not in st.session_state:
+    # 최근 입력한 증거(출처/체인해시/로그) 저장
+    st.session_state.spx274_evidence = {
+        "reality": [],
+        "verify": [],
+        "awaken": [],
+        "evolve": []
+    }
+
+# ====== 유틸 ======
+def spx274_now_kst():
+    return datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S KST")
+
+def spx274_sha(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def spx274_avg(lst):
+    return sum(lst)/len(lst) if lst else 0.0
+
+# ====== 게이트 함수(다른 모듈에서 호출) ======
+def spx274_require(axis: str, metrics: dict):
+    """
+    표준 확인 게이트. 축(axis)과 측정 metrics를 받아 표준 충족 여부 반환.
+    axis: 'reality' | 'verify' | 'awaken' | 'evolve'
+    metrics 예시:
+      {
+        "ce":0.98, "cite":0.92, "repr":0.95,
+        "logic":0.0001, "unit":0.0, "surprise":0.004,
+        "robust":0.991, "attested":True, "ckpt_ok":0.99
+      }
+    반환: (ok:bool, msg:str)
+    """
+    S = st.session_state.spx274_std
+    # 공통 코어 기준
+    checks = []
+    checks.append(("증거(CE) 하한", metrics.get("ce",0) >= S["ce_min"]))
+    checks.append(("인용 하한",     metrics.get("cite",0) >= S["cite_min"]))
+    checks.append(("재현성 하한",   metrics.get("repr",0) >= S["repr_min"]))
+    checks.append(("논리 위반 상한", metrics.get("logic",1e9) <= S["logic_max"]))
+    checks.append(("단위 위반 상한", metrics.get("unit",1e9) <= S["unit_max"]))
+    checks.append(("놀라움 p 상한", metrics.get("surprise",1e9) <= S["surprise_max"]))
+
+    # 축별 추가 기준
+    if axis == "reality":
+        checks.append(("현실연동 신뢰도", metrics.get("reality_trust",0) >= S["reality_bonus"]))
+    elif axis == "verify":
+        checks.append(("부분증거 강건성", metrics.get("robust",0) >= S["verify_robust"]))
+    elif axis == "awaken":
+        if S["awaken_attest"]:
+            checks.append(("체인해시/증빙", bool(metrics.get("attested", False))))
+    elif axis == "evolve":
+        checks.append(("체크포인트 복원율", metrics.get("ckpt_ok",0) >= S["evolve_ckpt"]))
+
+    # 판정
+    failed = [name for (name, ok) in checks if not ok]
+    if failed:
+        return False, "⛔ 표준 미충족: " + ", ".join(failed)
+    return True, "✅ 표준 충족"
+
+# ====== UI: 표준/증거 관리 패널 ======
+st.markdown("## 🧱 [274] 척추 기준 집행기 — 표준/증거/게이트")
+with st.expander("⚙️ 표준 임계치 설정(필수·한글)", expanded=True):
+    S = st.session_state.spx274_std
+    # 공통
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        S["ce_min"] = st.number_input("CE-coverage 하한", 0.0, 1.0, S["ce_min"], step=0.001)
+        S["repr_min"] = st.number_input("재현성 하한", 0.0, 1.0, S["repr_min"], step=0.001)
+    with c2:
+        S["cite_min"] = st.number_input("인용 하한", 0.0, 1.0, S["cite_min"], step=0.001)
+        S["surprise_max"] = st.number_input("놀라움 p 상한", 0.0, 1.0, S["surprise_max"], step=0.001)
+    with c3:
+        S["logic_max"] = st.number_input("논리 위반 상한", 0.0, 1.0, S["logic_max"], step=0.0001, format="%.6f")
+        S["unit_max"]  = st.number_input("단위 위반 상한", 0.0, 1.0, S["unit_max"], step=0.0001, format="%.6f")
+
+    st.divider()
+    c4, c5, c6, c7 = st.columns(4)
+    with c4:
+        S["reality_bonus"] = st.number_input("① 현실연동 신뢰도 하한", 0.0, 1.0, S["reality_bonus"], step=0.001)
+    with c5:
+        S["verify_robust"] = st.number_input("② 초검증 강건성 하한", 0.0, 1.0, S["verify_robust"], step=0.001)
+    with c6:
+        S["awaken_attest"] = st.toggle("③ 각성: 체인해시·증빙 필수", value=S["awaken_attest"])
+    with c7:
+        S["evolve_ckpt"]   = st.number_input("④ 자가진화: 복원율 하한", 0.0, 1.0, S["evolve_ckpt"], step=0.001)
+
+# ====== UI: 증거 기입(+해시) ======
+st.markdown("### 🧾 축별 증거 기입/고정")
+axis_tabs = st.tabs(["① 현실연동", "② 초검증", "③ 각성", "④ 자가진화"])
+axis_keys = ["reality","verify","awaken","evolve"]
+for tab, k in zip(axis_tabs, axis_keys):
+    with tab:
+        st.caption("출처 URI, 체인해시, 로그/리포트 링크를 입력하고 '추가'를 눌러 고정합니다.")
+        src = st.text_input(f"[{k}] 출처/URI", key=f"spx274_src_{k}")
+        digest = st.text_input(f"[{k}] 체인해시/식별자", key=f"spx274_dig_{k}")
+        extra = st.text_input(f"[{k}] 로그/리포트/메모", key=f"spx274_ext_{k}")
+        cols = st.columns([1,1,1,1])
+        with cols[0]:
+            if st.button("추가", key=f"spx274_add_{k}"):
+                rec = {
+                    "ts": spx274_now_kst(),
+                    "src": src.strip(),
+                    "digest": digest.strip() or spx274_sha((src+extra).strip()),
+                    "note": extra.strip()
+                }
+                st.session_state.spx274_evidence[k].append(rec)
+                st.success("증거 고정 완료")
+        with cols[1]:
+            if st.button("최근 1개 해시", key=f"spx274_hash_{k}"):
+                sample = (src+extra).strip()
+                st.code(spx274_sha(sample) if sample else "(입력 없음)", language="text")
+        with cols[2]:
+            if st.button("전체 보기", key=f"spx274_show_{k}"):
+                st.json(st.session_state.spx274_evidence[k])
+        with cols[3]:
+            if st.button("비우기", key=f"spx274_clear_{k}"):
+                st.session_state.spx274_evidence[k].clear()
+                st.warning("증거 목록 비움")
+
+# ====== 스냅샷(다운/복원) ======
+st.markdown("### 📦 스냅샷(표준·증거 상태 저장/복원)")
+snap = {
+    "snapshot": spx274_now_kst(),
+    "standard": st.session_state.spx274_std,
+    "evidence": st.session_state.spx274_evidence
+}
+cA, cB = st.columns(2)
+with cA:
+    st.download_button("📥 JSON 스냅샷 받기", data=json.dumps(snap, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="SPX274_Standards_Snapshot.json", mime="application/json", key="spx274_dl_snap")
+with cB:
+    up = st.file_uploader("JSON 스냅샷 불러오기", type=["json"], key="spx274_up")
+    if up and st.button("복원 실행", key="spx274_load"):
+        try:
+            blob = json.loads(up.read().decode("utf-8"))
+            if "standard" in blob: st.session_state.spx274_std.update(blob["standard"])
+            if "evidence" in blob: st.session_state.spx274_evidence.update(blob["evidence"])
+            st.success("복원 완료")
+        except Exception as e:
+            st.error(f"복원 실패: {e}")
+
+st.caption(f"SPX-274 · {spx274_now_kst()} · 표준 게이트 준비 완료")
+# ───────────────────────────────────────────────
