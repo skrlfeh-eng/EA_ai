@@ -1,4 +1,4 @@
-ea_hybrid_ultra/
+ea_hybrid_ultra.py
   __init__.py
   mod01_core.py        # (1) 코어 앵커/정체성
   mod02_memory.py      # (2) 메모리/대화 로그(무제한)
