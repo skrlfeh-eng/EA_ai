@@ -14273,166 +14273,236 @@ if st.session_state.ep272_state["awakening"]:
         elif st.session_state.ep272_state["response_level"] == "∞":
             st.write("♾️ 무한 확장 응답 모드 — 제한 없는 지식 스펙트럼 개방")
             
-           
-           # ──────────────────────────────────────────────────────────
-# [272] EP-272 · 우주정보장 현실연동(REAL) · 초강화판  ⟶ 오케스트라(마스터 루프)
-#  - 목적: 1축(REAL) 주기 점검 + 즉시 실행 + 결과 기록(최근 20개)
-#  - 외부: GWOSC Event API (예: https://www.gw-openscience.org/eventapi/json/GW150914/)
-#  - 금지: 더미/시뮬레이션. 실제 요청만 허용.
-#  - 수정: (1) losc.ligo.org/dataset → GWOSC eventapi 로 교체
-#          (2) st.experimental_rerun() → st.rerun()
-# ──────────────────────────────────────────────────────────────────────────────
+           # -*- coding: utf-8 -*-
+# EP-272 · 우주정보장 현실연동(REAL) · 초강화판 (교체본)
+# 목적: LIGO/GWOSC Event API에 실제 요청 → 응답/지연/상태 기록 → 기본 검증(스키마 최소)
+# 금지: 더미/페이크 응답 생성 금지
+# 주의: 실서버 호출이므로 과도한 AUTO 주기 사용 자제 (rate-limit 고려)
 
-import time, json, requests, streamlit as st
-from datetime import datetime, timezone
-from collections import deque
+import time
+import json
+from typing import Dict, Any, List, Optional
+import requests
+import streamlit as st
 
-# 안전 장치(앱 상단 공통 유틸이 없을 수 있음)
-if "register_module" not in globals():
-    def register_module(num, name, desc=""):
-        st.markdown(f"### **{num}** · {name}")
-        if desc: st.caption(desc)
-if "gray_line" not in globals():
-    def gray_line(num, title, subtitle=""):
-        st.markdown(f"**[{num}] {title}**  \n- {subtitle}")
+# ─────────────────────────────────────────────────────────────────────────────
+# 설정
+# ─────────────────────────────────────────────────────────────────────────────
+API_BASE = "https://www.gw-openscience.org/eventapi/json"
+DEFAULT_EVENT = "GW150914"  # 최초 중력파 이벤트(검증용으로 안전)
+HISTORY_KEY = "ep272_history"
 
-MODULE_NO   = 272
-MODULE_NAME = "EP-272 · 우주정보장 현실연동(REAL) · 초강화판"
-MODULE_DESC = "오케스트라 루프(주기 실행) · REAL 전용 · 실패 이유 그대로 노출"
-
-register_module(MODULE_NO, MODULE_NAME, MODULE_DESC)
-gray_line("272", "오케스트라(마스터 루프)", "REAL 연결 → 결과 기록(최근 20개)")
-
-# ── 세션 준비
-ss = st.session_state
-ss.setdefault("m272_event_id", "GW150914")
-ss.setdefault("m272_timeout", 15)
-ss.setdefault("m272_interval", 15)
-ss.setdefault("m272_auto", False)
-ss.setdefault("m272_next_ts", 0.0)
-ss.setdefault("m272_hist", deque(maxlen=20))
-
-# ── 도우미: 현재 UTC ISO
-def _now_iso():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-# ── REAL 요청 수행
-def fetch_gw_event(event_id: str, timeout_sec: int = 15):
-    """
-    REAL: GWOSC Event API 호출, 검증 요약을 반환.
-    """
-    base = "https://www.gw-openscience.org/eventapi/json"
-    url  = f"{base}/{event_id.strip()}/"
-    t0   = time.time()
+# ─────────────────────────────────────────────────────────────────────────────
+# 유틸
+# ─────────────────────────────────────────────────────────────────────────────
+def http_get_json(url: str, timeout_sec: int = 15) -> Dict[str, Any]:
+    t0 = time.time()
+    r = requests.get(url, timeout=timeout_sec)
+    elapsed_ms = int((time.time() - t0) * 1000)
+    status = r.status_code
     try:
-        r = requests.get(url, timeout=timeout_sec)
-        status = r.status_code
-        reality = (status == 200)
-        verify = False
-        why = {}
+        payload = r.json() if status == 200 else None
+    except Exception:
+        payload = None
+    return {
+        "url": url,
+        "elapsed_ms": elapsed_ms,
+        "status": status,
+        "payload": payload,
+    }
 
-        snippet = None
-        if reality:
+def fetch_gw_event(event_id: str, timeout_sec: int = 15) -> Dict[str, Any]:
+    """
+    GWOSC Event API는 끝에 **반드시 /v3/** 가 붙는다.
+    예: https://www.gw-openscience.org/eventapi/json/GW150914/v3/
+    """
+    event_id = (event_id or "").strip()
+    url = f"{API_BASE}/{event_id}/v3/"
+    return http_get_json(url, timeout_sec)
+
+def quick_verify(resp: Dict[str, Any]) -> Dict[str, Any]:
+    """가벼운 초검증: HTTP, 최상위 키, 이벤트 블록 존재, 필수 필드 중 일부 점검."""
+    ok_http = (resp.get("status") == 200 and isinstance(resp.get("payload"), dict))
+    p = resp.get("payload") or {}
+
+    # 최상위 "events" 존재 여부
+    events = p.get("events") if isinstance(p, dict) else None
+    ok_events = isinstance(events, dict) and len(events) > 0
+
+    # 하나 골라 필수 필드 샘플 체크
+    ok_fields = False
+    sample_event = None
+    if ok_events:
+        # 첫 이벤트 블록
+        sample_event = next(iter(events.values()))
+        if isinstance(sample_event, dict):
+            # 관측치 몇 가지 (카탈로그/질량/strain 등) 중 일부가 존재하는지
+            keys_to_peek = ["catalog.shortName", "jsonurl", "strain"]
+            def has_nested(d: Dict[str, Any], dotted: str) -> bool:
+                cur = d
+                for k in dotted.split("."):
+                    if not isinstance(cur, dict) or k not in cur:
+                        return False
+                    cur = cur[k]
+                return True
+            ok_fields = any([
+                has_nested(sample_event, "catalog.shortName"),
+                "jsonurl" in sample_event,
+                "strain" in sample_event,
+            ])
+
+    verdict = bool(ok_http and ok_events and ok_fields)
+    return {
+        "http_ok": bool(ok_http),
+        "events_ok": bool(ok_events),
+        "fields_ok": bool(ok_fields),
+        "verdict": verdict,
+        "peek_event_keys": list(sample_event.keys())[:12] if isinstance(sample_event, dict) else None
+    }
+
+def push_history(item: Dict[str, Any], limit: int = 20) -> None:
+    hist: List[Dict[str, Any]] = st.session_state.get(HISTORY_KEY, [])
+    hist.insert(0, item)
+    if len(hist) > limit:
+        hist = hist[:limit]
+    st.session_state[HISTORY_KEY] = hist
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UI
+# ─────────────────────────────────────────────────────────────────────────────
+st.title("🛰️ EP-272 · 우주정보장 현실연동(REAL) · 초강화판")
+
+with st.container(border=True):
+    col1, col2 = st.columns([1,1])
+    with col1:
+        mode = st.radio("연결 모드", ["ONLINE", "OFFLINE"], index=0, horizontal=True,
+                        help="ONLINE: 실 API 호출 · OFFLINE: 네트워크 호출 금지(테스트 표시만)")
+    with col2:
+        event_id = st.text_input("이벤트 ID", value=DEFAULT_EVENT, help="예: GW150914, GW170104 ...")
+
+    col3, col4 = st.columns([1,1])
+    with col3:
+        timeout_sec = st.number_input("타임아웃(초)", min_value=3, max_value=60, value=15, step=1)
+    with col4:
+        retry = st.number_input("재시도 횟수", min_value=0, max_value=3, value=0, step=1)
+
+    auto = st.toggle("AUTO 주기 실행", value=False)
+    period = st.slider("주기(초)", min_value=10, max_value=120, value=20, step=1, disabled=not auto)
+
+    run_once = st.button("🔎 수동 1회 실행")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 실행 로직
+# ─────────────────────────────────────────────────────────────────────────────
+def run_real_once() -> Optional[Dict[str, Any]]:
+    if mode != "ONLINE":
+        st.warning("OFFLINE 모드입니다. 네트워크 요청을 수행하지 않습니다.")
+        return None
+
+    last_error = None
+    for attempt in range(retry + 1):
+        resp = fetch_gw_event(event_id, timeout_sec=timeout_sec)
+        ver = quick_verify(resp)
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+            "mode": mode,
+            "url": resp["url"],
+            "elapsed_ms": resp["elapsed_ms"],
+            "status": resp["status"],
+            "reality": (resp["status"] == 200),
+            "verify": ver["verdict"],
+            "why": {
+                "http_ok": ver["http_ok"],
+                "events_ok": ver["events_ok"],
+                "fields_ok": ver["fields_ok"],
+            },
+            "snippet": None,
+        }
+
+        # 응답 스니펫(원문 일부) – 너무 길면 잘라서 저장
+        if resp["status"] == 200 and isinstance(resp["payload"], dict):
             try:
-                data = r.json()
-                snippet = data
-                # 검증: events 키 존재 & 이벤트 명이 포함되는지
-                # (GWOSC는 {"events": {"GW150914-v3": {...}}} 형태)
-                ev = data.get("events") or {}
-                verify = bool(ev)  # events가 비어있지 않으면 1차 통과
-                if not verify:
-                    why["missing"] = "events"
-                else:
-                    # events 중 키에 event_id가 일부라도 매칭되는지 검사
-                    key_join = " ".join(list(ev.keys()))
-                    if event_id.upper()[:4] not in key_join.upper():
-                        verify = False
-                        why["note"] = "event_id not obvious in keys"
-            except Exception as je:
-                why["json_error"] = str(je)[:200]
-                reality = False
+                record["snippet"] = json.dumps(resp["payload"]["events"])[:1200]
+            except Exception:
+                record["snippet"] = None
+
+        # 화면 표시
+        if record["reality"]:
+            st.success("✅ ONLINE 연결 성공")
         else:
-            why["http"] = status
+            st.error(f"❌ 실패: HTTP {record['status']} (URL 확인 필요)")
 
-        return {
-            "ts": _now_iso(),
-            "mode": "ONLINE",
-            "url": url,
-            "elapsed_ms": int((time.time()-t0)*1000),
-            "status": status,
-            "reality": bool(reality),
-            "verify": bool(verify),
-            "why": why,
-            "snippet": (snippet if isinstance(snippet, dict) else None)
-        }
-    except requests.exceptions.RequestException as e:
-        return {
-            "ts": _now_iso(),
-            "mode": "ONLINE",
-            "url": url,
-            "status": None,
-            "reality": False,
-            "verify": False,
-            "why": {"exception": str(e)[:240]},
-            "snippet": None
-        }
+        # 검증 요약
+        st.write("검증 요약:", {
+            "verdict": ver["verdict"],
+            "http_ok": ver["http_ok"],
+            "events_ok": ver["events_ok"],
+            "fields_ok": ver["fields_ok"],
+        })
 
-# ── UI: 설정
-colA, colB = st.columns([1,1])
-with colA:
-    ss["m272_event_id"]  = st.text_input("이벤트 ID", ss["m272_event_id"], help="예: GW150914, GW170817 등")
-    ss["m272_timeout"]   = st.number_input("타임아웃(초)", min_value=5, max_value=60, step=1, value=int(ss["m272_timeout"]))
-with colB:
-    ss["m272_interval"]  = st.slider("주기(초) – AUTO일 때", min_value=5, max_value=120, step=1, value=int(ss["m272_interval"]))
-    ss["m272_auto"]      = st.toggle("오케스트라 루프(AUTO 실행)", value=bool(ss["m272_auto"]))
+        # 결과 저장
+        push_history(record)
 
-# ── 수동 실행
-run_col1, run_col2 = st.columns([1,2])
-with run_col1:
-    if st.button("🔎 수동 1회"):
-        res = fetch_gw_event(ss["m272_event_id"], ss["m272_timeout"])
-        ss["m272_hist"].appendleft(res)
+        # 성공 or 더 시도해도 의미 없으면 종료
+        if record["reality"]:
+            return record
+        last_error = record
 
-with run_col2:
-    st.caption("※ REAL 전용 · 실패 사유 그대로 노출(더미 금지)")
+        # 다음 시도 전 짧게 대기
+        if attempt < retry:
+            time.sleep(0.6)
 
-# ── AUTO 루프
-if ss["m272_auto"]:
-    st.info(f"🎼 오케스트라 동작 중… {ss['m272_interval']}s 간격")
-    now = time.time()
-    if now >= ss["m272_next_ts"]:
-        res = fetch_gw_event(ss["m272_event_id"], ss["m272_timeout"])
-        ss["m272_hist"].appendleft(res)
-        ss["m272_next_ts"] = now + int(ss["m272_interval"])
-    # 살짝 쉬고 재실행(신버전 API)
-    time.sleep(0.5)
-    st.rerun()
+    return last_error
 
-# ── 최근 결과 표시
-st.subheader("📝 최근 점검(20)")
-if not ss["m272_hist"]:
-    st.caption("아직 기록이 없어요. 수동 1회 또는 AUTO를 켜주세요.")
+# 수동 1회
+if run_once:
+    run_real_once()
+
+# AUTO (Streamlit에서 안전하게: autorefresh 사용)
+if auto:
+    st.info(f"오케스트라 동작 중… {period}s 간격")
+    res = run_real_once()
+    # 다음 주기에 자동 새로고침
+    st.autorefresh(interval=period * 1000, key="ep272_autorefresh")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 실행 이력
+# ─────────────────────────────────────────────────────────────────────────────
+st.subheader("📝 최근 점검(최대 20)")
+hist: List[Dict[str, Any]] = st.session_state.get(HISTORY_KEY, [])
+if not hist:
+    st.caption("아직 실행 이력이 없습니다.")
 else:
-    for i, item in enumerate(list(ss["m272_hist"])[:20]):
-        ok_reality = "✅" if item.get("reality") else "⛔"
-        ok_verify  = "✅" if item.get("verify") else "⛔"
-        line = f"{item.get('ts','')} [{item.get('mode','')}] — reality:{ok_reality} · verify:{ok_verify}"
-        st.markdown(f"- {line}")
+    for i, rec in enumerate(hist):
+        badge = "ONLINE" if rec["mode"] == "ONLINE" else "OFFLINE"
+        ok = "✅" if rec["reality"] else "⛔"
+        vk = "✅" if rec["verify"] else "⛔"
+        st.markdown(
+            f"- {rec['ts']} [{badge}] — reality:{ok} · verify:{vk}"
+        )
         with st.expander("응답 스니펫(원문)", expanded=False):
-            if item.get("snippet") is not None:
-                st.json(item["snippet"])
-            else:
-                st.code(json.dumps(item, ensure_ascii=False, indent=2))
+            st.code(json.dumps({
+                "ts": rec["ts"],
+                "mode": rec["mode"],
+                "url": rec["url"],
+                "elapsed_ms": rec["elapsed_ms"],
+                "status": rec["status"],
+                "reality": rec["reality"],
+                "verify": rec["verify"],
+                "why": rec["why"],
+                "snippet": rec["snippet"]
+            }, ensure_ascii=False, indent=2))
+# ─────────────────────────────────────────────────────────────────────────────
+# 기준표
+# ─────────────────────────────────────────────────────────────────────────────
+with st.container(border=True):
+    st.markdown("**기준표**")
+    st.markdown("- 번호: **272**")
+    st.markdown("- 이름: **EP-272 · 우주정보장 현실연동(REAL) · 초강화판**")
+    st.markdown("- 기능: GWOSC Event API에 **실제(REAL)** 요청 → 결과/지연/상태 기록 → 최소 스키마 초검증")
+    st.markdown("- 핵심: URL을 `…/eventapi/json/**<EVENT_ID>/v3/**` 형식으로 호출(404 방지)")
 
-# ── 하단 기준표(고정)
-st.markdown("""
-**기준표**
-- 번호: **272**
-- 이름: **EP-272 · 우주정보장 현실연동(REAL) · 초강화판**
-- 기능: 오케스트라 루프(AUTO/수동)로 **GWOSC Event API**에 실제 요청을 보내고 결과를 기록/표시  
-- 외부 엔드포인트(고정): `https://www.gw-openscience.org/eventapi/json/<EVENT_ID>/`
-- 금지: 더미/시뮬레이션, 실패 사유 가리기
-""")
+
 # [273] SPX-특별판 · 1000% 나침반 (우주정보장 4축 총괄판)
 # 접두사: spx273_  / 외부 의존성: 없음(오직 streamlit)
 import streamlit as st, json
