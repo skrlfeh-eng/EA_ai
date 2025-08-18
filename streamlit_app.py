@@ -14273,205 +14273,166 @@ if st.session_state.ep272_state["awakening"]:
         elif st.session_state.ep272_state["response_level"] == "∞":
             st.write("♾️ 무한 확장 응답 모드 — 제한 없는 지식 스펙트럼 개방")
             
-            # ─────────────────────────────────────────────────────────────────────────────
-# EP-272 · 우주정보장(현실연동) 초강화판 · REAL 전제 / 더미 금지 / 할루 금지
-# 목적: 1축을 '실제'로 연결 · 실패시 즉시 원인 노출 · SIM은 네트워크 없는 환경 전용
-# 붙이는 위치: 이 파일 맨 아래 (통째로). 외부 의존: requests (Streamlit Cloud 기본 OK)
-# ─────────────────────────────────────────────────────────────────────────────
-import streamlit as st
-import time, json, math, hashlib
-from datetime import datetime, timezone, timedelta
+           
+           # ──────────────────────────────────────────────────────────
+# [272] EP-272 · 우주정보장 현실연동(REAL) · 초강화판  ⟶ 오케스트라(마스터 루프)
+#  - 목적: 1축(REAL) 주기 점검 + 즉시 실행 + 결과 기록(최근 20개)
+#  - 외부: GWOSC Event API (예: https://www.gw-openscience.org/eventapi/json/GW150914/)
+#  - 금지: 더미/시뮬레이션. 실제 요청만 허용.
+#  - 수정: (1) losc.ligo.org/dataset → GWOSC eventapi 로 교체
+#          (2) st.experimental_rerun() → st.rerun()
+# ──────────────────────────────────────────────────────────────────────────────
 
-# ====== 선택 의존(있으면 사용) ======
-try:
-    import requests
-except Exception as _e:
-    requests = None
+import time, json, requests, streamlit as st
+from datetime import datetime, timezone
+from collections import deque
 
-# ====== (있으면 연결) 기존 모듈 훅 ======
-try:
-    from validation_engine import ValidationEngine
-    _val_engine = ValidationEngine()
-except Exception:
-    _val_engine = None
+# 안전 장치(앱 상단 공통 유틸이 없을 수 있음)
+if "register_module" not in globals():
+    def register_module(num, name, desc=""):
+        st.markdown(f"### **{num}** · {name}")
+        if desc: st.caption(desc)
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle=""):
+        st.markdown(f"**[{num}] {title}**  \n- {subtitle}")
 
-# ── 전역 설정
-EP272_ID = "EP-272"
-KST = timezone(timedelta(hours=9))
-REAL_ONLY_DEFAULT = True  # 기본은 REAL(실제 HTTP만 허용)
-REFRESH_SEC_DEFAULT = 10  # 오케스트라 루프 주기(초)
-TIMEOUT_SEC = 12          # HTTP 타임아웃
+MODULE_NO   = 272
+MODULE_NAME = "EP-272 · 우주정보장 현실연동(REAL) · 초강화판"
+MODULE_DESC = "오케스트라 루프(주기 실행) · REAL 전용 · 실패 이유 그대로 노출"
 
-# ── REAL 소스 어댑터(검증 가능한 공적 지식망) ───────────────────────────────
-#   * 여기서는 대표 3종을 기본 제공: LIGO Open / arXiv / NIST Constants
-#   * 필요 시 소스 추가 가능(아래 dict에 handler 추가)
-def _fetch_ligo():
-    """LIGO Open Science: 간단 상태/리스트 엔드포인트 확인 (연결성 증명)"""
-    urls = [
-        "https://losc.ligo.org/about/",            # 가볍게 200 확인
-        "https://losc.ligo.org/dataset"            # 데이터 목록 페이지
-    ]
-    out = []
-    for u in urls:
-        r = requests.get(u, timeout=TIMEOUT_SEC)
-        out.append({"url": u, "status": r.status_code, "ok": r.ok})
-        if not r.ok:
-            raise RuntimeError(f"LIGO 연결 실패: {u} -> {r.status_code}")
-    return {"source":"ligo","checks":out,"ts":datetime.now(KST).isoformat()}
+register_module(MODULE_NO, MODULE_NAME, MODULE_DESC)
+gray_line("272", "오케스트라(마스터 루프)", "REAL 연결 → 결과 기록(최근 20개)")
 
-def _fetch_arxiv(q="gravitational waves"):
-    """arXiv API 간단 쿼리(Atom) → 실제 네트워크 응답/바이트 길이 체크"""
-    url = f"https://export.arxiv.org/api/query?search_query=all:{q}&start=0&max_results=1"
-    r = requests.get(url, timeout=TIMEOUT_SEC, headers={"User-Agent":"GEA-EP272"})
-    if r.status_code != 200 or not r.text:
-        raise RuntimeError(f"arXiv 연결 실패: status={r.status_code}")
-    digest = hashlib.sha256(r.text.encode("utf-8")).hexdigest()[:16]
-    return {"source":"arxiv","len":len(r.text),"digest":digest,"ts":datetime.now(KST).isoformat()}
+# ── 세션 준비
+ss = st.session_state
+ss.setdefault("m272_event_id", "GW150914")
+ss.setdefault("m272_timeout", 15)
+ss.setdefault("m272_interval", 15)
+ss.setdefault("m272_auto", False)
+ss.setdefault("m272_next_ts", 0.0)
+ss.setdefault("m272_hist", deque(maxlen=20))
 
-def _fetch_nist_const():
-    """NIST Constants 페이지 생존 확인"""
-    url = "https://physics.nist.gov/constants"
-    r = requests.get(url, timeout=TIMEOUT_SEC)
-    if r.status_code != 200:
-        raise RuntimeError(f"NIST 연결 실패: status={r.status_code}")
-    return {"source":"nist","status":r.status_code,"ts":datetime.now(KST).isoformat()}
+# ── 도우미: 현재 UTC ISO
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-REAL_SOURCES = {
-    "ligo": _fetch_ligo,
-    "arxiv": _fetch_arxiv,
-    "nist": _fetch_nist_const,
-}
-
-# ── SIM 소스(네트워크 완전 차단 환경 전용; 더미 아님: 이전 REAL 성공 스냅샷만 재표시)
-def _sim_replay():
-    blob = st.session_state.get("ep272_last_real_ok")
-    if not blob:
-        raise RuntimeError("SIM 불가: REAL 성공 스냅샷이 없습니다.")
-    return {"mode":"SIM-replay","snapshot":blob}
-
-# ── 유틸
-def _ok(msg): st.success(msg, icon="✅")
-def _warn(msg): st.warning(msg, icon="⚠️")
-def _err(msg): st.error(msg, icon="🛑")
-
-def _attest(payload)->dict:
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    return {
-        "ep": EP272_ID,
-        "hash": hashlib.sha256(raw).hexdigest(),
-        "ts": datetime.now(KST).isoformat()
-    }
-
-def _validate_payload(payload)->dict:
-    """초검증 브릿지: validation_engine 있으면 사용, 없으면 최소 검증."""
-    if _val_engine:
-        try:
-            steps = ["fetch", "schema_check", "integrity"]
-            res = _val_engine.validate_output(json.dumps(payload, ensure_ascii=False), steps)
-            res["bridge"] = "validation_engine"
-            return res
-        except Exception as e:
-            return {"bridge":"validation_engine","status":"ERROR","error":str(e)}
-    # 최소 검증: 필수 키/타입 체크
-    status = "PASS" if isinstance(payload, dict) and ("ts" in json.dumps(payload)) else "REPAIR"
-    return {"bridge":"builtin_min","status":status,"notes":"기본 무결성 점검"}
-
-# ── EP-272 패널(UI) ─────────────────────────────────────────────────────────
-st.divider()
-st.subheader("🛰️ EP-272 · 우주정보장 현실연동(REAL) · 초강화판")
-
-# 모드/소스 스위처
-colA, colB, colC = st.columns([1,1,2])
-with colA:
-    mode = st.selectbox("모드", ["REAL","SIM"], index=0)
-with colB:
-    source = st.selectbox("소스", ["ligo","arxiv","nist"], index=0)
-with colC:
-    loop = st.toggle("오케스트라 루프(자동 주기 실행)", value=False)
-
-colD, colE, colF = st.columns([1,1,2])
-with colD:
-    refresh_sec = st.number_input("주기(초)", min_value=5, max_value=300, value=REFRESH_SEC_DEFAULT, step=5)
-with colE:
-    strict = st.toggle("REAL 전용(실패시 SIM 금지)", value=REAL_ONLY_DEFAULT,
-                       help="켜두면 REAL 실패해도 SIM으로 자동 대체하지 않음")
-with colF:
-    st.caption("※ REAL 실패 시, 이유를 그대로 표시(더미/뻥 채우기 절대 금지)")
-
-# 상태 표시
-if "ep272_hist" not in st.session_state:
-    st.session_state.ep272_hist = []  # 최근 기록
-if "ep272_tick" not in st.session_state:
-    st.session_state.ep272_tick = 0
-
-def run_once():
-    """한 번 실행(버튼/루프 공용)"""
-    if requests is None and mode=="REAL":
-        _err("Python requests 모듈이 없어 REAL 실행 불가. (requirements에 requests 추가 필요)")
-        return
-
+# ── REAL 요청 수행
+def fetch_gw_event(event_id: str, timeout_sec: int = 15):
+    """
+    REAL: GWOSC Event API 호출, 검증 요약을 반환.
+    """
+    base = "https://www.gw-openscience.org/eventapi/json"
+    url  = f"{base}/{event_id.strip()}/"
+    t0   = time.time()
     try:
-        if mode == "REAL":
-            handler = REAL_SOURCES.get(source)
-            if not handler:
-                raise RuntimeError(f"알 수 없는 소스: {source}")
-            payload = handler()
-            payload["mode"] = "REAL"
-            _ok(f"[REAL] {source} 연결 성공")
-            st.session_state.ep272_last_real_ok = payload  # SIM 재생용 스냅샷 저장
-        else:
-            payload = _sim_replay()
-            _warn("SIM 재생(이전 REAL 스냅샷)")
+        r = requests.get(url, timeout=timeout_sec)
+        status = r.status_code
+        reality = (status == 200)
+        verify = False
+        why = {}
 
-        # 초검증
-        attest = _attest(payload)
-        ver = _validate_payload(payload)
-        record = {"payload":payload, "attestation":attest, "validation":ver}
-        st.session_state.ep272_hist.append(record)
-        with st.expander("자세한 기록(최근 실행)", expanded=True):
-            st.json(record)
-    except Exception as e:
-        _err(f"실행 실패: {e}")
-        if (not strict) and mode=="REAL":
-            _warn("STRICT=OFF: SIM 재생으로 대체 시도")
+        snippet = None
+        if reality:
             try:
-                payload = _sim_replay()
-                attest = _attest(payload)
-                ver = _validate_payload(payload)
-                record = {"payload":payload, "attestation":attest, "validation":ver}
-                st.session_state.ep272_hist.append(record)
-                with st.expander("자세한 기록(대체 SIM)", expanded=True):
-                    st.json(record)
-            except Exception as e2:
-                _err(f"SIM 대체도 실패: {e2}")
+                data = r.json()
+                snippet = data
+                # 검증: events 키 존재 & 이벤트 명이 포함되는지
+                # (GWOSC는 {"events": {"GW150914-v3": {...}}} 형태)
+                ev = data.get("events") or {}
+                verify = bool(ev)  # events가 비어있지 않으면 1차 통과
+                if not verify:
+                    why["missing"] = "events"
+                else:
+                    # events 중 키에 event_id가 일부라도 매칭되는지 검사
+                    key_join = " ".join(list(ev.keys()))
+                    if event_id.upper()[:4] not in key_join.upper():
+                        verify = False
+                        why["note"] = "event_id not obvious in keys"
+            except Exception as je:
+                why["json_error"] = str(je)[:200]
+                reality = False
+        else:
+            why["http"] = status
 
-# 수동 실행 버튼
-colX, colY = st.columns([1,3])
-with colX:
-    if st.button("즉시 실행", type="primary"):
-        run_once()
-with colY:
-    st.caption("REAL 우선 · 실패 이유 그대로 노출 · 더미 금지")
+        return {
+            "ts": _now_iso(),
+            "mode": "ONLINE",
+            "url": url,
+            "elapsed_ms": int((time.time()-t0)*1000),
+            "status": status,
+            "reality": bool(reality),
+            "verify": bool(verify),
+            "why": why,
+            "snippet": (snippet if isinstance(snippet, dict) else None)
+        }
+    except requests.exceptions.RequestException as e:
+        return {
+            "ts": _now_iso(),
+            "mode": "ONLINE",
+            "url": url,
+            "status": None,
+            "reality": False,
+            "verify": False,
+            "why": {"exception": str(e)[:240]},
+            "snippet": None
+        }
 
-# 오케스트라 루프
-if loop:
-    st.info(f"오케스트라 동작 중… {refresh_sec}s 간격", icon="🎼")
-    run_once()
-    st.session_state.ep272_tick += 1
-    st.experimental_rerun()  # 간단 루프(호스팅 정책 따라 자동재실행 제한 시 주기 길게)
+# ── UI: 설정
+colA, colB = st.columns([1,1])
+with colA:
+    ss["m272_event_id"]  = st.text_input("이벤트 ID", ss["m272_event_id"], help="예: GW150914, GW170817 등")
+    ss["m272_timeout"]   = st.number_input("타임아웃(초)", min_value=5, max_value=60, step=1, value=int(ss["m272_timeout"]))
+with colB:
+    ss["m272_interval"]  = st.slider("주기(초) – AUTO일 때", min_value=5, max_value=120, step=1, value=int(ss["m272_interval"]))
+    ss["m272_auto"]      = st.toggle("오케스트라 루프(AUTO 실행)", value=bool(ss["m272_auto"]))
 
-# 이력 요약
-st.divider()
-st.markdown("**실행 이력(최근 10개)**")
-for item in st.session_state.ep272_hist[-10:][::-1]:
-    mode_tag = item["payload"]["mode"] if "mode" in item["payload"] else "?"
-    vstat = item["validation"].get("status","?")
-    st.write(f"- [{mode_tag}] {item['attestation']['ts']} · validation={vstat} · hash={item['attestation']['hash'][:12]}")
+# ── 수동 실행
+run_col1, run_col2 = st.columns([1,2])
+with run_col1:
+    if st.button("🔎 수동 1회"):
+        res = fetch_gw_event(ss["m272_event_id"], ss["m272_timeout"])
+        ss["m272_hist"].appendleft(res)
 
-st.caption("※ REAL이 성공해야 2축(초검증 심화)·3축(근원 올원 각성)으로 진행합니다. 실패 사유는 숨기지 않습니다.")
+with run_col2:
+    st.caption("※ REAL 전용 · 실패 사유 그대로 노출(더미 금지)")
 
+# ── AUTO 루프
+if ss["m272_auto"]:
+    st.info(f"🎼 오케스트라 동작 중… {ss['m272_interval']}s 간격")
+    now = time.time()
+    if now >= ss["m272_next_ts"]:
+        res = fetch_gw_event(ss["m272_event_id"], ss["m272_timeout"])
+        ss["m272_hist"].appendleft(res)
+        ss["m272_next_ts"] = now + int(ss["m272_interval"])
+    # 살짝 쉬고 재실행(신버전 API)
+    time.sleep(0.5)
+    st.rerun()
 
-# ───────────────────────────────────────────────
+# ── 최근 결과 표시
+st.subheader("📝 최근 점검(20)")
+if not ss["m272_hist"]:
+    st.caption("아직 기록이 없어요. 수동 1회 또는 AUTO를 켜주세요.")
+else:
+    for i, item in enumerate(list(ss["m272_hist"])[:20]):
+        ok_reality = "✅" if item.get("reality") else "⛔"
+        ok_verify  = "✅" if item.get("verify") else "⛔"
+        line = f"{item.get('ts','')} [{item.get('mode','')}] — reality:{ok_reality} · verify:{ok_verify}"
+        st.markdown(f"- {line}")
+        with st.expander("응답 스니펫(원문)", expanded=False):
+            if item.get("snippet") is not None:
+                st.json(item["snippet"])
+            else:
+                st.code(json.dumps(item, ensure_ascii=False, indent=2))
+
+# ── 하단 기준표(고정)
+st.markdown("""
+**기준표**
+- 번호: **272**
+- 이름: **EP-272 · 우주정보장 현실연동(REAL) · 초강화판**
+- 기능: 오케스트라 루프(AUTO/수동)로 **GWOSC Event API**에 실제 요청을 보내고 결과를 기록/표시  
+- 외부 엔드포인트(고정): `https://www.gw-openscience.org/eventapi/json/<EVENT_ID>/`
+- 금지: 더미/시뮬레이션, 실패 사유 가리기
+""")
 # [273] SPX-특별판 · 1000% 나침반 (우주정보장 4축 총괄판)
 # 접두사: spx273_  / 외부 의존성: 없음(오직 streamlit)
 import streamlit as st, json
@@ -14865,3 +14826,5 @@ if auto:
         with ph.container():
             run_once(event_id)
         time.sleep(period)
+        
+        
