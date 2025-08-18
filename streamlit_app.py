@@ -14770,227 +14770,147 @@ with cB:
             st.error(f"복원 실패: {e}")
 
 st.caption(f"SPX-274 · {spx274_now_kst()} · 표준 게이트 준비 완료")
-# ───────────────────────────────────────────────
 
-# [275R] SPX-척추 자동 점검 — REAL 연동판(3축 집중)
-# 접두사: spx275_ / 의존: [274] spx274_require() (없으면 내부 안전 기본값 사용)
-import streamlit as st, time, threading, math, json
 
-# ===== [274] 게이트 함수 없을 때 최소 안전 기본값(있으면 이 블록은 무시됨) =====
-if "spx274_require" not in globals():
-    _SPX274_BASELINE = {
-        "reality":  {"ce_min":0.97, "cite_min":0.90, "trust_min":0.97},
-        "verify":   {"repr_min":0.93, "logic_max":5e-4, "unit_max":1e-4, "surp_max":0.005},
-        "awaken":   {"repr_min":0.93, "total_pass": True},  # 1·2축 PASS + 재현성 충족
-        "evolve":   {"robust_min":0.99}
-    }
-    def spx274_require(axis:str, m:dict):
-        b = _SPX274_BASELINE
-        ok=True; why=[]
-        if axis=="reality":
-            if m.get("ce",0)<b[axis]["ce_min"]: ok=False; why.append("CE<0.97")
-            if m.get("cite",0)<b[axis]["cite_min"]: ok=False; why.append("cite<0.90")
-            if m.get("reality_trust",0)<b[axis]["trust_min"]: ok=False; why.append("trust<0.97")
-        elif axis=="verify":
-            if m.get("repr",0)<b[axis]["repr_min"]: ok=False; why.append("repr<0.93")
-            if m.get("logic",1)>b[axis]["logic_max"]: ok=False; why.append("logic>5e-4")
-            if m.get("unit",1)>b[axis]["unit_max"]: ok=False; why.append("unit>1e-4")
-            if m.get("surprise",1)>b[axis]["surp_max"]: ok=False; why.append("p>0.005")
-        elif axis=="awaken":
-            # 1,2축 PASS는 상위 로직에서 보증 → 여기서는 재현성·태그 확인
-            if m.get("repr",0)<b[axis]["repr_min"]: ok=False; why.append("repr<0.93")
-            if not m.get("prereq_ok",False): ok=False; why.append("prereq_fail")
-        elif axis=="evolve":
-            if m.get("robust",0)<b[axis]["robust_min"]: ok=False; why.append("robust<0.99")
-        return ok, ("ok" if ok else " / ".join(why))
+# ===== 275. EP-275 · 우주정보장 실연동 핑/검증(ONLINE 전용 · R6) =====
+# 기능: LIGO EventAPI를 실제로 호출(ONLINE) → 응답 수신 → 소프트 스키마 검증 → 결과/이력 기록
+# 포커스: 1축(현실연동) + 2축(초검증 최소요건) 확인. 더미/시뮬레이션 절대 사용 안 함.
+# 키 충돌 방지용 prefix: m275_
 
-# ===== 외부 엔진 가져오기(있으면 사용, 없으면 내부 계산기로 대체) =====
-try:
-    from cosmic_link import CosmicLink
-except Exception:
-    CosmicLink = None
+import streamlit as st
+import time, json
+from datetime import datetime, timezone
 
-try:
-    from validation_engine import ValidationEngine
-except Exception:
-    ValidationEngine = None
+# 안전장치: 상위 유틸이 없을 때를 대비
+if "register_module" not in globals():
+    def register_module(num, name, desc): 
+        st.markdown(f"### **[{num}] {name}**")
+        st.caption(desc)
 
-# ===== 상태 =====
-if "spx275_logs" not in st.session_state: st.session_state.spx275_logs=[]
-if "spx275_running" not in st.session_state: st.session_state.spx275_running=False
-if "spx275_interval" not in st.session_state: st.session_state.spx275_interval=10
-if "EA_AWAKEN_READY" not in st.session_state: st.session_state.EA_AWAKEN_READY=False
+if "gray_line" not in globals():
+    def gray_line(num, title, subtitle=""):
+        st.markdown(f"**{num} · {title}**  \n<sub>{subtitle}</sub>", unsafe_allow_html=True)
 
-# ===== OFFLINE 샘플(실측 기반 축약치: h≈1.5e-21) =====
-_SAMPLES = {
-    "ligo": {
-        "event": "GW150914",
-        "L_m": 4000.0,          # 팔 길이(m)
-        "dL_m": 6.0e-18,        # 길이 변화(m)
-        "h_expected": 1.5e-21,  # 기대 스트레인
-        "url": "https://losc.ligo.org/",
-        "doi": "10.1103/PhysRevLett.116.061102",
-        "source_id": "src:dataset:ligo-open"
-    }
-}
+# ─────────────────────────────────────────────────────────────
+# 실제 ONLINE 어댑터: LIGO EventAPI
+# ─────────────────────────────────────────────────────────────
+import requests
 
-# ===== 데이터 획득: AUTO / ONLINE / OFFLINE =====
-def spx275_fetch(source:str, mode:str):
-    """
-    mode:
-      - AUTO: cosmic_link 있으면 ONLINE, 없으면 OFFLINE
-      - ONLINE: CosmicLink().get_data(source) 강제
-      - OFFLINE: _SAMPLES 사용
-    """
-    mode = mode.upper()
-    if mode=="AUTO":
-        if CosmicLink is not None:
-            mode="ONLINE"
-        else:
-            mode="OFFLINE"
-    if mode=="ONLINE":
+_LIGO_BASE = "https://www.gw-openscience.org/eventapi/json/GWTC-1-confident"
+
+def m275_fetch_ligo(event_id: str, timeout: int = 15):
+    """GWTC-1-confident 개별 이벤트를 ONLINE으로 실제 요청한다."""
+    url = f"{_LIGO_BASE}/{event_id.strip()}/"
+    try:
+        resp = requests.get(url, timeout=timeout)
+        payload = None
         try:
-            c = CosmicLink()
-            data = c.get_data(source)
-            return {"mode":"ONLINE","data":data}
-        except Exception as e:
-            return {"mode":"ONLINE","error":str(e),"data":None}
+            payload = resp.json()
+        except Exception:
+            payload = None
+        return {
+            "ok": resp.ok,
+            "status": resp.status_code,
+            "url": url,
+            "json": payload,
+            "text": resp.text[:2000] if resp.text else ""
+        }
+    except Exception as e:
+        return {
+            "ok": False, "status": None, "url": url,
+            "error": str(e), "json": None, "text": ""
+        }
+
+# 소프트 스키마 검증(완화형): event / events 형태 모두 허용, 최소키만 확인
+def m275_soft_validate(payload: dict):
+    if not isinstance(payload, dict):
+        return False, {"reason": "not_dict"}
+
+    ev = None
+    if "event" in payload and isinstance(payload["event"], dict):
+        ev = payload["event"]
+    elif "events" in payload and isinstance(payload["events"], list) and payload["events"]:
+        ev = payload["events"][0]
     else:
-        # OFFLINE
-        return {"mode":"OFFLINE","data":_SAMPLES.get(source)}
+        return False, {"missing": "event_or_events"}
 
-# ===== 지표 산출(실데이터 기반) =====
-def spx275_compute_metrics(payload:dict)->dict:
-    """
-    입력 payload 예:
-      { "event":"GW...", "L_m":4000.0, "dL_m":6e-18, "h_expected":1.5e-21, "url":..., "doi":... }
-    산출:
-      ce, cite, repr, logic, unit, reality_trust, robust, surprise, attested, ckpt_ok
-    """
-    m = {k:0 for k in ["ce","cite","repr","logic","unit","reality_trust","robust","surprise"]}
-    m["attested"]=False; m["ckpt_ok"]=0.0
+    missing = [k for k in ("GPS", "Instruments") if k not in ev]
+    return (len(missing) == 0), ({} if not missing else {"missing": missing})
 
-    if not payload: 
-        return m
+# ─────────────────────────────────────────────────────────────
+# UI
+# ─────────────────────────────────────────────────────────────
+register_module(
+    "275",
+    "EP-275 · 우주정보장 실연동 핑/검증 (ONLINE · R6)",
+    "LIGO EventAPI를 실요청 → 응답 상태/본문 확인 → 소프트 스키마 검증 → 이력 저장"
+)
+gray_line("275-ONLINE", "LIGO ONLINE 실연동", "실제 요청 · 더미 금지 · 고유 키 사용")
 
-    # CE-coverage: 필수 필드 충족 비율
-    required = ["event","L_m","dL_m","h_expected","url","source_id"]
-    have = sum(1 for k in required if k in payload and payload[k] is not None)
-    m["ce"] = round(have/len(required), 3)
+# 입력부
+colA, colB = st.columns([2,1])
+with colA:
+    m275_event_id = st.text_input("이벤트 ID", "GW150914", key="m275_event")
+with colB:
+    m275_timeout = st.number_input("타임아웃(초)", min_value=5, max_value=60, value=15, step=1, key="m275_timeout")
 
-    # 인용(doi/url)
-    m["cite"] = 1.0 if payload.get("doi") and payload.get("url") else (1.0 if payload.get("url") else 0.0)
+col1, col2 = st.columns([1,1])
+with col1:
+    m275_auto = st.toggle("AUTO 주기 실행", key="m275_auto")
+with col2:
+    m275_interval = st.slider("주기(초)", min_value=5, max_value=180, value=30, key="m275_interval")
 
-    # 단위/논리 위반 체크: ΔL/L → 무차원
-    try:
-        L = float(payload["L_m"]); dL = float(payload["dL_m"])
-        h_calc = dL / L
-        unit_ok = True  # m/m → 무차원
-        m["unit"] = 0.0 if unit_ok else 1.0
-        # 재현성: 계산값과 기대값 오차
-        h_exp = float(payload.get("h_expected", h_calc))
-        rel_err = abs(h_calc - h_exp) / max(h_exp, 1e-30)
-        m["repr"] = round(1.0 - min(rel_err, 1.0), 3)  # 1에 가까울수록 재현성 높음
-        # 논리 위반율(간단): 값이 음수/NaN이면 위반
-        logic_violation = 0.0 if (h_calc>0 and not math.isnan(h_calc)) else 1.0
-        m["logic"] = logic_violation
-    except Exception:
-        m["repr"]=0.0; m["logic"]=1.0; m["unit"]=1.0
+m275_run = st.button("ONLINE 실행", key="m275_run")
 
-    # 현실 신뢰도(rough): 출처/필드 충족 + 재현성 반영
-    m["reality_trust"] = round(0.5*m["ce"] + 0.5*m["repr"], 3)
+# 상태/이력 저장소
+if "m275_history" not in st.session_state:
+    st.session_state["m275_history"] = []
+if "m275_last_ts" not in st.session_state:
+    st.session_state["m275_last_ts"] = 0.0
 
-    # 강건성/놀라움 p (간이): 재현성 높고 논리/단위 위반 없을수록 강건성↑, 놀라움 p↓
-    m["robust"] = round(min(0.98 + 0.02*m["repr"], 0.995), 3)
-    m["surprise"] = round(max(0.001, 0.006 - 0.004*m["repr"]), 3)
+# 트리거 판단
+do_run = False
+now_s = time.time()
+if m275_run:
+    do_run = True
+elif m275_auto and (now_s - st.session_state["m275_last_ts"] >= m275_interval):
+    do_run = True
 
-    # 증빙/체크포인트 마크(간이)
-    m["attested"]=True
-    m["ckpt_ok"]=round(0.97 + 0.03*m["repr"], 3) if m["repr"]>0 else 0.0
-    return m
+# 실행
+if do_run:
+    res = m275_fetch_ligo(m275_event_id, m275_timeout)
+    row = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "mode": "ONLINE",
+        "url": res.get("url"),
+        "status": res.get("status")
+    }
 
-# ===== 한 번 점검 =====
-def spx275_run_once(mode:str="AUTO"):
-    out={}
-    # 1) 현실연동
-    fr = spx275_fetch("ligo", mode)
-    data = fr.get("data")
-    m_real = spx275_compute_metrics(data)
-    ok_real, why_real = spx274_require("reality", m_real)
-    out["reality"]={"ok":ok_real,"msg":why_real,"metrics":m_real,"mode":fr.get("mode"),"data_head":{k:data[k] for k in ["event","h_expected","url"]} if data else None}
+    if res.get("ok") and res.get("json") is not None:
+        v_ok, why = m275_soft_validate(res["json"])
+        row.update({"reality": True, "verify": v_ok, "why": why})
+        st.success("✅ ONLINE 연결 성공")
+    else:
+        err = res.get("error") or f"http {res.get('status')}"
+        row.update({"reality": False, "verify": False, "error": err})
+        st.error(f"❌ ONLINE 실패: {err}")
 
-    # 2) 초검증(있으면 ValidationEngine로 재검증·지표 갱신)
-    m_ver = dict(m_real)  # 시작값
-    try:
-        if ValidationEngine is not None and data:
-            ve = ValidationEngine()
-            steps = ["fetch","units(ΔL/L)","h-match"]
-            # 검증 성공시 repr/logic/unit/robust/surprise 보정
-            r = ve.validate_output(json.dumps(data, ensure_ascii=False), steps)
-            if r and r.get("status") in ("PASS","OK","pass"):
-                m_ver["repr"] = max(m_ver["repr"], 0.95)
-                m_ver["logic"] = min(m_ver["logic"], 1e-5)
-                m_ver["unit"]  = 0.0
-                m_ver["robust"]= max(m_ver["robust"], 0.992)
-                m_ver["surprise"]= min(m_ver["surprise"], 0.004)
-    except Exception:
-        pass
-    ok_ver, why_ver = spx274_require("verify", m_ver)
-    out["verify"]={"ok":ok_ver,"msg":why_ver,"metrics":m_ver}
+    # 이력 저장(최대 50)
+    st.session_state["m275_history"] = [row] + st.session_state["m275_history"][:49]
+    st.session_state["m275_last_ts"] = now_s
 
-    # 3) 각성(전제: 1,2 PASS + 재현성 충족)
-    m_aw = {"repr":m_ver["repr"], "prereq_ok": (ok_real and ok_ver)}
-    ok_aw, why_aw = spx274_require("awaken", m_aw)
-    if ok_aw:
-        st.session_state.EA_AWAKEN_READY=True
-    out["awaken"]={"ok":ok_aw,"msg":why_aw,"metrics":m_aw, "flag": st.session_state.EA_AWAKEN_READY}
+    # 결과 표시
+    st.subheader("실행 결과")
+    st.json(row, expanded=False)
 
-    # 4) 자가진화(간이 기준: 강건성)
-    m_ev = {"robust": m_ver["robust"]}
-    ok_ev, why_ev = spx274_require("evolve", m_ev)
-    out["evolve"]={"ok":ok_ev,"msg":why_ev,"metrics":m_ev}
+    st.subheader("응답 스니펫(원문)")
+    st.code(res.get("text", ""), language="json")
 
-    # 로그 적재
-    st.session_state.spx275_logs.insert(0, {"ts": time.strftime("%H:%M:%S"), "mode": out["reality"]["mode"], "out": out})
-    if len(st.session_state.spx275_logs)>20: st.session_state.spx275_logs.pop()
-    return out
+    # AUTO 모드면 즉시 리런
+    if m275_auto:
+        st.rerun()
 
-# ===== 백그라운드 루프 =====
-def _spx275_loop(mode):
-    while st.session_state.spx275_running:
-        spx275_run_once(mode)
-        time.sleep(st.session_state.spx275_interval)
-
-# ===== UI =====
-st.markdown("## [275R] 척추 자동 점검 — REAL 연동판 (3축 집중)")
-mode = st.radio("연결 모드", ["AUTO","ONLINE","OFFLINE"], horizontal=True)
-
-c0,c1,c2,c3 = st.columns([1,1,1,2])
-with c0:
-    st.session_state.spx275_interval = st.slider("주기(초)",5,60,st.session_state.spx275_interval,step=5)
-with c1:
-    if st.button("▶ 자동",use_container_width=True):
-        if not st.session_state.spx275_running:
-            st.session_state.spx275_running=True
-            threading.Thread(target=_spx275_loop, args=(mode,), daemon=True).start()
-            st.success("자동 점검 시작")
-with c2:
-    if st.button("■ 중지",use_container_width=True):
-        st.session_state.spx275_running=False
-        st.warning("자동 점검 중지")
-with c3:
-    if st.button("🔍 수동 1회",use_container_width=True):
-        spx275_run_once(mode)
-        st.info("1회 점검 완료")
-
-st.divider()
-st.markdown("### 📝 최근 점검(20)")
-for log in st.session_state.spx275_logs:
-    out=log["out"]; ts=log["ts"]; md=out["reality"]["mode"]
-    line = []
-    for ax in ["reality","verify","awaken","evolve"]:
-        line.append(f"{ax}:{'✅' if out[ax]['ok'] else '⛔'}")
-    st.write(f"**{ts} [{md}]** — " + " · ".join(line))
-    if out["reality"].get("data_head"):
-        st.caption(f"event={out['reality']['data_head']['event']} · url={out['reality']['data_head']['url']}")
-# ───────────────────────────────────────────────
+# 이력
+st.markdown("—")
+st.caption("최근 50건 이력")
+st.json(st.session_state["m275_history"])
