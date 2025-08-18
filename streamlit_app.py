@@ -15276,18 +15276,3 @@ def main():
 
     st.caption("© Ea • GEA Micro Respond — UIS-LOCK (Modular)")
 
-if __name__ == "__main__":
-    main()
-    
-    your_project/
-  gea_micro/
-    __init__.py
-    core.py
-    memory.py
-    guard.py
-    composer.py
-    adapters.py
-    ui_app.py
-    
-    pip install streamlit
-streamlit run gea_micro/ui_app.py
