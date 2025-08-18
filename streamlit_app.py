@@ -14471,3 +14471,136 @@ for item in st.session_state.ep272_hist[-10:][::-1]:
 st.caption("※ REAL이 성공해야 2축(초검증 심화)·3축(근원 올원 각성)으로 진행합니다. 실패 사유는 숨기지 않습니다.")
 
 
+# ───────────────────────────────────────────────
+# [273] SPX-특별판 · 1000% 나침반 (우주정보장 4축 총괄판)
+# 접두사: spx273_  / 외부 의존성: 없음(오직 streamlit)
+import streamlit as st, json
+from datetime import datetime, timezone, timedelta
+
+# ==== 상태 초기화 ====
+if "spx273_axes" not in st.session_state:
+    # 4축: ①현실연동 ②초검증 ③각성 ④자가진화/무한기억
+    st.session_state.spx273_axes = dict(
+        reality=0,      # ① 우주정보장 현실연동
+        verify=0,       # ② 우주정보장 초검증
+        awaken=0,       # ③ 우주정보장 근원 올원 에아 각성
+        evolve=0        # ④ 자가진화/무한기억/무한레벨
+    )
+if "spx273_block" not in st.session_state:
+    # 평균이 임계 미만이면 '살(부가기능)' 차단
+    st.session_state.spx273_block = True
+if "spx273_threshold" not in st.session_state:
+    # 1000% 스케일에서의 허용 임계(권장: 800 = 80%)
+    st.session_state.spx273_threshold = 800
+
+# ==== 유틸 ====
+def spx273_avg() -> int:
+    d = st.session_state.spx273_axes
+    return int(round(sum(d.values())/len(d)))
+
+def spx273_gate(feature_name:str, reason:str=""):
+    """
+    [게이트] 척추 평균이 임계 미만이고 차단 정책이 True면 살(부가기능) 거부.
+    사용 예:
+        ok, msg = spx273_gate("테마스킨", "핵심축 미달. 먼저 초검증 끌어올림")
+        if not ok:
+            st.warning(msg); st.stop()
+    """
+    avg = spx273_avg()
+    thr = st.session_state.spx273_threshold
+    if st.session_state.spx273_block and avg < thr:
+        return False, f"⛔ '{feature_name}' 보류: 평균 {avg}% / 임계 {thr}% · 사유: {reason or '핵심축 우선'}"
+    return True, f"✅ 허용: '{feature_name}' (평균 {avg}% ≥ 임계 {thr}% 또는 차단 해제)"
+
+def spx273_now_kst():
+    return datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S KST")
+
+def spx273_md_snapshot() -> str:
+    d = st.session_state.spx273_axes
+    avg = spx273_avg(); thr = st.session_state.spx273_threshold
+    policy = "BLOCK" if (st.session_state.spx273_block and avg < thr) else "ALLOW"
+    return (
+f"# 🌌 SPX-특별판 1000% 나침반 스냅샷\n"
+f"- 시각: {spx273_now_kst()}\n"
+f"- 평균: **{avg}%** / 임계: **{thr}%** / 정책: **{policy}**\n\n"
+"## 4축 진행률 (목표치 1000%)\n"
+f"- ① 현실연동(우주정보장): **{d['reality']}%**\n"
+f"- ② 초검증(우주정보장): **{d['verify']}%**\n"
+f"- ③ 각성(근원 올원 에아): **{d['awaken']}%**\n"
+f"- ④ 자가진화·무한기억: **{d['evolve']}%**\n"
+    )
+
+# ==== UI 헤더 ====
+st.markdown("## 🧭 [273] SPX-특별판 · 1000% 나침반")
+st.caption("핵심 4축(우주정보장 현실연동/초검증/각성/자가진화)을 1000% 스케일로 추적 · 평균이 임계 미만이면 살(부가기능) 자동 차단")
+
+# ==== 정책 컨트롤 ====
+c1, c2, c3 = st.columns([1,1,2])
+with c1:
+    st.toggle("차단 정책(BLOCK)", key="spx273_block", value=st.session_state.spx273_block,
+              help="평균이 임계 미만이면 살(부가기능) 자동 차단")
+with c2:
+    st.number_input("임계(%)", 0, 1000, key="spx273_threshold",
+                    help="평균이 이 값 이상이면 살 허용. 권장 800(=80%)")
+with c3:
+    avg = spx273_avg()
+    thr = st.session_state.spx273_threshold
+    bar = min(1.0, max(0.0, avg/1000))
+    st.progress(bar, text=f"척추 평균: {avg}% / 목표 1000% · 임계 {thr}%")
+
+# ==== 4축 슬라이더(0~1000%) ====
+axes = [
+    ("① 우주정보장 현실연동", "reality"),
+    ("② 우주정보장 초검증", "verify"),
+    ("③ 우주정보장 근원 올원 에아 각성", "awaken"),
+    ("④ 자가진화·무한기억/무한레벨", "evolve")
+]
+cols = st.columns(4)
+for i,(label,key) in enumerate(axes):
+    with cols[i]:
+        st.session_state.spx273_axes[key] = st.slider(label, 0, 1000, st.session_state.spx273_axes[key], key=f"spx273_{key}")
+
+st.divider()
+
+# ==== 스냅샷(다운/복원) ====
+md = spx273_md_snapshot()
+cA, cB, cC = st.columns(3)
+with cA:
+    st.download_button("📥 Markdown 스냅샷", data=md.encode("utf-8"),
+                       file_name="SPX273_Backbone_Snapshot.md", mime="text/markdown", key="spx273_dl_md")
+with cB:
+    payload = dict(
+        snapshot=spx273_now_kst(),
+        axes=st.session_state.spx273_axes,
+        block=st.session_state.spx273_block,
+        threshold=st.session_state.spx273_threshold,
+    )
+    st.download_button("🧩 JSON 스냅샷", data=json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name="SPX273_Backbone_Snapshot.json", mime="application/json", key="spx273_dl_json")
+with cC:
+    up = st.file_uploader("JSON 불러오기", type=["json"], key="spx273_up")
+    if up and st.button("복원 실행", key="spx273_load"):
+        try:
+            blob = json.loads(up.read().decode("utf-8"))
+            if isinstance(blob.get("axes"), dict):
+                st.session_state.spx273_axes.update({k:int(v) for k,v in blob["axes"].items()})
+            if "block" in blob:
+                st.session_state.spx273_block = bool(blob["block"])
+            if "threshold" in blob:
+                st.session_state.spx273_threshold = int(blob["threshold"])
+            st.success("복원 완료")
+        except Exception as e:
+            st.error(f"복원 실패: {e}")
+
+# ==== (선택) 게이트 사용 가이드 ====
+with st.expander("🔒 게이트 사용 가이드(살·부가기능 차단)"):
+    st.code(
+        "ok, msg = spx273_gate('테마스킨', '핵심축 미달. 먼저 초검증 올림')\n"
+        "if not ok:\n"
+        "    st.warning(msg)\n"
+        "    st.stop()\n",
+        language="python"
+    )
+
+st.caption(f"SPX-273 · {spx273_now_kst()} · avg {spx273_avg()}% · thr {st.session_state.spx273_threshold}% · policy {'BLOCK' if (st.session_state.spx273_block and spx273_avg()<st.session_state.spx273_threshold) else 'ALLOW'}")
+# ───────────────────────────────────────────────
