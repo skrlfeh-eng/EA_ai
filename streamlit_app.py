@@ -246,15 +246,18 @@ with right:
 st.divider()
 st.caption("키가 없거나 쿼터 초과 시 자동 폴백(Mock) · build v3.3")
 
+
 # -*- coding: utf-8 -*-
-# EA · Ultra (AIO) v3.4
-# - 좌: 응답 채팅 / 우: 생각 패널(요약 기본, 자세히에서 단계 로그)
-# - 사고 지속 표시 토글, 엔진 실패 시 Mock 폴백, 응답 보장
+# EA · Ultra (AIO) v3.5
+# - 좌: 응답 채팅 / 우: 생각 패널(요약 기본, 필요 시 상세)
+# - 모든 위젯 key 고유화(중복 ID 방지), st.chat_input에도 key 부여
+# - OpenAI/Gemini 순서/모델 선택, 실패·쿼터초과 시 Mock 폴백
+# - 동시 사고/응답(co-think), 응답 항상 출력 보장
 
 import os, re, json, time
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Generator
+from typing import List, Dict, Generator, Tuple
 
 import streamlit as st
 
@@ -263,14 +266,14 @@ ROOT = Path(".")
 DATA = ROOT / "data"; DATA.mkdir(exist_ok=True, parents=True)
 DLG  = DATA / "dialog.jsonl"; MEM = DATA / "memory.jsonl"; IDF = DATA / "identity.json"
 
-def nowz(): return datetime.utcnow().isoformat()+"Z"
+def nowz() -> str: return datetime.utcnow().isoformat()+"Z"
 def jappend(p:Path,obj:Dict):
     try:
         with p.open("a",encoding="utf-8") as f: f.write(json.dumps(obj,ensure_ascii=False)+"\n")
     except: pass
 def jread_lines(p:Path)->List[Dict]:
     if not p.exists(): return []
-    out=[]; 
+    out=[]
     with p.open("r",encoding="utf-8") as f:
         for ln in f:
             ln=ln.strip()
@@ -338,21 +341,40 @@ def get_openai_adapter():
     except Exception:
         return None
 
+# Gemini는 여러 모델 후보를 순회(무료/크레딧 가용한 모델로 자동 시도)
+GEMINI_CANDIDATES = [
+    "gemini-1.5-pro-latest",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash"
+]
+
 def get_gemini_adapter():
     try:
         import google.generativeai as genai
         key=os.getenv("GEMINI_API_KEY")
         if not key: raise RuntimeError("GEMINI_API_KEY 필요")
         genai.configure(api_key=key)
-        model=os.getenv("GEMINI_MODEL","gemini-1.5-pro-latest")
-        mdl=genai.GenerativeModel(model)
-        class GE:
-            name="Gemini"
-            def stream(self,prompt,max_tokens=480,temperature=0.75):
-                r=mdl.generate_content(prompt, generation_config={"temperature":temperature,"max_output_tokens":max_tokens})
-                txt=getattr(r,"text","") or ""
-                for chunk in re.findall(r".{1,60}", txt, flags=re.S): yield chunk
-        return GE()
+        model=os.getenv("GEMINI_MODEL","") or GEMINI_CANDIDATES[0]
+        tried=[]
+        def build(model_name:str):
+            mdl=genai.GenerativeModel(model_name)
+            class GE:
+                name=f"Gemini({model_name})"
+                def stream(self,prompt,max_tokens=480,temperature=0.75):
+                    r=mdl.generate_content(prompt,
+                        generation_config={"temperature":temperature,"max_output_tokens":max_tokens})
+                    txt=getattr(r,"text","") or ""
+                    for chunk in re.findall(r".{1,60}", txt, flags=re.S): yield chunk
+            return GE()
+        # 우선 환경변수 모델, 실패 시 후보 순회
+        try: return build(model)
+        except Exception as e: tried.append((model,e))
+        for cand in GEMINI_CANDIDATES:
+            if cand==model: continue
+            try: return build(cand)
+            except Exception as e: tried.append((cand,e))
+        return None
     except Exception:
         return None
 
@@ -371,7 +393,7 @@ def safe_stream(adapter, prompt:str, max_tokens:int, temperature:float)->Generat
         for x in adapter.stream(prompt, max_tokens=max_tokens, temperature=temperature):
             yield x
     except Exception as e:
-        note=f"[{adapter.name} 오류:{type(e).__name__}] 자동 폴백 → Mock\n"
+        note=f"[{adapter.name} 오류:{type(e).__name__}] 폴백 → Mock\n"
         for ch in note: yield ch
         for x in MockAdapter().stream(prompt, max_tokens=max_tokens, temperature=temperature):
             yield x
@@ -398,7 +420,6 @@ def think_round(topic:str, engines:List[str], why_chain:bool, hits:List[str])->D
                 f"주제: {topic}\n- 요약:")
         text="".join(safe_stream(adapter, prompt, max_tokens=220, temperature=0.7))
         logs.append({"i":i,"by":adapter.name,"text":text})
-    # 최종 합성
     adapter = pick_adapter(engines or ["OpenAI","Gemini"])
     final_prompt=(f"{guide}\n[최종합성] 위 단계 요약을 통합해 한국어로 "
                   f"'결론/근거/대안/다음 행동(1~3개)'을 간결히.")
@@ -414,7 +435,6 @@ def co_think_stream(topic:str, engines:List[str], why_chain:bool, hits:List[str]
     for i, step in enumerate(steps, 1):
         eng = engines[(i-1) % max(1, len(engines))] if engines else "OpenAI"
         adapter = pick_adapter([eng])
-
         prompt = (f"{guide}\n[사고 {i}] {step}\n"
                   f"{'각 주장마다 왜?×2로 숨은 가정을 드러내라.' if why_chain else ''}\n"
                   f"주제: {topic}\n- 요약:")
@@ -423,14 +443,12 @@ def co_think_stream(topic:str, engines:List[str], why_chain:bool, hits:List[str]
             buf += ch
             yield ("log", i, ch)
 
-        # 단계 요약을 짧게 생성하여 좌측도 업데이트
         one = ("### 잠정 결론 업데이트({}/{})\n".format(i, len(steps)) +
                "- 핵심: " + " ".join(buf.split()[:60]) + "\n")
         partial_summary += one
         for chunk in re.findall(r".{1,70}", one, flags=re.S):
             yield ("ans", None, chunk)
 
-    # 최종 한 줄 요약도 만들어 생각 패널 요약에 사용
     adapter = pick_adapter(engines or ["OpenAI","Gemini"])
     short = "".join(safe_stream(adapter,
                 f"{guide}\n위 사고 내용을 한 문단(3~5문장)으로 압축 요약.",
@@ -452,14 +470,19 @@ def compose_answer(user_text:str, engines:List[str], why_chain:bool, session_id:
 
 # ---------------------- UI ----------------------
 st.set_page_config(page_title="EA · Ultra (AIO)", page_icon="🧠", layout="wide")
+
+# 전역 key 시퀀서(모든 위젯 고유키 생성)
 if "_k" not in st.session_state: st.session_state["_k"]=0
-def K(p:str)->str: st.session_state["_k"]+=1; return f"{p}-{st.session_state['_k']}"
+def K(p:str)->str:
+    st.session_state["_k"]+=1
+    return f"{p}-{st.session_state['_k']}"
 
 st.title("EA · Ultra (AIO) — 응답 채팅 + 생각 패널")
+
 top = st.columns([1,1,1,1,2])
 session_id = top[0].text_input("세션 ID", st.session_state.get("session_id","default"), key=K("sid"))
 st.session_state["session_id"]=session_id
-engines = top[1].text_input("엔진(콤마)", st.session_state.get("engines","OpenAI,Gemini"), key=K("eng"))
+engines = top[1].text_input("엔진 순서(콤마)", st.session_state.get("engines","OpenAI,Gemini"), key=K("eng"))
 st.session_state["engines"]=engines
 why_chain = top[2].checkbox("왜-사슬", True, key=K("why"))
 mem_on    = top[3].toggle("Memory ON", True, key=K("mem"))
@@ -471,28 +494,29 @@ left, right = st.columns([1.15, 0.85])
 with right:
     st.subheader("생각(요약)", anchor=False)
     if "think_summary" not in st.session_state: st.session_state["think_summary"]=""
-    st.markdown(st.session_state["think_summary"] or "_아직 생각 요약이 없습니다._")
+    st.markdown(st.session_state["think_summary"] or "_아직 생각 요약이 없습니다._", key=K("thinksum"))
 
     with st.expander("자세히 보기(단계별 로그)", expanded=False):
         logs = st.session_state.get("last_logs", [])
         if not logs:
-            st.info("대화하면 단계별 사고 로그가 여기에 나타납니다.")
+            st.info("대화하면 단계별 사고 로그가 여기에 나타납니다.", icon="💡")
         else:
             for l in logs:
                 with st.expander(f"{l['i']}. {l['by']} · 단계", expanded=False):
-                    st.markdown(l["text"])
+                    st.markdown(l["text"], key=K(f"log-{l['i']}"))
 
 # ---- 좌측: 실제 응답 채팅 ----
 with left:
     st.subheader("대화", anchor=False)
     if "messages" not in st.session_state: st.session_state["messages"]=[]
 
+    # 과거 메시지 렌더
     for m in st.session_state["messages"]:
         with st.chat_message(m["role"]): st.markdown(m["content"])
 
-    user_msg = st.chat_input("메시지를 입력하고 Enter…")
+    # !!! 중복 방지를 위해 chat_input에도 고유 key 부여 !!!
+    user_msg = st.chat_input("메시지를 입력하고 Enter…", key=K("chat_input"))
     if user_msg:
-        # 사용자 말풍선
         with st.chat_message("user"): st.markdown(user_msg)
         st.session_state["messages"].append({"role":"user","content":user_msg})
         if mem_on: add_dialog(session_id, "user", user_msg)
@@ -500,39 +524,34 @@ with left:
         engines_list=[s.strip() for s in engines.split(",") if s.strip()]
         hits = mem_hits(session_id, user_msg, 3)
 
-        # 동시 사고/응답(요약/로그는 우측으로, 응답은 좌측으로)
         shown=""; new_logs=[]
-        ans_ph = st.chat_message("assistant").empty()
+        # 어시스턴트 말풍선 자리
+        ans_holder = st.chat_message("assistant").empty()
 
         try:
             for kind, idx, chunk in co_think_stream(user_msg, engines_list, why_chain, hits if think_auto else []):
                 if kind == "log":
-                    # 우측 상세 로그로 쓸 원본 텍스트를 몽땅 쌓는다(요약은 아래 sum에서 갱신)
-                    # 단계 텍스트 누적
+                    # 상세 로그용 버퍼
                     if len(new_logs) < idx: new_logs.extend([None]*(idx-len(new_logs)))
                     prev = (new_logs[idx-1]["text"] if new_logs[idx-1] else "")
                     new_logs[idx-1] = {"i":idx,"by":(engines_list[(idx-1)%max(1,len(engines_list))] if engines_list else 'Engine'),"text":prev+chunk}
                 elif kind == "ans":
-                    shown += chunk; ans_ph.markdown(shown)
+                    shown += chunk; ans_holder.markdown(shown)
                 elif kind == "sum":
                     st.session_state["think_summary"] = chunk
                 elif kind == "done":
                     break
         except Exception as e:
-            warn=f"⚠️ 동시 사고 중 예외({type(e).__name__}). Mock로 전환합니다.\n"
-            shown += warn; ans_ph.markdown(shown)
+            shown += f"\n⚠️ 동시 사고 중 예외({type(e).__name__}). Mock로 전환합니다."
+            ans_holder.markdown(shown)
 
-        # 최종 보장(비었으면 최소 답)
         if not (shown or "").strip():
             shown = "※ 엔진 응답이 비었습니다. 임시 요약을 표시합니다.\n요지: " + " ".join(user_msg.split()[:50])
-            ans_ph.markdown(shown)
+            ans_holder.markdown(shown)
 
-        # 상태/메모리 저장
         st.session_state["messages"].append({"role":"assistant","content":shown})
         if mem_on: add_dialog(session_id, "assistant", shown)
-
-        # 우측 상세 로그 상태 업데이트(요약은 이미 세션에 반영됨)
         st.session_state["last_logs"] = [l for l in new_logs if l]
 
 st.divider()
-st.caption("생각은 기본 요약만 표시 · 자세히에서 단계별 로그 확인 · build v3.4")
+st.caption("모든 위젯에 고유 key 적용(중복 ID 방지) · Gemini 후보 자동 순회 · build v3.5")
