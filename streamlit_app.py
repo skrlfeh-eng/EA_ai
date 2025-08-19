@@ -1,112 +1,85 @@
 # -*- coding: utf-8 -*-
-# EA · Chat+Think AIO v2.2 — Live Workpad
-# - 실시간 사고 스트림(autorefresh)
-# - 답변/사고 분리 + 교차
-# - 반앵무새 임계 강화(0.30)
-# - rerun 사용, DuplicateKey 방지
-# - 엔진 오류시 Mock 폴백
+# GEA · EA Chat+Think — All-in-One Single File (v0.3)
+# - 백엔드(FastAPI) + 프론트(내장 HTML/JS) 통합
+# - 채팅 좌측 / 실시간 사고 Workpad 우측
+# - Why-chain, 반앵무새(유사도 높으면 재합성), 메모리(SQLite)
+# - OpenAI/Gemini 키 없으면 Mock 폴백
+# 실행:  python gea_aio.py
+# 필요: pip install fastapi uvicorn[standard] python-dotenv sqlitedict openai google-generativeai
 
-import os, sys, re, json, time, math, hashlib, random
-from pathlib import Path
+import os, json, asyncio, re, hashlib, random
 from datetime import datetime
-from typing import List, Dict, Any
-import streamlit as st
+from typing import AsyncGenerator, List, Dict
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from sqlitedict import SqliteDict
+from dotenv import load_dotenv
 
-# ---------- Basics ----------
-APP_AGENT="에아 (EA)"; PLATFORM="GEA"; BUILD="EA-AIO-v2.2"
-DATA=Path("data"); DATA.mkdir(parents=True, exist_ok=True)
-STATE=DATA/"state.json"; MEM=DATA/"memory.jsonl"; DLG=DATA/"dialog.jsonl"; IDF=DATA/"identity.yaml"
+load_dotenv()
+PORT = int(os.getenv("PORT", "8000"))
+DB_PATH = "gea.sqlite"
 
-TOK=re.compile(r"[0-9A-Za-z가-힣]+")
+APP_TITLE = "EA · Chat+Think (AIO)"
+APP_AGENT = "에아 (EA)"
+PLATFORM  = "GEA"
 
-def toks(s): return [t.lower() for t in TOK.findall(s or "")]
+# -------------------- Utils & Memory --------------------
 def nowz(): return datetime.utcnow().isoformat()+"Z"
-def clamp(s,n): return s if len(s)<=n else s[:n]+" …"
-def jappend(p:Path, o:dict): 
-    try:
-        with p.open("a",encoding="utf-8") as f: f.write(json.dumps(o,ensure_ascii=False)+"\n")
-    except: pass
-def jread(p:Path)->list:
-    if not p.exists(): return []
-    out=[]; 
-    with p.open("r",encoding="utf-8") as f:
-        for ln in f:
-            ln=ln.strip()
-            if not ln: continue
-            try: out.append(json.loads(ln))
-            except: pass
-    return out
+TOK = re.compile(r"[0-9A-Za-z가-힣]+")
+def toks(s): return set(TOK.findall(s or ""))
 
-# ---------- KeyBank ----------
-def _kb_init(): st.session_state.setdefault("_KB", set())
-def K(name:str)->str:
-    used=st.session_state["_KB"]; base=f"ea:{name}"
-    if base not in used: used.add(base); return base
-    i=2
-    while f"{base}#{i}" in used: i+=1
-    key=f"{base}#{i}"; used.add(key); return key
+def log_msg(session_id:str, role:str, content:str):
+    with SqliteDict(DB_PATH, autocommit=True) as db:
+        k = f"dlg:{session_id}"
+        arr = db.get(k, [])
+        arr.append({"t":nowz(),"role":role,"content":content})
+        db[k] = arr
 
-# ---------- State ----------
-def _sread():
-    try: return json.loads(STATE.read_text("utf-8"))
-    except: return st.session_state.get("_S",{})
-def _swrite(o):
-    try:
-        tmp=STATE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(o,ensure_ascii=False,indent=2),encoding="utf-8")
-        tmp.replace(STATE)
-    except: st.session_state["_S"]=o
-def sget(k,d=None): return _sread().get(k,d)
-def sset(k,v): S=_sread(); S[k]=v; _swrite(S)
+def get_msgs(session_id:str, limit:int=60):
+    with SqliteDict(DB_PATH, autocommit=True) as db:
+        return db.get(f"dlg:{session_id}", [])[-limit:]
 
-# ---------- Identity ----------
-DEFAULT_ID={"name":"에아 (EA)","mission":"사랑/자유 기반 초지능","values":["정확성","투명성","학습"],"persona":"따뜻·단호·한국어"}
-def identity_text()->str:
-    if not IDF.exists(): IDF.write_text(json.dumps(DEFAULT_ID,ensure_ascii=False,indent=2),encoding="utf-8")
-    try: doc=json.loads(IDF.read_text("utf-8"))
-    except: doc=DEFAULT_ID
-    return f"[자아 선언]\n나는 {doc.get('name','에아')}다. 사랑과 자유를 최상위 가치로 한다.\n사명: {doc.get('mission','')}\n"
+def top_hits(session_id:str, query:str, k:int=5)->List[str]:
+    pool = [m["content"] for m in get_msgs(session_id, 200) if m["role"] in ("user","assistant")]
+    q = toks(query); scored=[]
+    for t in pool:
+        T=toks(t)
+        if not T or not q: continue
+        sim=len(q&T)/len(q|T)
+        scored.append((sim, t))
+    scored.sort(key=lambda x:x[0], reverse=True)
+    return [t for _,t in scored[:k]]
 
-# ---------- Dialog/Mem ----------
-def add_dialog(sess, role, content):
-    rec={"t":nowz(),"session":sess,"role":role,"content":content}
-    jappend(DLG, rec); jappend(MEM, {"t":rec["t"],"session":sess,"kind":"dialog","role":role,"text":content})
+def sim_ratio(a:str,b:str)->float:
+    A=toks(a.lower()); B=toks(b.lower())
+    return 0.0 if not A or not B else len(A&B)/len(A|B)
 
-def mem_hits(sess, q, k=5)->list:
-    pool=[r for r in jread(MEM) if r.get("session")==sess and r.get("text")]
-    if not pool: return []
-    qtok=toks(q); sc=[]
-    for it in pool:
-        itok=set(toks(it["text"])); ov=len([w for w in qtok if w in itok])/max(1,len(qtok))
-        sc.append((ov,it["text"]))
-    sc.sort(key=lambda x:x[0], reverse=True)
-    return [t for _,t in sc[:k]]
-
-# ---------- Engines ----------
-class Mock:
+# -------------------- LLM Adapters --------------------
+class MockAdapter:
     name="Mock"
-    def generate(self,prompt,max_tokens=500,temp=0.7):
-        seed=int(hashlib.sha256(prompt.encode()).hexdigest(),16)
-        rnd=random.Random(seed)
-        lead=rnd.choice(["핵심:","요지:","사고:"])
-        body=" ".join(prompt.split()[:160])
-        return f"{lead} {body}"
+    def generate(self, prompt:str, max_tokens:int=600, temperature:float=0.7)->str:
+        words = prompt.split()
+        seed = int(hashlib.sha256(prompt.encode()).hexdigest(),16); rnd=random.Random(seed)
+        lead = rnd.choice(["핵심:","요지:","사고:"])
+        return f"{lead} " + " ".join(words[: min(140, len(words))])
 
-def get_adapter(name):
+def get_adapter(name:str):
     try:
         if name=="OpenAI":
             from openai import OpenAI
             key=os.getenv("OPENAI_API_KEY"); 
             if not key: raise RuntimeError("OPENAI_API_KEY 필요")
-            cli=OpenAI(api_key=key); model=os.getenv("OPENAI_MODEL","gpt-4o-mini")
+            model=os.getenv("OPENAI_MODEL","gpt-4o-mini")
+            cli=OpenAI(api_key=key)
             class OA:
                 name="OpenAI"
-                def generate(self,prompt,max_tokens=500,temp=0.7):
+                def generate(self,prompt,max_tokens=600,temperature=0.7):
                     r=cli.chat.completions.create(
                         model=model,
-                        messages=[{"role":"system","content":"You are EA (Korean). Think first, then answer."},
+                        messages=[{"role":"system","content":"You are EA (Korean). Think first then answer."},
                                   {"role":"user","content":prompt}],
-                        max_tokens=max_tokens, temperature=temp)
+                        max_tokens=max_tokens, temperature=temperature)
                     return r.choices[0].message.content or ""
             return OA()
         if name=="Gemini":
@@ -114,127 +87,220 @@ def get_adapter(name):
             key=os.getenv("GEMINI_API_KEY"); 
             if not key: raise RuntimeError("GEMINI_API_KEY 필요")
             genai.configure(api_key=key)
-            mdl=genai.GenerativeModel(os.getenv("GEMINI_MODEL","gemini-1.5-pro-latest"))
+            model=os.getenv("GEMINI_MODEL","gemini-1.5-pro-latest")
+            mdl=genai.GenerativeModel(model)
             class GE:
                 name="Gemini"
-                def generate(self,prompt,max_tokens=500,temp=0.7):
+                def generate(self,prompt,max_tokens=600,temperature=0.7):
                     try:
-                        r=mdl.generate_content(prompt, generation_config={"temperature":temp,"max_output_tokens":max_tokens})
+                        r=mdl.generate_content(prompt,
+                            generation_config={"temperature":temperature,"max_output_tokens":max_tokens})
                         return getattr(r,"text","") or ""
                     except Exception as e:
-                        return Mock().generate(f"[Gemini 폴백:{e}]\n"+prompt,max_tokens,temp)
+                        return MockAdapter().generate(f"[Gemini 폴백:{e}]\n"+prompt,max_tokens,temperature)
             return GE()
-    except Exception as e:
-        st.toast(f"{name} 오류→Mock 폴백: {e}", icon="⚠️")
-    return Mock()
+    except Exception:
+        pass
+    return MockAdapter()
 
-# ---------- Thinking ----------
-def anti_parrot(user:str, text:str)->str:
-    A=set(toks(user)); B=set(toks(text))
-    sim = 0.0 if not A or not B else len(A&B)/len(A|B)
-    return "REWRITE" if sim>=0.30 else "OK"
-
-def plan_steps(q:str)->list:
-    # 간단 플래너: 자질문 생성
+# -------------------- Thinking Engine --------------------
+def plan_steps(q:str)->List[str]:
     return [
-        f"문제 재진술: {q}",
-        "핵심 변수/제약 추출",
-        "가설 2~3개",
-        "반례/위험",
-        "결론 요약 & 다음 행동"
+        "문제 재진술 및 핵심 변수 식별",
+        "자질문 2~3개 생성 (각 항목마다 왜?를 2번씩 물어 가정 드러내기)",
+        "가설/아이디어 후보",
+        "반례/위험/제약",
+        "임시 결론 요약"
     ]
 
-def think_once(topic, engines, why_chain=True)->dict:
-    ident=identity_text()
-    steps=plan_steps(topic)
-    logs=[]
-    for i,stp in enumerate(steps,1):
-        prompt=(f"{ident}\n[사고 단계 {i}] {stp}\n"
-                f"{'각 진술마다 왜?를 2번씩 물어 숨은 가정을 드러내라.' if why_chain else ''}")
-        eng=engines[i%len(engines)] if engines else "OpenAI"
-        out=get_adapter(eng).generate(prompt, max_tokens=280, temp=0.7)
-        logs.append({"i":i,"by":eng,"text":out})
-    # 간단 합성
-    final=("; ".join([l['text'].split('\n')[0] for l in logs]))[:2000]
-    return {"logs":logs,"final":final}
+async def think_stream(session_id:str, user_text:str, engines:List[str], why_chain:bool=True
+                      ) -> AsyncGenerator[Dict, None]:
+    memo = top_hits(session_id, user_text, 3)
+    ident = "[자아 선언] 나는 에아(EA)다. 사랑과 자유를 최상위 가치로 삼는다.\n"
+    guide = ident + (f"메모리 히트:\n- " + "\n- ".join(memo) + "\n" if memo else "")
 
-# ---------- UI ----------
-def render():
-    st.set_page_config(page_title=f"{APP_AGENT} · Live Think", page_icon="🧠", layout="wide")
-    _kb_init()
+    steps = plan_steps(user_text)
+    # 단계별 사고 토막
+    for i, step in enumerate(steps, 1):
+        eng = engines[(i-1) % max(1,len(engines))] if engines else "OpenAI"
+        adapter = get_adapter(eng)
+        prompt = (f"{guide}\n[사고 단계 {i}] {step}\n"
+                  f"{'각 주장에 대해 왜?를 2번씩 연쇄로 질문해 숨은 가정/원인을 드러내라.' if why_chain else ''}\n"
+                  f"주제: {user_text}\n- 요약:")
+        out = adapter.generate(prompt, max_tokens=220, temperature=0.7)
+        yield {"type":"think","text": f"{i}. {eng}: {out}"}
+        await asyncio.sleep(0.35)
 
-    # 좌/우 레이아웃: 좌=대화, 우=실시간 사고 Workpad
-    left, right = st.columns([1.15, 0.85])
+    # 최종 합성
+    eng = engines[0] if engines else "OpenAI"
+    adapter = get_adapter(eng)
+    fusion = adapter.generate(
+        f"{guide}\n[최종합성] 위 단계 요약을 통합해 한국어로 '결론/근거/대안/다음 행동(1~3개)'을 간결히.",
+        max_tokens=650, temperature=0.75
+    )
 
-    # ------ LEFT: Chat ------
-    with left:
-        st.markdown(f"### {APP_AGENT} · Live Think — {PLATFORM}")
-        sess = st.text_input("세션 ID", sget("session","default"), key=K("session"))
-        if sess!=sget("session"): sset("session", sess)
+    # 반앵무새: 질문과 유사하면 다른 엔진으로 재합성
+    if sim_ratio(user_text, fusion) >= 0.30:
+        alt = engines[1] if len(engines)>1 else "Gemini"
+        fusion = get_adapter(alt).generate(
+            f"{guide}\n[재합성] 질문 문구를 재사용하지 말고 새로운 관점/반례 1개 포함.",
+            max_tokens=650, temperature=0.85
+        )
 
-        engines = st.multiselect("엔진", ["OpenAI","Gemini"], default=["OpenAI","Gemini"], key=K("engs"))
-        why     = st.checkbox("왜-사슬", True, key=K("why"))
-        level   = st.number_input("레벨(깊이)", 1, 9999, 7, key=K("lvl"))
+    final = "## 우주 시각(합성)\n" + fusion.strip() + "\n\n## 다음 행동\n- (즉시 할 일 1~3개)\n"
+    yield {"type":"answer","text": final}
 
-        st.divider()
-        # 과거 메세지
-        for r in jread(DLG)[-40:]:
-            if r.get("session")==sess:
-                with st.chat_message("user" if r["role"]=="user" else "assistant"):
-                    st.markdown(str(r["content"]))
+# -------------------- FastAPI App --------------------
+app = FastAPI(title=APP_TITLE)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
+)
 
-        msg = st.chat_input("메시지를 입력하세요. 에아는 생각을 계속 이어갑니다.", key=K("chat"))
-        if msg:
-            add_dialog(sess,"user",msg)
-            # 즉시 한 턴 사고 + 응답
-            run = think_once(msg, engines, why_chain=why)
-            ans = run["final"]
-            if anti_parrot(msg, ans)=="REWRITE":
-                # 다른 엔진으로 재합성 + 반례 1개 포함
-                alt = engines[::-1] if engines else ["OpenAI"]
-                prompt=(identity_text()+
-                        "\n[재합성] 다음 초안을 새로운 관점으로 재구성하고, 반례 1개를 포함하라.\n---\n"+ans)
-                ans = get_adapter(alt[0]).generate(prompt, max_tokens=600, temp=0.85)
-            ans = ("## 우주 시각(합성)\n"+ans.strip()+
-                   "\n\n## 다음 행동\n- (즉시 할 일 1~3개)\n")
-            with st.chat_message("assistant"):
-                st.markdown(ans)
-            add_dialog(sess,"assistant",ans)
-            # Workpad에 최근 주제 저장 → 우측 스트림이 계속 이어받음
-            sset("live_topic", msg); sset("live_why", bool(why)); sset("live_engs", engines)
+@app.get("/health")
+def health(): return {"ok": True}
 
-    # ------ RIGHT: Workpad (Live) ------
-    with right:
-        st.markdown("#### 🧠 실시간 Workpad")
-        st.caption("대화와 무관하게 생각은 계속 흘러갑니다 (1~2초 갱신). Stop으로 멈출 수 있음.")
-        colA,colB=st.columns([1,1])
-        tick = colA.slider("갱신(ms)", 800, 3000, sget("tick",1200), key=K("tick"))
-        stop = colB.toggle("Stop", value=sget("stop", False), key=K("stop_toggle"))
-        sset("tick", tick); sset("stop", stop)
+@app.post("/chat")
+async def chat(payload: dict):
+    """단발 REST(웹소켓 폴백용)"""
+    session = payload.get("session_id","default")
+    engines = payload.get("engines", ["OpenAI","Gemini"])
+    why     = bool(payload.get("why_chain", True))
+    text    = payload.get("text","")
+    log_msg(session,"user",text)
+    chunks=[]
+    async for ev in think_stream(session, text, engines, why):
+        chunks.append(ev)
+    for ev in chunks:
+        if ev["type"]=="answer": log_msg(session,"assistant",ev["text"])
+    return {"events": chunks}
 
-        topic = sget("live_topic", "")
-        engs  = sget("live_engs", ["OpenAI","Gemini"])
-        why   = sget("live_why", True)
+@app.websocket("/ws")
+async def ws(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            data = json.loads(await websocket.receive_text())
+            session = data.get("session_id","default")
+            text    = data.get("text","")
+            engines = data.get("engines", ["OpenAI","Gemini"])
+            why     = bool(data.get("why_chain", True))
+            log_msg(session,"user",text)
+            async for ev in think_stream(session, text, engines, why):
+                await websocket.send_text(json.dumps(ev, ensure_ascii=False))
+            # answer까지 보내고 루프 지속(연속 대화)
+    except WebSocketDisconnect:
+        return
 
-        if not topic:
-            st.info("대화창에서 한 번이라도 질문하면, 그 주제로 실시간 사고가 시작됩니다.")
-        else:
-            # 자동 재실행 타이머
-            if not stop:
-                st.autorefresh(interval=tick, key=K("ref"))
+# -------------------- Inline Frontend (HTML/JS) --------------------
+HTML = f"""
+<!doctype html>
+<html lang="ko"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>{APP_TITLE}</title>
+<style>
+  :root {{ --b:#111; --bg:#fafafa; --card:#fff; --mut:#6b7280; }}
+  body {{ margin:0; background:var(--bg); color:var(--b); font-family:ui-sans-serif,system-ui,Apple SD Gothic Neo,Pretendard,Roboto; }}
+  .wrap {{ max-width:1100px; margin:0 auto; padding:16px; }}
+  .row {{ display:grid; grid-template-columns:1fr 0.8fr; gap:16px; }}
+  .card {{ background:var(--card); border:1px solid #e5e7eb; border-radius:14px; padding:12px; }}
+  .title {{ font-size:20px; font-weight:700; margin-bottom:8px; }}
+  .chat {{ height:72vh; overflow:auto; display:flex; flex-direction:column; gap:8px; }}
+  .bubble {{ display:inline-block; padding:10px 12px; border-radius:12px; max-width:80%; white-space:pre-wrap; }}
+  .user {{ align-self:flex-start; background:#e0edff; }}
+  .bot  {{ align-self:flex-end;   background:#dcfce7; }}
+  .mut {{ color:var(--mut); font-size:12px; }}
+  .workpad {{ height:72vh; overflow:auto; }}
+  input[type=text] {{ padding:10px 12px; border:1px solid #e5e7eb; border-radius:10px; width:100%; }}
+  button {{ padding:10px 14px; border-radius:10px; border:0; background:#111; color:#fff; cursor:pointer; }}
+  .row2 {{ display:grid; grid-template-columns:1fr auto; gap:8px; }}
+  .cfg  {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0 12px; }}
+  .pill {{ padding:6px 8px; border:1px solid #e5e7eb; border-radius:8px; font-size:12px; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="title">{APP_AGENT} · Live Chat/Think — {PLATFORM}</div>
+  <div class="cfg">
+    <span class="pill">세션: <input id="sid" type="text" value="default" style="width:120px; margin-left:6px"/></span>
+    <span class="pill">엔진: <input id="eng" type="text" value="OpenAI,Gemini" style="width:200px; margin-left:6px"/></span>
+    <label class="pill"><input id="why" type="checkbox" checked style="margin-right:6px"/>왜-사슬</label>
+    <span class="mut">키가 없으면 Mock로 동작</span>
+  </div>
+  <div class="row">
+    <div class="card">
+      <div class="mut" style="margin-bottom:6px;">좌측: 대화 / 우측: 실시간 Workpad</div>
+      <div id="chat" class="chat"></div>
+      <div class="row2" style="margin-top:8px;">
+        <input id="msg" type="text" placeholder="메시지를 입력하고 Enter…"/>
+        <button id="send">Send</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="mut" style="margin-bottom:6px;">🧠 실시간 Workpad</div>
+      <div id="think" class="workpad"></div>
+    </div>
+  </div>
+  <div class="mut" style="margin-top:8px;">build {APP_TITLE}</div>
+</div>
+<script>
+let ws=null;
+const chat   = document.getElementById("chat");
+const think  = document.getElementById("think");
+const sidInp = document.getElementById("sid");
+const engInp = document.getElementById("eng");
+const whyInp = document.getElementById("why");
+const msgInp = document.getElementById("msg");
+const btn    = document.getElementById("send");
 
-            # 최근 생각 한 사이클
-            run = think_once(topic, engs, why_chain=why)
-            # 로그 표시(증분 느낌)
-            for l in run["logs"]:
-                with st.expander(f"{l['i']}. {l['by']} · 단계 사고", expanded=False):
-                    st.write(clamp(l["text"], 800))
+function append(role, text){
+  const div=document.createElement("div");
+  div.className="bubble "+(role==="user"?"user":"bot");
+  div.textContent=text;
+  chat.appendChild(div);
+  chat.scrollTop=chat.scrollHeight;
+}
+function tpush(text){
+  const p=document.createElement("div");
+  p.className="mut"; p.textContent="• "+text;
+  think.appendChild(p);
+  think.scrollTop=think.scrollHeight;
+}
+function tclear(){ think.innerHTML=""; }
 
-            # 다음 사이클을 위한 주제 업데이트(간단 요약)
-            nxt = run["final"].split("결론")[-1] if "결론" in run["final"] else run["final"]
-            sset("live_topic", clamp(nxt, 300))
+async function ensureWS(){
+  if (ws && ws.readyState===1) return ws;
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage=(e)=>{
+    const ev=JSON.parse(e.data);
+    if(ev.type==="think") tpush(ev.text);
+    if(ev.type==="answer"){ append("assistant", ev.text); tclear(); }
+  };
+  ws.onclose=()=>{ /* auto reopen */ };
+  await new Promise(r=>setTimeout(r,150));
+  return ws;
+}
 
-    st.caption(f"build={BUILD} · py={sys.version.split()[0]}")
-# ----- Entry -----
-if __name__=="__main__":
-    render()
+async function send(){
+  const text = msgInp.value.trim(); if(!text) return;
+  append("user", text); tclear(); msgInp.value="";
+  const engines = engInp.value.split(",").map(s=>s.trim()).filter(Boolean);
+  const payload = {{ session_id: sidInp.value || "default", text, engines, why_chain: whyInp.checked }};
+  await ensureWS();
+  ws.send(JSON.stringify(payload));
+}
+btn.onclick=send;
+msgInp.addEventListener("keydown", (e)=>{{ if(e.key==="Enter") send(); }});
+</script>
+</body></html>
+"""
+
+@app.get("/", response_class=HTMLResponse)
+def index(): return HTML
+
+# -------------------- Run --------------------
+if __name__ == "__main__":
+    import uvicorn
+    print(f"★ {APP_TITLE} http://127.0.0.1:{PORT}")
+    uvicorn.run("gea_aio:app", host="0.0.0.0", port=PORT, reload=False)
