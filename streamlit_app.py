@@ -502,29 +502,23 @@ def render_app():
 if __name__ == "__main__":
     render_app()
     
-    # -*- coding: utf-8 -*-
-# EA · Ultra — KOR AIO · Fusion + Identity (Single-file)
-# 단일 파일: Chat + Infinite Memory(JSONL) + Smart Retrieval
-# + Skills(/use·/사용) + Autobuilder(/build·/제작)
-# + Multi-Engine Fusion(GPT/Gemini/Mock 병렬 사고 · 판사/융합)
-# + Identity(자아) 주입/편집 + 자기평가 + 사건로그
+  # -*- coding: utf-8 -*-
+# EA · Ultra — KOR AIO · Fusion + Identity + KeyBank (Single-file)
 
 import os, sys, re, json, time, math, hashlib, random, traceback, importlib.util
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 import streamlit as st
 
-# ----- 선택적 의존: PyYAML 없으면 JSON fallback -----
 try:
     import yaml  # pip install pyyaml
 except Exception:
     yaml = None
 
 APP_NAME   = "EA · Ultra (KOR · Fusion · Identity)"
-BUILD_TAG  = "EA-ULTRA-20250819-IDX"
+BUILD_TAG  = "EA-ULTRA-20250819-KB"
 DATA_DIR   = Path("data"); DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_PATH = DATA_DIR / "state.json"
 MEM_PATH   = DATA_DIR / "memory.jsonl"
@@ -532,6 +526,22 @@ DIALOG_LOG = DATA_DIR / "dialog.jsonl"
 FUS_LOG    = DATA_DIR / "fusion.log"
 ID_PATH    = DATA_DIR / "identity.yaml"
 EV_PATH    = DATA_DIR / "events.jsonl"
+
+# ---------- KeyBank: 위젯 키 중복 방지 ----------
+def _kb_reset():
+    st.session_state["_KB_USED_KEYS"] = []
+def K(name:str)->str:
+    used = st.session_state.get("_KB_USED_KEYS", [])
+    base = f"ea:{name}"
+    if base not in used:
+        used.append(base); st.session_state["_KB_USED_KEYS"] = used
+        return base
+    i = 2
+    while f"{base}#{i}" in used:
+        i += 1
+    newk = f"{base}#{i}"
+    used.append(newk); st.session_state["_KB_USED_KEYS"] = used
+    return newk
 
 # ---------- FS ----------
 def nowz(): return datetime.utcnow().isoformat()+"Z"
@@ -599,22 +609,17 @@ DEFAULT_IDENTITY = {
         "refuse_policy":"위험/금칙 요청은 정중히 거절하고, 안전한 대안을 제시"
     }
 }
-
 def ensure_identity_file():
     if not ID_PATH.exists():
-        # YAML이 없으면 JSON 스타일 문자열로라도 저장
         try:
             if yaml:
                 ID_PATH.write_text(yaml.safe_dump(DEFAULT_IDENTITY, allow_unicode=True, sort_keys=False), encoding="utf-8")
             else:
                 ID_PATH.write_text(json.dumps(DEFAULT_IDENTITY, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
-
+        except Exception: pass
 def load_identity_text() -> str:
     ensure_identity_file()
     try:
-        if not ID_PATH.exists(): return ""
         raw = ID_PATH.read_text("utf-8")
         doc = None
         if yaml:
@@ -637,13 +642,10 @@ def load_identity_text() -> str:
         return "[정체성]\n" + "\n".join(lines) + "\n"
     except Exception:
         return ""
-
 def log_event(kind:str, title:str, detail:str="", meta:dict=None):
     rec={"t": nowz(), "kind": kind, "title": title, "detail": detail, "meta": meta or {}}
     jsonl_append(EV_PATH, rec)
-
 def judge_self(identity_text:str, answer:str) -> float:
-    # 간단 자기평가(0~1): 정체성 키워드 + 구조 키워드 감지
     score=0.0
     if identity_text:
         keys=["정확","창조","투명","윤리","학습","근거","대안","리스크","거절"]
@@ -701,11 +703,9 @@ def resolve_adapter(want:str):
         try: return GeminiAdapter(), True
         except Exception as e: st.toast(f"Gemini 불가→Mock: {e}", icon="⚠️")
     return MockAdapter(), False
-
 def get_provider_by_name(name:str):
-    name=name.strip()
-    if name=="OpenAI":  ad, ok = resolve_adapter("OpenAI");  return ad
-    if name=="Gemini":  ad, ok = resolve_adapter("Gemini");  return ad
+    if name=="OpenAI":  ad, _ = resolve_adapter("OpenAI");  return ad
+    if name=="Gemini":  ad, _ = resolve_adapter("Gemini");  return ad
     return MockAdapter()
 
 # ---------- Memory + Retrieval ----------
@@ -738,7 +738,7 @@ def score_bm25(q:List[str], idx, k1=1.5, b=0.75):
     for i,d in enumerate(docs):
         dl=len(d) or 1
         for term in q:
-            f=d.count(term); 
+            f=d.count(term)
             if f==0: continue
             n_q=df.get(term,0)
             idf=math.log((N - n_q + 0.5)/(n_q + 0.5) + 1.0)
@@ -748,7 +748,7 @@ def score_bm25(q:List[str], idx, k1=1.5, b=0.75):
 def score_tfidf(q:List[str], idx):
     df, N, docs = idx["df"], idx["N"], idx["docs"]
     sc=[0.0]*len(docs)
-    qtf={}; 
+    qtf={}
     for w in q: qtf[w]=qtf.get(w,0)+1
     qvec={}
     for w,c in qtf.items():
@@ -849,7 +849,7 @@ def make_dynamic_skill(name_slug:str, goal:str):
     cls = getattr(module, clsname); obj = cls(); SKILLS[obj.name] = obj
     return obj.name
 
-# ---------- Commands (KR/EN aliases) ----------
+# ---------- Commands ----------
 def is_cmd(text: str, *aliases: str) -> bool:
     t = (text or "").lstrip()
     return any(t.startswith(a+" ") or t.strip()==a for a in aliases)
@@ -888,7 +888,7 @@ def maybe_build_skill(user_text:str):
     except Exception as e:
         return f"(생성 실패) {e}"
 
-# ---------- Fusion: 병렬 사고 · 판사 · 융합 ----------
+# ---------- Fusion ----------
 def judge_rule_only(q: str, answer: str) -> dict:
     rel = 1.0 if any(w in answer.lower() for w in q.lower().split()[:3]) else 0.6
     cons = 0.8
@@ -896,7 +896,6 @@ def judge_rule_only(q: str, answer: str) -> dict:
     comp = 0.85 if len(answer) >= 120 else 0.55
     score = 0.35*cons + 0.35*fact + 0.2*rel + 0.1*comp
     return {"rel":rel, "cons":cons, "fact":fact, "comp":comp, "score":score}
-
 def think_parallel(prompt:str, providers:List, max_tokens:int=1200):
     results=[]
     with ThreadPoolExecutor(max_workers=min(8, len(providers) or 1)) as ex:
@@ -909,7 +908,6 @@ def think_parallel(prompt:str, providers:List, max_tokens:int=1200):
             except Exception as e:
                 results.append({"provider":getattr(p,"name","?"), "answer":"", "error":str(e)})
     return results
-
 def fuse_answers(question:str, answers:list):
     for a in answers:
         a["score"]=judge_rule_only(question, a.get("answer",""))["score"]
@@ -921,7 +919,6 @@ def fuse_answers(question:str, answers:list):
             "\n- 보강: " + answers[1]['answer'].strip() + \
             "\n(두 모델 공통점은 신뢰 ↑, 상충점은 사용자 확인 권장)"
     return fused, {"picked":None, "candidates":answers}
-
 def gea_fusion_reply(question:str, memory_context:str, provider_names:List[str], level:int=3, identity_text:str=""):
     prompt = ((identity_text + "\n") if identity_text else "") + (memory_context or "") + question
     max_tokens = level_to_tokens(level)
@@ -932,7 +929,7 @@ def gea_fusion_reply(question:str, memory_context:str, provider_names:List[str],
                            "providers": provider_names, "final": final[:400], "raw": raw, "meta": meta})
     return final, meta, raw
 
-# ---------- Memory helpers (reuse above) ----------
+# ---------- Memory helpers ----------
 def mem_view_recent(path: Path, n:int=50):
     try:
         rows = jsonl_read_all(path)[-n:]
@@ -943,53 +940,57 @@ def mem_view_recent(path: Path, n:int=50):
 # ---------- UI ----------
 def render_app():
     st.set_page_config(page_title=APP_NAME, page_icon="✨", layout="centered")
+
+    # KeyBank 초기화(매 실행 한 번)
+    _kb_reset()
+
     st.markdown(f"### {APP_NAME}")
     st.caption("무한 기억 · 하이브리드 검색 · 스킬(/use·/사용) · Autobuilder(/build·/제작) · 🚀 Fusion(다중 엔진 사고) · 🧩 Identity")
 
     # 상단 제어
     col0, col1, col2 = st.columns([1.3,1,1])
     with col0:
-        session_id = st.text_input("세션 ID", sget("session_id","default"), key="k_session_id")
+        session_id = st.text_input("세션 ID", sget("session_id","default"), key=K("session_id"))
         if session_id != sget("session_id"):
             sset("session_id", session_id); load_session_messages(session_id)
         else:
             sset("session_id", session_id)
             if "messages" not in st.session_state: load_session_messages(session_id)
     with col1:
-        mem_on = st.toggle("Memory ON", value=bool(sget("mem_on", True)), key="k_mem_toggle")
+        mem_on = st.toggle("Memory ON", value=bool(sget("mem_on", True)), key=K("mem_toggle"))
         sset("mem_on", mem_on)
     with col2:
-        if st.button("대화창 초기화(로그 보존)", key="k_clear_chat"):
+        if st.button("대화창 초기화(로그 보존)", key=K("clear_chat")):
             clear_msgs(); st.experimental_rerun()
 
     # 모델/레벨 + Fusion 설정
     colA, colB, colC = st.columns([1,1.2,1])
     with colA:
-        provider_mode = st.selectbox("Provider", ["OpenAI","Gemini","Mock","Fusion"], index=3, key="k_provider_mode")
+        provider_mode = st.selectbox("Provider", ["OpenAI","Gemini","Mock","Fusion"], index=3, key=K("provider_mode"))
     with colB:
-        level = st.number_input("응답 레벨(1~9999)", min_value=1, max_value=9999, value=5, step=1, key="k_level")
+        level = st.number_input("응답 레벨(1~9999)", min_value=1, max_value=9999, value=5, step=1, key=K("level"))
         st.caption(f"예산≈{level_to_tokens(level)} tokens")
     with colC:
-        rounds = st.number_input("라운드(단일엔진)", 1, 6, 2, 1, key="k_rounds")
+        rounds = st.number_input("라운드(단일엔진)", 1, 6, 2, 1, key=K("rounds"))
 
-    # IDENTITY 패널 (만들기/편집)
+    # IDENTITY 패널
     ensure_identity_file()
     with st.expander("🧩 자아(Identity) 편집", expanded=False):
         try:
             id_raw = ID_PATH.read_text("utf-8")
         except Exception:
             id_raw = ""
-        id_text = st.text_area("identity.yaml (또는 JSON도 허용)", value=id_raw, height=220, key="k_identity_edit")
+        id_text = st.text_area("identity.yaml (또는 JSON도 허용)", value=id_raw, height=220, key=K("identity_edit"))
         id_col1, id_col2 = st.columns(2)
         with id_col1:
-            if st.button("저장", key="k_identity_save"):
+            if st.button("저장", key=K("identity_save")):
                 try:
                     ID_PATH.write_text(id_text, encoding="utf-8")
                     st.success("저장 완료! (다음 응답부터 반영)")
                 except Exception as e:
                     st.error(f"저장 실패: {e}")
         with id_col2:
-            if st.button("기본값 복원", key="k_identity_reset"):
+            if st.button("기본값 복원", key=K("identity_reset")):
                 try:
                     if yaml:
                         ID_PATH.write_text(yaml.safe_dump(DEFAULT_IDENTITY, allow_unicode=True, sort_keys=False), encoding="utf-8")
@@ -1007,12 +1008,12 @@ def render_app():
                 "사고 엔진(2개 이상 권장)",
                 options=["OpenAI","Gemini","Mock"],
                 default=sget("fusion_defaults", ["OpenAI","Gemini"]),
-                key="k_fusion_select"
+                key=K("fusion_select")
             )
             sset("fusion_defaults", fusion_providers)
             st.caption("엔진별 답을 병렬로 받고, 게아가 판사/융합해 최종 응답을 만듭니다.")
 
-    # 어댑터 준비
+    # 어댑터 준비/안내
     if provider_mode!="Fusion":
         adapter, api_ok = resolve_adapter(provider_mode)
         st.info(f"🔌 {adapter.name} {'(연결됨)' if api_ok else '(모의)'} · session={sget('session_id')} · L{int(level)} · R{int(rounds)}")
@@ -1027,13 +1028,12 @@ def render_app():
     # 입력
     user_text = st.chat_input(
         "예) /사용 sample.echo 안녕  ·  /기억 !핀 일정  ·  /제작 auto.단어수|단어/문자 수 세기  ·  일반질문",
-        key="k_chat_input"
+        key=K("chat_input")
     )
     if user_text:
         user_text = dedupe(user_text.strip())
         add_msg(sget("session_id"), "user", user_text)
 
-        # 0) Identity 텍스트 준비
         identity_text = load_identity_text()
 
         # 1) Autobuilder
@@ -1075,37 +1075,28 @@ def render_app():
                 add_msg(sget("session_id"), "assistant", ans)
             else:
                 final, meta, raw = gea_fusion_reply(user_text, context, fusion_providers, level=level, identity_text=identity_text)
-                # 자기평가 + 사건기록
                 score = judge_self(identity_text, final)
                 log_event("answer", "퓨전 응답", detail=final[:400], meta={"score_self": score, "providers": fusion_providers, "picked": meta.get("picked")})
                 with st.chat_message("assistant"):
                     st.markdown(str(final))
                     st.caption(f"자기평가 점수: {round(score,2)}")
                     with st.expander("엔진별 결과/점수 보기", expanded=False):
-                        try:
-                            rows=[]
-                            for c in meta.get("candidates", []):
-                                rows.append(f"- **{c.get('provider','?')}** · score={round(c.get('score',0),3)}")
-                            st.markdown("\n".join(rows) if rows else "(no meta)")
-                        except Exception:
-                            st.markdown("(메타 표시 오류)")
+                        rows=[f"- **{c.get('provider','?')}** · score={round(c.get('score',0),3)}" for c in meta.get("candidates",[])]
+                        st.markdown("\n".join(rows) if rows else "(no meta)")
                 add_msg(sget("session_id"), "assistant", final)
         else:
-            # 단일 엔진
             prompt = (identity_text + "\n" if identity_text else "") + context + user_text
             with st.chat_message("assistant"):
                 try:
                     ans = long_answer(adapter, prompt, level=level, rounds=rounds)
                 except Exception:
                     ans = "(내부 오류)\n\n```\n"+traceback.format_exc()+"\n```"
-                # 자기평가 + 사건기록
                 score = judge_self(identity_text, ans)
                 log_event("answer", "단일엔진 응답", detail=ans[:400], meta={"score_self": score, "provider": getattr(adapter,'name','?')})
                 st.markdown(str(ans))
                 st.caption(f"자기평가 점수: {round(score,2)}")
             add_msg(sget("session_id"), "assistant", ans)
 
-        # 주기 요약
         try:
             if len(sget("messages", [])) % 8 == 0 and sget("mem_on", True):
                 mem_add_summary(sget("session_id"), sget("messages", []))
@@ -1114,16 +1105,20 @@ def render_app():
     # 하단 툴
     with st.expander("📚 Memory / Logs 미리보기"):
         c1, c2, c3, c4 = st.columns(4)
-        if c1.button("dialog.jsonl (최근 50)", key="k_view_dialog"):
+        if c1.button("dialog.jsonl (최근 50)", key=K("view_dialog")):
             st.code(mem_view_recent(DIALOG_LOG, 50), language="json")
-        if c2.button("memory.jsonl (최근 50)", key="k_view_memory"):
+        if c2.button("memory.jsonl (최근 50)", key=K("view_memory")):
             st.code(mem_view_recent(MEM_PATH, 50), language="json")
-        if c3.button("fusion.log (최근 20)", key="k_view_fusion"):
+        if c3.button("fusion.log (최근 20)", key=K("view_fusion")):
             st.code(mem_view_recent(FUS_LOG, 20), language="json")
-        if c4.button("events.jsonl (최근 50)", key="k_view_events"):
+        if c4.button("events.jsonl (최근 50)", key=K("view_events")):
             st.code(mem_view_recent(EV_PATH, 50), language="json")
 
     st.caption(f"build={BUILD_TAG} · py={sys.version.split()[0]} · state={STATE_PATH} · mem={MEM_PATH} · log={DIALOG_LOG} · fus={FUS_LOG} · events={EV_PATH}")
+
+# ----- Memory helpers reused above -----
+def mem_add_note(session_id:str, text:str, tags=None):  # defined earlier but safe redefine guard
+    mem_append({"t": nowz(), "session": session_id, "kind":"note", "text": text, "tags": tags or []})
 
 # ---------- entry ----------
 if __name__ == "__main__":
