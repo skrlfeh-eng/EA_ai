@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-# EA · Ultra (Streamlit AIO) v3.2 (ResourceExhausted 안전 폴백)
+# EA · Ultra (Streamlit AIO) v3.3
 # - ChatGPT 유사 UI(st.chat_message/chat_input)
-# - 엔진 스트림 실패(예: Gemini ResourceExhausted) 시 즉시 Mock로 폴백하여 중단 없음
-# - 왜-사슬 사고 로그, 반앵무새, 세션 메모리 유지
+# - 엔진(OpenAI/Gemini) 실패/쿼터 초과 시 Mock로 자동 폴백
+# - 사고 로그(왜-사슬), 반앵무새, 세션 메모리
+# - 응답 보장 패치: 어떤 경우에도 좌측 말풍선에 답 출력
 
 import os, re, json, time
 from pathlib import Path
@@ -17,16 +18,16 @@ DATA = ROOT / "data"; DATA.mkdir(exist_ok=True, parents=True)
 DLG  = DATA / "dialog.jsonl"; MEM = DATA / "memory.jsonl"; IDF = DATA / "identity.json"
 
 def nowz() -> str: return datetime.utcnow().isoformat()+"Z"
-def jappend(p:Path,obj:Dict): 
+def jappend(p:Path,obj:Dict):
     try:
         with p.open("a",encoding="utf-8") as f: f.write(json.dumps(obj,ensure_ascii=False)+"\n")
     except: pass
 def jread_lines(p:Path)->List[Dict]:
     if not p.exists(): return []
-    out=[]; 
+    out=[]
     with p.open("r",encoding="utf-8") as f:
         for ln in f:
-            ln=ln.strip(); 
+            ln=ln.strip()
             if not ln: continue
             try: out.append(json.loads(ln))
             except: pass
@@ -72,7 +73,7 @@ class MockAdapter:
 def get_openai_adapter():
     try:
         from openai import OpenAI
-        key=os.getenv("OPENAI_API_KEY"); 
+        key=os.getenv("OPENAI_API_KEY")
         if not key: raise RuntimeError("OPENAI_API_KEY 필요")
         model=os.getenv("OPENAI_MODEL","gpt-4o-mini")
         cli=OpenAI(api_key=key)
@@ -94,7 +95,7 @@ def get_openai_adapter():
 def get_gemini_adapter():
     try:
         import google.generativeai as genai
-        key=os.getenv("GEMINI_API_KEY"); 
+        key=os.getenv("GEMINI_API_KEY")
         if not key: raise RuntimeError("GEMINI_API_KEY 필요")
         genai.configure(api_key=key)
         model=os.getenv("GEMINI_MODEL","gemini-1.5-pro-latest")
@@ -102,7 +103,6 @@ def get_gemini_adapter():
         class GE:
             name="Gemini"
             def stream(self,prompt,max_tokens=480,temperature=0.75):
-                # 예외(쿼터 초과/리소스 부족 등) 발생 시 상위에서 폴백
                 r=mdl.generate_content(prompt, generation_config={"temperature":temperature,"max_output_tokens":max_tokens})
                 txt=getattr(r,"text","") or ""
                 for chunk in re.findall(r".{1,60}", txt, flags=re.S): yield chunk
@@ -120,13 +120,13 @@ def pick_adapter(order:List[str]):
             if a: return a
     return MockAdapter()
 
-# 안전 스트림 래퍼: 실패 시 설명 + Mock 폴백
-def safe_stream(adapter, prompt:str, max_tokens:int, temperature:float, tag:str)->Generator[str,None,None]:
+# 안전 스트림 래퍼: 실패 시 Mock 폴백 + 사유 출력
+def safe_stream(adapter, prompt:str, max_tokens:int, temperature:float)->Generator[str,None,None]:
     try:
         for x in adapter.stream(prompt, max_tokens=max_tokens, temperature=temperature):
             yield x
     except Exception as e:
-        note = f"[{adapter.name} 오류:{type(e).__name__}] 자동 폴백 → Mock\n"
+        note=f"[{adapter.name} 오류:{type(e).__name__}] 자동 폴백 → Mock\n"
         for ch in note: yield ch
         for x in MockAdapter().stream(prompt, max_tokens=max_tokens, temperature=temperature):
             yield x
@@ -152,13 +152,13 @@ def think_round(topic:str, engines:List[str], why_chain:bool, hits:List[str])->D
         prompt=(f"{guide}\n[사고 단계 {i}] {step}\n"
                 f"{'각 주장마다 왜?를 2번씩 연쇄로 물어 숨은 가정을 드러내라.' if why_chain else ''}\n"
                 f"주제: {topic}\n- 요약:")
-        text="".join(safe_stream(adapter, prompt, max_tokens=240, temperature=0.7, tag=f"s{i}"))
+        text="".join(safe_stream(adapter, prompt, max_tokens=240, temperature=0.7))
         logs.append({"i":i,"by":adapter.name,"text":text})
     # 최종 합성
     adapter = pick_adapter(engines or ["OpenAI","Gemini"])
     fusion_prompt=(f"{guide}\n[최종합성] 위 단계 요약을 통합해 한국어로 "
                    f"'결론/근거/대안/다음 행동(1~3개)'을 간결히.")
-    fusion="".join(safe_stream(adapter, fusion_prompt, max_tokens=560, temperature=0.75, tag="final"))
+    fusion="".join(safe_stream(adapter, fusion_prompt, max_tokens=560, temperature=0.75))
     return {"logs":logs,"final":fusion}
 
 def compose_answer(user_text:str, engines:List[str], why_chain:bool, session_id:str):
@@ -169,7 +169,7 @@ def compose_answer(user_text:str, engines:List[str], why_chain:bool, session_id:
         adapter=pick_adapter(engines[::-1] or ["Gemini","OpenAI"])
         prompt = identity_text() + (f"\n메모리 히트:\n- " + "\n- ".join(hits) + "\n" if hits else "") + \
                  "\n[재합성] 질문 문구 반복 금지, 새로운 관점/반례 1개 포함."
-        fusion="".join(safe_stream(adapter, prompt, max_tokens=560, temperature=0.85, tag="recompose"))
+        fusion="".join(safe_stream(adapter, prompt, max_tokens=560, temperature=0.85))
     answer="## 우주 시각(합성)\n"+fusion.strip()+"\n\n## 다음 행동\n- (즉시 할 일 1~3개)\n"
     return answer, round_out["logs"]
 
@@ -196,23 +196,40 @@ with left:
     if "messages" not in st.session_state: st.session_state["messages"]=[]
     for m in st.session_state["messages"]:
         with st.chat_message(m["role"]): st.markdown(m["content"])
+
     user_msg = st.chat_input("메시지를 입력하고 Enter…")
     if user_msg:
+        # 사용자 말풍선 + 기록
         with st.chat_message("user"): st.markdown(user_msg)
         st.session_state["messages"].append({"role":"user","content":user_msg})
         if mem_on: add_dialog(session_id, "user", user_msg)
 
-        answer_text, logs = compose_answer(
-            user_msg,
-            [s.strip() for s in engines.split(",") if s.strip()],
-            why_chain,
-            session_id
-        )
+        # 안전 응답 생성(예외/빈응답 방어)
+        try:
+            answer_text, logs = compose_answer(
+                user_msg,
+                [s.strip() for s in engines.split(",") if s.strip()],
+                why_chain,
+                session_id
+            )
+        except Exception as e:
+            warn = f"⚠️ 응답 생성 중 예외({type(e).__name__}). Mock로 폴백합니다.\n"
+            mock = "요지: " + " ".join((identity_text()+user_msg).split()[:80])
+            answer_text = warn + mock
+            logs = [{"i":0,"by":"Mock","text":warn}]
+
+        if not (answer_text or "").strip():
+            answer_text = "※ 엔진 응답이 비었습니다. 키/쿼터 확인 요망. 임시 요약 표시.\n" \
+                          "요지: " + " ".join(user_msg.split()[:50])
+
+        # 좌측 말풍선에 반드시 출력(토막 스트림 느낌)
         with st.chat_message("assistant"):
             ph = st.empty(); shown=""
             for chunk in re.findall(r".{1,70}", answer_text, flags=re.S):
                 shown += chunk; ph.markdown(shown); time.sleep(0.01)
             ph.markdown(shown)
+
+        # 상태/메모리 갱신 & 오른쪽 사고 로그
         st.session_state["messages"].append({"role":"assistant","content":answer_text})
         if mem_on: add_dialog(session_id, "assistant", answer_text)
         st.session_state["last_logs"]=logs
@@ -227,4 +244,4 @@ with right:
                 st.markdown(l["text"])
 
 st.divider()
-st.caption("키가 없거나 쿼터 초과 시 자동 폴백(Mock) · build v3.2")
+st.caption("키가 없거나 쿼터 초과 시 자동 폴백(Mock) · build v3.3")
