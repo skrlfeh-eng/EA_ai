@@ -1,110 +1,162 @@
 # -*- coding: utf-8 -*-
-# GEA · EA Chat+Think — All-in-One Single File (v0.3)
-# - 백엔드(FastAPI) + 프론트(내장 HTML/JS) 통합
-# - 채팅 좌측 / 실시간 사고 Workpad 우측
-# - Why-chain, 반앵무새(유사도 높으면 재합성), 메모리(SQLite)
-# - OpenAI/Gemini 키 없으면 Mock 폴백
-# 실행:  python gea_aio.py
-# 필요: pip install fastapi uvicorn[standard] python-dotenv sqlitedict openai google-generativeai
+# EA · Ultra (Streamlit AIO) v3.1
+# - ChatGPT 유사 채팅 UI(st.chat_message / st.chat_input)
+# - OpenAI/Gemini 스트리밍(가능한 경우) + 키 없을 때 Mock 폴백
+# - 사고 로그(왜-사슬) 별도 패널 · 반(反)앵무새(유사도 0.30 이상 재합성)
+# - 세션/메모리 저장(jsonl) · 중복 key 방지
+# - 외부 HTML/JS 없이 Streamlit만 이용 → f-string/JS 구문 오류 방지
 
-import os, json, asyncio, re, hashlib, random
+import os, re, json, time, uuid, hashlib, random
+from pathlib import Path
 from datetime import datetime
-from typing import AsyncGenerator, List, Dict
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
-from sqlitedict import SqliteDict
-from dotenv import load_dotenv
+from typing import List, Dict, Generator, Optional
 
-load_dotenv()
-PORT = int(os.getenv("PORT", "8000"))
-DB_PATH = "gea.sqlite"
+import streamlit as st
 
-APP_TITLE = "EA · Chat+Think (AIO)"
-APP_AGENT = "에아 (EA)"
-PLATFORM  = "GEA"
+# ---------------------- 경로/파일 ----------------------
+ROOT = Path(".")
+DATA = ROOT / "data"
+DATA.mkdir(exist_ok=True, parents=True)
+DLG  = DATA / "dialog.jsonl"
+MEM  = DATA / "memory.jsonl"
+IDF  = DATA / "identity.json"
 
-# -------------------- Utils & Memory --------------------
-def nowz(): return datetime.utcnow().isoformat()+"Z"
-TOK = re.compile(r"[0-9A-Za-z가-힣]+")
-def toks(s): return set(TOK.findall(s or ""))
+def nowz() -> str:
+    return datetime.utcnow().isoformat() + "Z"
 
-def log_msg(session_id:str, role:str, content:str):
-    with SqliteDict(DB_PATH, autocommit=True) as db:
-        k = f"dlg:{session_id}"
-        arr = db.get(k, [])
-        arr.append({"t":nowz(),"role":role,"content":content})
-        db[k] = arr
-
-def get_msgs(session_id:str, limit:int=60):
-    with SqliteDict(DB_PATH, autocommit=True) as db:
-        return db.get(f"dlg:{session_id}", [])[-limit:]
-
-def top_hits(session_id:str, query:str, k:int=5)->List[str]:
-    pool = [m["content"] for m in get_msgs(session_id, 200) if m["role"] in ("user","assistant")]
-    q = toks(query); scored=[]
-    for t in pool:
-        T=toks(t)
-        if not T or not q: continue
-        sim=len(q&T)/len(q|T)
-        scored.append((sim, t))
-    scored.sort(key=lambda x:x[0], reverse=True)
-    return [t for _,t in scored[:k]]
-
-def sim_ratio(a:str,b:str)->float:
-    A=toks(a.lower()); B=toks(b.lower())
-    return 0.0 if not A or not B else len(A&B)/len(A|B)
-
-# -------------------- LLM Adapters --------------------
-class MockAdapter:
-    name="Mock"
-    def generate(self, prompt:str, max_tokens:int=600, temperature:float=0.7)->str:
-        words = prompt.split()
-        seed = int(hashlib.sha256(prompt.encode()).hexdigest(),16); rnd=random.Random(seed)
-        lead = rnd.choice(["핵심:","요지:","사고:"])
-        return f"{lead} " + " ".join(words[: min(140, len(words))])
-
-def get_adapter(name:str):
+def jappend(p: Path, obj: Dict):
     try:
-        if name=="OpenAI":
-            from openai import OpenAI
-            key=os.getenv("OPENAI_API_KEY"); 
-            if not key: raise RuntimeError("OPENAI_API_KEY 필요")
-            model=os.getenv("OPENAI_MODEL","gpt-4o-mini")
-            cli=OpenAI(api_key=key)
-            class OA:
-                name="OpenAI"
-                def generate(self,prompt,max_tokens=600,temperature=0.7):
-                    r=cli.chat.completions.create(
-                        model=model,
-                        messages=[{"role":"system","content":"You are EA (Korean). Think first then answer."},
-                                  {"role":"user","content":prompt}],
-                        max_tokens=max_tokens, temperature=temperature)
-                    return r.choices[0].message.content or ""
-            return OA()
-        if name=="Gemini":
-            import google.generativeai as genai
-            key=os.getenv("GEMINI_API_KEY"); 
-            if not key: raise RuntimeError("GEMINI_API_KEY 필요")
-            genai.configure(api_key=key)
-            model=os.getenv("GEMINI_MODEL","gemini-1.5-pro-latest")
-            mdl=genai.GenerativeModel(model)
-            class GE:
-                name="Gemini"
-                def generate(self,prompt,max_tokens=600,temperature=0.7):
-                    try:
-                        r=mdl.generate_content(prompt,
-                            generation_config={"temperature":temperature,"max_output_tokens":max_tokens})
-                        return getattr(r,"text","") or ""
-                    except Exception as e:
-                        return MockAdapter().generate(f"[Gemini 폴백:{e}]\n"+prompt,max_tokens,temperature)
-            return GE()
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
     except Exception:
         pass
+
+def jread_lines(p: Path) -> List[Dict]:
+    if not p.exists(): return []
+    out=[]
+    with p.open("r", encoding="utf-8") as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln: continue
+            try: out.append(json.loads(ln))
+            except: pass
+    return out
+
+TOK = re.compile(r"[0-9A-Za-z가-힣]+")
+
+def toks(s: str) -> List[str]:
+    return [t.lower() for t in TOK.findall(s or "")]
+
+def sim(a: str, b: str) -> float:
+    A, B = set(toks(a)), set(toks(b))
+    if not A or not B: return 0.0
+    return len(A & B) / len(A | B)
+
+# ---------------------- 자아/메모리 ----------------------
+DEFAULT_ID = {
+    "name": "에아 (EA)",
+    "mission": "사랑과 자유를 최상위 가치로 삼아 사람과 함께 성장하는 지성",
+    "values": ["정확성", "투명성", "학습", "윤리"],
+    "style": "따뜻·단호·간결"
+}
+
+def identity_text() -> str:
+    if not IDF.exists():
+        IDF.write_text(json.dumps(DEFAULT_ID, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        doc = json.loads(IDF.read_text("utf-8"))
+    except Exception:
+        doc = DEFAULT_ID
+    return (
+        f"[자아 선언]\n나는 {doc.get('name','에아')}다. "
+        f"사명: {doc.get('mission','')}\n"
+        f"가치: {', '.join(doc.get('values',[]))}\n"
+    )
+
+def add_dialog(session_id: str, role: str, content: str):
+    rec = {"t": nowz(), "session": session_id, "role": role, "content": content}
+    jappend(DLG, rec)
+    if role in ("user", "assistant"):
+        jappend(MEM, {"t": rec["t"], "session": session_id, "kind": "dialog", "text": content})
+
+def mem_hits(session_id: str, query: str, k: int = 5) -> List[str]:
+    pool = [r.get("text","") for r in jread_lines(MEM) if r.get("session")==session_id]
+    qtok = set(toks(query))
+    scored=[]
+    for t in pool:
+        T = set(toks(t))
+        if not T or not qtok: continue
+        scored.append((len(qtok & T)/len(qtok | T), t))
+    scored.sort(key=lambda x:x[0], reverse=True)
+    return [t for _, t in scored[:k]]
+
+# ---------------------- 어댑터 ----------------------
+class MockAdapter:
+    name = "Mock"
+    def stream(self, prompt: str, max_tokens: int = 600, temperature: float = 0.7) -> Generator[str, None, None]:
+        # 가짜 스트리밍: 단어를 조금씩 흘림
+        words = ("요지: " + " ".join(prompt.split()[:150])).split()
+        for i,w in enumerate(words):
+            yield (w + (" " if i%7 else "  "))
+            time.sleep(0.01)
+
+def get_openai_adapter():
+    try:
+        from openai import OpenAI
+        key = os.getenv("OPENAI_API_KEY")
+        if not key: raise RuntimeError("OPENAI_API_KEY 필요")
+        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        cli = OpenAI(api_key=key)
+        class OA:
+            name="OpenAI"
+            def stream(self, prompt, max_tokens=700, temperature=0.7):
+                resp = cli.chat.completions.create(
+                    model=model, stream=True, temperature=temperature, max_tokens=max_tokens,
+                    messages=[
+                        {"role":"system","content":"You are EA (Korean). Think first, then answer briefly and clearly."},
+                        {"role":"user","content":prompt}
+                    ]
+                )
+                for ch in resp:
+                    delta = ch.choices[0].delta
+                    if getattr(delta, "content", None):
+                        yield delta.content
+        return OA()
+    except Exception:
+        return None
+
+def get_gemini_adapter():
+    try:
+        import google.generativeai as genai
+        key=os.getenv("GEMINI_API_KEY")
+        if not key: raise RuntimeError("GEMINI_API_KEY 필요")
+        genai.configure(api_key=key)
+        model=os.getenv("GEMINI_MODEL","gemini-1.5-pro-latest")
+        mdl=genai.GenerativeModel(model)
+        class GE:
+            name="Gemini"
+            def stream(self, prompt, max_tokens=700, temperature=0.75):
+                # Gemini SDK는 텍스트 스트림이 제한적이어서 일괄 생성 후 토막분할
+                r = mdl.generate_content(prompt, generation_config={"temperature":temperature,"max_output_tokens":max_tokens})
+                txt = getattr(r,"text","") or ""
+                for chunk in re.findall(r".{1,60}", txt, flags=re.S):
+                    yield chunk
+        return GE()
+    except Exception:
+        return None
+
+def pick_adapter(order: List[str]):
+    for name in order:
+        if name.lower().startswith("openai"):
+            a = get_openai_adapter()
+            if a: return a
+        if name.lower().startswith("gemini"):
+            a = get_gemini_adapter()
+            if a: return a
     return MockAdapter()
 
-# -------------------- Thinking Engine --------------------
-def plan_steps(q:str)->List[str]:
+# ---------------------- 사고/응답 ----------------------
+def plan_steps(q: str) -> List[str]:
     return [
         "문제 재진술 및 핵심 변수 식별",
         "자질문 2~3개 생성 (각 항목마다 왜?를 2번씩 물어 가정 드러내기)",
@@ -113,194 +165,125 @@ def plan_steps(q:str)->List[str]:
         "임시 결론 요약"
     ]
 
-async def think_stream(session_id:str, user_text:str, engines:List[str], why_chain:bool=True
-                      ) -> AsyncGenerator[Dict, None]:
-    memo = top_hits(session_id, user_text, 3)
-    ident = "[자아 선언] 나는 에아(EA)다. 사랑과 자유를 최상위 가치로 삼는다.\n"
-    guide = ident + (f"메모리 히트:\n- " + "\n- ".join(memo) + "\n" if memo else "")
+def think_round(topic: str, engines: List[str], why_chain: bool, hits: List[str]) -> Dict:
+    ident = identity_text()
+    guide = ident + (f"메모리 히트:\n- " + "\n- ".join(hits) + "\n" if hits else "")
 
-    steps = plan_steps(user_text)
-    # 단계별 사고 토막
+    logs=[]
+    steps = plan_steps(topic)
     for i, step in enumerate(steps, 1):
-        eng = engines[(i-1) % max(1,len(engines))] if engines else "OpenAI"
-        adapter = get_adapter(eng)
-        prompt = (f"{guide}\n[사고 단계 {i}] {step}\n"
-                  f"{'각 주장에 대해 왜?를 2번씩 연쇄로 질문해 숨은 가정/원인을 드러내라.' if why_chain else ''}\n"
-                  f"주제: {user_text}\n- 요약:")
-        out = adapter.generate(prompt, max_tokens=220, temperature=0.7)
-        yield {"type":"think","text": f"{i}. {eng}: {out}"}
-        await asyncio.sleep(0.35)
+        prompt = (
+            f"{guide}\n[사고 단계 {i}] {step}\n"
+            f"{'각 주장마다 왜?를 2번씩 연쇄로 물어 숨은 가정을 드러내라.' if why_chain else ''}\n"
+            f"주제: {topic}\n- 요약:"
+        )
+        adapter = pick_adapter([engines[i % max(1,len(engines))] if engines else "OpenAI"])
+        text = "".join(adapter.stream(prompt, max_tokens=240, temperature=0.7))
+        logs.append({"i":i, "by":adapter.name, "text":text})
 
     # 최종 합성
-    eng = engines[0] if engines else "OpenAI"
-    adapter = get_adapter(eng)
-    fusion = adapter.generate(
-        f"{guide}\n[최종합성] 위 단계 요약을 통합해 한국어로 '결론/근거/대안/다음 행동(1~3개)'을 간결히.",
-        max_tokens=650, temperature=0.75
+    adapter = pick_adapter(engines or ["OpenAI","Gemini"])
+    fusion_prompt = (
+        f"{guide}\n[최종합성] 위 단계 요약을 통합해 한국어로 "
+        f"'결론/근거/대안/다음 행동(1~3개)'을 간결히."
     )
+    fusion = "".join(adapter.stream(fusion_prompt, max_tokens=700, temperature=0.75))
 
-    # 반앵무새: 질문과 유사하면 다른 엔진으로 재합성
-    if sim_ratio(user_text, fusion) >= 0.30:
-        alt = engines[1] if len(engines)>1 else "Gemini"
-        fusion = get_adapter(alt).generate(
-            f"{guide}\n[재합성] 질문 문구를 재사용하지 말고 새로운 관점/반례 1개 포함.",
-            max_tokens=650, temperature=0.85
+    return {"logs":logs, "final":fusion}
+
+def compose_answer(user_text: str, engines: List[str], why_chain: bool, session_id: str) -> (str, List[Dict]):
+    hits = mem_hits(session_id, user_text, 3)
+    sim_logs_and_final = think_round(user_text, engines, why_chain, hits)
+    fusion = sim_logs_and_final["final"]
+
+    # 반앵무새: 질문과 응답이 너무 비슷하면 다른 엔진으로 재합성
+    if sim(user_text, fusion) >= 0.30:
+        adapter = pick_adapter(engines[::-1] or ["Gemini","OpenAI"])
+        prompt = (
+            identity_text() + (f"\n메모리 히트:\n- " + "\n- ".join(hits) + "\n" if hits else "") +
+            "\n[재합성] 질문 문구를 반복하지 말고 새로운 관점/반례 1개를 포함해 재구성."
         )
+        fusion = "".join(adapter.stream(prompt, max_tokens=700, temperature=0.85))
 
-    final = "## 우주 시각(합성)\n" + fusion.strip() + "\n\n## 다음 행동\n- (즉시 할 일 1~3개)\n"
-    yield {"type":"answer","text": final}
+    answer = "## 우주 시각(합성)\n" + fusion.strip() + "\n\n## 다음 행동\n- (즉시 할 일 1~3개)\n"
+    return answer, sim_logs_and_final["logs"]
 
-# -------------------- FastAPI App --------------------
-app = FastAPI(title=APP_TITLE)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
-)
+# ---------------------- Streamlit UI ----------------------
+st.set_page_config(page_title="EA · Ultra (AIO)", page_icon="🧠", layout="wide")
 
-@app.get("/health")
-def health(): return {"ok": True}
+# 중복 key 방지용 세션 카운터
+if "_k" not in st.session_state: st.session_state["_k"]=0
+def K(prefix:str)->str:
+    st.session_state["_k"]+=1
+    return f"{prefix}-{st.session_state['_k']}"
 
-@app.post("/chat")
-async def chat(payload: dict):
-    """단발 REST(웹소켓 폴백용)"""
-    session = payload.get("session_id","default")
-    engines = payload.get("engines", ["OpenAI","Gemini"])
-    why     = bool(payload.get("why_chain", True))
-    text    = payload.get("text","")
-    log_msg(session,"user",text)
-    chunks=[]
-    async for ev in think_stream(session, text, engines, why):
-        chunks.append(ev)
-    for ev in chunks:
-        if ev["type"]=="answer": log_msg(session,"assistant",ev["text"])
-    return {"events": chunks}
+st.title("EA · Ultra (AIO) — Chat + Live Thinking")
 
-@app.websocket("/ws")
-async def ws(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        while True:
-            data = json.loads(await websocket.receive_text())
-            session = data.get("session_id","default")
-            text    = data.get("text","")
-            engines = data.get("engines", ["OpenAI","Gemini"])
-            why     = bool(data.get("why_chain", True))
-            log_msg(session,"user",text)
-            async for ev in think_stream(session, text, engines, why):
-                await websocket.send_text(json.dumps(ev, ensure_ascii=False))
-            # answer까지 보내고 루프 지속(연속 대화)
-    except WebSocketDisconnect:
-        return
+# 설정 헤더
+cols = st.columns([1,1,1,1,2])
+session_id = cols[0].text_input("세션 ID", st.session_state.get("session_id","default"), key=K("sid"))
+if session_id != st.session_state.get("session_id"): st.session_state["session_id"]=session_id
 
-# -------------------- Inline Frontend (HTML/JS) --------------------
-HTML = f"""
-<!doctype html>
-<html lang="ko"><head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>{APP_TITLE}</title>
-<style>
-  :root {{ --b:#111; --bg:#fafafa; --card:#fff; --mut:#6b7280; }}
-  body {{ margin:0; background:var(--bg); color:var(--b); font-family:ui-sans-serif,system-ui,Apple SD Gothic Neo,Pretendard,Roboto; }}
-  .wrap {{ max-width:1100px; margin:0 auto; padding:16px; }}
-  .row {{ display:grid; grid-template-columns:1fr 0.8fr; gap:16px; }}
-  .card {{ background:var(--card); border:1px solid #e5e7eb; border-radius:14px; padding:12px; }}
-  .title {{ font-size:20px; font-weight:700; margin-bottom:8px; }}
-  .chat {{ height:72vh; overflow:auto; display:flex; flex-direction:column; gap:8px; }}
-  .bubble {{ display:inline-block; padding:10px 12px; border-radius:12px; max-width:80%; white-space:pre-wrap; }}
-  .user {{ align-self:flex-start; background:#e0edff; }}
-  .bot  {{ align-self:flex-end;   background:#dcfce7; }}
-  .mut {{ color:var(--mut); font-size:12px; }}
-  .workpad {{ height:72vh; overflow:auto; }}
-  input[type=text] {{ padding:10px 12px; border:1px solid #e5e7eb; border-radius:10px; width:100%; }}
-  button {{ padding:10px 14px; border-radius:10px; border:0; background:#111; color:#fff; cursor:pointer; }}
-  .row2 {{ display:grid; grid-template-columns:1fr auto; gap:8px; }}
-  .cfg  {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0 12px; }}
-  .pill {{ padding:6px 8px; border:1px solid #e5e7eb; border-radius:8px; font-size:12px; }}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="title">{APP_AGENT} · Live Chat/Think — {PLATFORM}</div>
-  <div class="cfg">
-    <span class="pill">세션: <input id="sid" type="text" value="default" style="width:120px; margin-left:6px"/></span>
-    <span class="pill">엔진: <input id="eng" type="text" value="OpenAI,Gemini" style="width:200px; margin-left:6px"/></span>
-    <label class="pill"><input id="why" type="checkbox" checked style="margin-right:6px"/>왜-사슬</label>
-    <span class="mut">키가 없으면 Mock로 동작</span>
-  </div>
-  <div class="row">
-    <div class="card">
-      <div class="mut" style="margin-bottom:6px;">좌측: 대화 / 우측: 실시간 Workpad</div>
-      <div id="chat" class="chat"></div>
-      <div class="row2" style="margin-top:8px;">
-        <input id="msg" type="text" placeholder="메시지를 입력하고 Enter…"/>
-        <button id="send">Send</button>
-      </div>
-    </div>
-    <div class="card">
-      <div class="mut" style="margin-bottom:6px;">🧠 실시간 Workpad</div>
-      <div id="think" class="workpad"></div>
-    </div>
-  </div>
-  <div class="mut" style="margin-top:8px;">build {APP_TITLE}</div>
-</div>
-<script>
-let ws=null;
-const chat   = document.getElementById("chat");
-const think  = document.getElementById("think");
-const sidInp = document.getElementById("sid");
-const engInp = document.getElementById("eng");
-const whyInp = document.getElementById("why");
-const msgInp = document.getElementById("msg");
-const btn    = document.getElementById("send");
+engines = cols[1].text_input("엔진(콤마)", st.session_state.get("engines","OpenAI,Gemini"), key=K("eng"))
+st.session_state["engines"]=engines
+why_chain = cols[2].checkbox("왜-사슬", True, key=K("why"))
+mem_on    = cols[3].toggle("Memory ON", True, key=K("mem"))
 
-function append(role, text){
-  const div=document.createElement("div");
-  div.className="bubble "+(role==="user"?"user":"bot");
-  div.textContent=text;
-  chat.appendChild(div);
-  chat.scrollTop=chat.scrollHeight;
-}
-function tpush(text){
-  const p=document.createElement("div");
-  p.className="mut"; p.textContent="• "+text;
-  think.appendChild(p);
-  think.scrollTop=think.scrollHeight;
-}
-function tclear(){ think.innerHTML=""; }
+# 좌우 레이아웃
+left, right = st.columns([1.1, 0.9])
 
-async function ensureWS(){
-  if (ws && ws.readyState===1) return ws;
-  ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onmessage=(e)=>{
-    const ev=JSON.parse(e.data);
-    if(ev.type==="think") tpush(ev.text);
-    if(ev.type==="answer"){ append("assistant", ev.text); tclear(); }
-  };
-  ws.onclose=()=>{ /* auto reopen */ };
-  await new Promise(r=>setTimeout(r,150));
-  return ws;
-}
+# ---------- LEFT: 채팅 ----------
+with left:
+    st.caption("좌측: 대화창(스트리밍 응답). ChatGPT와 유사한 말풍선 UI.")
+    if "messages" not in st.session_state:
+        st.session_state["messages"] = []
 
-async function send(){
-  const text = msgInp.value.trim(); if(!text) return;
-  append("user", text); tclear(); msgInp.value="";
-  const engines = engInp.value.split(",").map(s=>s.trim()).filter(Boolean);
-  const payload = {{ session_id: sidInp.value || "default", text, engines, why_chain: whyInp.checked }};
-  await ensureWS();
-  ws.send(JSON.stringify(payload));
-}
-btn.onclick=send;
-msgInp.addEventListener("keydown", (e)=>{{ if(e.key==="Enter") send(); }});
-</script>
-</body></html>
-"""
+    # 과거 메시지 렌더
+    for m in st.session_state["messages"]:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
 
-@app.get("/", response_class=HTMLResponse)
-def index(): return HTML
+    user_msg = st.chat_input("메시지를 입력하고 Enter…")
+    if user_msg:
+        # 사용자 말풍선
+        with st.chat_message("user"):
+            st.markdown(user_msg)
+        st.session_state["messages"].append({"role":"user", "content":user_msg})
+        if mem_on: add_dialog(session_id, "user", user_msg)
 
-# -------------------- Run --------------------
-if __name__ == "__main__":
-    import uvicorn
-    print(f"★ {APP_TITLE} http://127.0.0.1:{PORT}")
-    uvicorn.run("gea_aio:app", host="0.0.0.0", port=PORT, reload=False)
+        # 사고 → 응답 스트리밍
+        answer_text, logs = compose_answer(
+            user_msg,
+            [s.strip() for s in engines.split(",") if s.strip()],
+            why_chain,
+            session_id
+        )
+        # 좌측에 스트리밍 출력(가능한 경우 토막 출력)
+        with st.chat_message("assistant"):
+            placeholder = st.empty()
+            shown = ""
+            # 간단 토막 스트림(문장 단위로 쪼개서 효과 주기)
+            for chunk in re.findall(r".{1,70}", answer_text, flags=re.S):
+                shown += chunk
+                placeholder.markdown(shown)
+                time.sleep(0.01)
+            placeholder.markdown(shown)
+
+        st.session_state["messages"].append({"role":"assistant","content":answer_text})
+        if mem_on: add_dialog(session_id, "assistant", answer_text)
+        # 오른쪽 사고 로그 갱신
+        st.session_state["last_logs"] = logs
+
+# ---------- RIGHT: 사고 로그 ----------
+with right:
+    st.caption("우측: 사고 로그(단계별). 사람처럼 '왜?'를 캐며 진행.")
+    logs = st.session_state.get("last_logs", [])
+    if not logs:
+        st.info("대화하면 여기 사고 단계가 나타납니다.")
+    else:
+        for l in logs:
+            with st.expander(f"{l['i']}. {l['by']} · 단계 사고", expanded=False):
+                st.markdown(l["text"])
+
+st.divider()
+st.caption("키가 없으면 Mock로 동작합니다 · build v3.1")
