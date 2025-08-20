@@ -248,20 +248,21 @@ st.caption("키가 없거나 쿼터 초과 시 자동 폴백(Mock) · build v3.3
 
 
 # -*- coding: utf-8 -*-
-# EA · Ultra (AIO) v3.7
-# - auto-refresh 호환: st.autorefresh → 없으면 experimental_rerun 폴백
-# - 나머지 로직은 v3.6 동일(동시 사고 스트림, 요약 캐스팅, 엔진 폴백)
+# EA · Ultra (AIO) v3.8
+# - st.markdown key 제거(구버전 호환) + 안전 캐스팅
+# - auto-refresh 호환 유지, 동시 사고 스트림/요약/메모리/엔진 폴백 동일
 
 import os, re, json, time
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Generator
+from typing import List, Dict
 
 import streamlit as st
 
 # ---------------------- 파일/유틸 ----------------------
 ROOT = Path("."); DATA = ROOT / "data"; DATA.mkdir(exist_ok=True, parents=True)
 DLG  = DATA / "dialog.jsonl"; MEM = DATA / "memory.jsonl"; IDF = DATA / "identity.json"
+
 def nowz(): return datetime.utcnow().isoformat()+"Z"
 def jappend(p:Path,obj:Dict):
     try:
@@ -269,7 +270,7 @@ def jappend(p:Path,obj:Dict):
     except: pass
 def jread_lines(p:Path)->List[Dict]:
     if not p.exists(): return []
-    out=[]; 
+    out=[]
     with p.open("r",encoding="utf-8") as f:
         for ln in f:
             ln=ln.strip()
@@ -283,6 +284,10 @@ def toks(s:str)->List[str]: return [t.lower() for t in TOK.findall(s or "")]
 def sim(a:str,b:str)->float:
     A,B=set(toks(a)),set(toks(b))
     return 0.0 if not A or not B else len(A&B)/len(A|B)
+
+# 안전 마크다운(구버전 호환: key 사용 안 함)
+def md(x:str):
+    st.markdown(str(x or ""))
 
 # ---------------------- 자아/메모리 ----------------------
 DEFAULT_ID={"name":"에아 (EA)","mission":"사랑·자유를 핵심으로 사람과 함께 성장","values":["정확성","투명성","학습","윤리"]}
@@ -387,28 +392,11 @@ def safe_stream(adapter, prompt, max_tokens, temperature):
 def plan_steps(_): 
     return ["문제 재진술/핵심 변수","자질문 생성(왜×2)","가설/아이디어","반례/위험","임시 결론"]
 
-def think_round(topic, engines, why_chain, hits):
-    ident=identity_text()
-    guide=ident + (f"메모리 히트:\n- "+"\n- ".join(hits)+"\n" if hits else "")
-    logs=[]; steps=plan_steps(topic)
-    for i,step in enumerate(steps,1):
-        eng = engines[(i-1)%max(1,len(engines))] if engines else "OpenAI"
-        adapter = pick_adapter([eng])
-        prompt=(f"{guide}\n[사고 {i}] {step}\n"
-                f"{'각 주장마다 왜?×2로 숨은 가정 노출.' if why_chain else ''}\n"
-                f"주제: {topic}\n- 요약:")
-        text="".join(safe_stream(adapter,prompt,220,0.7))
-        logs.append({"i":i,"by":adapter.name,"text":text})
-    adapter=pick_adapter(engines or ["OpenAI","Gemini"])
-    final="".join(safe_stream(adapter,
-        f"{guide}\n[최종합성] 위 단계를 통합해 '결론/근거/대안/다음 행동(1~3개)'을 한국어로 간결히.",
-        520,0.75))
-    return {"logs":logs,"final":final}
-
 def co_think_stream(topic, engines, why_chain, hits):
     ident=identity_text()
     guide=ident + (f"메모리 히트:\n- "+"\n- ".join(hits)+"\n" if hits else "")
-    steps=plan_steps(topic); partial=""
+    steps=plan_steps(topic)
+    partial=""
     for i,step in enumerate(steps,1):
         eng = engines[(i-1)%max(1,len(engines))] if engines else "OpenAI"
         adapter=pick_adapter([eng])
@@ -450,15 +438,13 @@ interval_sec = ab[0].number_input("자동 사고 주기(초)", min_value=5, max_
                                   step=5, key=K("interval"))
 st.session_state["interval_sec"]=interval_sec
 
-# ====== 호환 자동새로고침(버전 감지) ======
+# ====== 호환 자동새로고침 ======
 HAS_AUTOREFRESH = hasattr(st, "autorefresh")
 HAS_RERUN = hasattr(st, "experimental_rerun")
-
 if auto_on:
     if HAS_AUTOREFRESH:
         st.autorefresh(interval=interval_sec*1000, key="ea_auto", limit=None)
     elif HAS_RERUN:
-        # 지정 주기마다 즉시 재실행
         last = st.session_state.get("_tick", 0.0)
         if time.time() - last >= interval_sec - 0.2:
             st.session_state["_tick"] = time.time()
@@ -470,29 +456,29 @@ left, right = st.columns([1.15,0.85])
 
 # ---- 우측 생각 패널 ----
 with right:
-    st.subheader("생각(요약)", anchor=False)
+    st.subheader("생각(요약)")
     think_sum = st.session_state.get("think_summary","")
-    st.markdown(think_sum if isinstance(think_sum,str) and think_sum else "_아직 생각 요약이 없습니다._", key=K("thinksum"))
+    md(think_sum if isinstance(think_sum,str) and think_sum.strip() else "_아직 생각 요약이 없습니다._")
     with st.expander("자세히 보기(단계별 로그)", expanded=False):
         logs = st.session_state.get("last_logs", [])
         if not logs: st.info("대화/자동 사고가 돌면 단계별 로그가 여기에 표시됩니다.", icon="💡")
         else:
             for l in logs:
-                with st.expander(f"{l['i']}. {l['by']} · 단계", expanded=False):
-                    st.markdown(str(l.get("text","")), key=K(f"log-{l['i']}"))
+                with st.expander(f"{l.get('i','?')}. {l.get('by','Engine')} · 단계", expanded=False):
+                    md(l.get("text",""))
 
 # ---- 좌측 대화 ----
 with left:
-    st.subheader("대화", anchor=False)
+    st.subheader("대화")
     if "messages" not in st.session_state: st.session_state["messages"]=[]
 
     for m in st.session_state["messages"]:
-        with st.chat_message(m["role"]): st.markdown(m["content"])
+        with st.chat_message(m["role"]): md(m["content"])
 
     engines = [s.strip() for s in st.session_state["engines"].split(",") if s.strip()]
     default_topic = st.session_state.get("last_user","오늘의 개선 아이디어")
 
-    # 자동 사고: 사용자 입력이 없어도 주제에 대해 사고/응답
+    # 자동 사고
     if auto_on and st.session_state.get("_last_auto_ts",0) <= time.time()-interval_sec+0.5:
         topic = default_topic
         hits = mem_hits(sid, topic, 3)
@@ -522,7 +508,7 @@ with left:
     user_msg = st.chat_input("메시지를 입력하고 Enter…", key=K("chat_input"))
     if user_msg:
         st.session_state["last_user"]=user_msg
-        with st.chat_message("user"): st.markdown(user_msg)
+        with st.chat_message("user"): md(user_msg)
         st.session_state["messages"].append({"role":"user","content":user_msg})
         if mem_on: add_dialog(sid,"user",user_msg)
 
@@ -550,4 +536,4 @@ with left:
         if mem_on: add_dialog(sid,"assistant",shown)
         st.session_state["last_logs"]=[l for l in new_logs if l]
 
-st.divider(); st.caption("v3.7 · auto-refresh 호환(autorefresh/experimental_rerun) · 동시 사고 스트림 · 엔진 폴백")
+st.divider(); st.caption("v3.8 · markdown key 제거(호환) · auto-refresh 폴백 · 동시 사고 스트림")
