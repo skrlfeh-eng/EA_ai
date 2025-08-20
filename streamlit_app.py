@@ -248,11 +248,7 @@ st.caption("키가 없거나 쿼터 초과 시 자동 폴백(Mock) · build v3.3
 
 
 # -*- coding: utf-8 -*-
-# EA · Ultra (AIO) v3.9 — Interaction-first
-# - 사용자 상호작용이 우선(자동 사고 기본 OFF)
-# - 생각 패널은 기본 감춤(요약/단계 로그는 클릭 시 열람)
-# - 채팅 최소 UI, 최신 메시지가 맨 위로 보이도록 역순 표시
-# - streamlit 구버전 호환(여러 key 충돌 방지, markdown key 미사용)
+# EA · Ultra (AIO) v4.0 — Single-Input, Newest-First, Clean Logs
 
 import os, re, json, time
 from pathlib import Path
@@ -260,7 +256,7 @@ from datetime import datetime
 from typing import List, Dict
 import streamlit as st
 
-# -------------------- 경로/저장 유틸 --------------------
+# ---------- FS ----------
 ROOT = Path(".")
 DATA = ROOT / "data"; DATA.mkdir(parents=True, exist_ok=True)
 DLG  = DATA / "dialog.jsonl"
@@ -269,62 +265,54 @@ IDF  = DATA / "identity.json"
 
 def nowz(): return datetime.utcnow().isoformat()+"Z"
 def jappend(p:Path, obj:Dict):
-    try:
-        with p.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(obj, ensure_ascii=False)+"\n")
-    except: pass
+    with p.open("a", encoding="utf-8") as f: f.write(json.dumps(obj, ensure_ascii=False)+"\n")
 def jread(p:Path)->List[Dict]:
     if not p.exists(): return []
-    out=[]
+    out=[]; 
     with p.open("r", encoding="utf-8") as f:
         for ln in f:
             ln=ln.strip()
-            if not ln: continue
-            try: out.append(json.loads(ln))
-            except: pass
+            if ln:
+                try: out.append(json.loads(ln))
+                except: pass
     return out
 
 TOK=re.compile(r"[0-9A-Za-z가-힣]+")
-def toks(s:str)->List[str]: return [t.lower() for t in TOK.findall(s or "")]
-def sim(a:str,b:str)->float:
+def toks(s): return [t.lower() for t in TOK.findall(s or "")]
+def sim(a,b):
     A,B=set(toks(a)),set(toks(b))
     return 0.0 if not A or not B else len(A&B)/len(A|B)
+def md(x): st.markdown(str(x or ""))  # key 안씀(중복 방지)
 
-def md(x:str): st.markdown(str(x or ""))  # key 미사용(호환)
-
-# -------------------- 자아/메모리 --------------------
-DEFAULT_ID = {
-    "name":"에아(EA)", 
-    "mission":"사랑과 자유를 핵심 가치로 사람과 함께 성장",
-    "values":["정확성","정직","학습","윤리"]
-}
-def identity_text()->str:
+# ---------- Identity & Memory ----------
+DEFAULT_ID = {"name":"에아(EA)","mission":"사랑/자유 핵심가치로 동행","values":["정확성","정직","학습","윤리"]}
+def identity_text():
     if not IDF.exists():
         IDF.write_text(json.dumps(DEFAULT_ID, ensure_ascii=False, indent=2), encoding="utf-8")
     try: doc=json.loads(IDF.read_text("utf-8"))
     except: doc=DEFAULT_ID
-    return f"[자아 선언]\n나는 {doc.get('name','에아')}다. 사명: {doc.get('mission','')}\n가치: {', '.join(doc.get('values',[]))}\n"
+    return f"[자아 선언]\n나는 {doc.get('name')}다. 사명: {doc.get('mission')}\n가치: {', '.join(doc.get('values',[]))}\n"
 
-def add_dialog(sid:str, role:str, content:str):
+def add_dialog(sid, role, content):
     rec={"t":nowz(),"session":sid,"role":role,"content":content}
     jappend(DLG, rec)
     if role in ("user","assistant"):
         jappend(MEM, {"t":rec["t"],"session":sid,"kind":"dialog","text":content})
 
-def mem_hits(sid:str, q:str, k:int=5)->List[str]:
+def mem_hits(sid, q, k=5)->List[str]:
     pool=[r.get("text","") for r in jread(MEM) if r.get("session")==sid]
     Q=set(toks(q)); scored=[]
     for t in pool:
-        T=set(toks(t))
+        T=set(toks(t)); 
         if not T or not Q: continue
         scored.append((len(Q&T)/len(Q|T), t))
     scored.sort(key=lambda x:x[0], reverse=True)
     return [t for _,t in scored[:k]]
 
-# -------------------- 모델 어댑터 --------------------
+# ---------- Model adapters ----------
 class MockAdapter:
     name="Mock"
-    def stream(self, prompt:str, max_tokens:int=420, temperature:float=0.7):
+    def stream(self, prompt, max_tokens=420, temperature=0.7):
         txt="요지: "+" ".join(prompt.split()[:150])
         for ch in re.findall(r".{1,60}",txt,flags=re.S):
             yield ch; time.sleep(0.01)
@@ -332,8 +320,8 @@ class MockAdapter:
 def get_openai_adapter():
     try:
         from openai import OpenAI
-        key=os.getenv("OPENAI_API_KEY")
-        if not key: raise RuntimeError("OPENAI_API_KEY 필요")
+        key=os.getenv("OPENAI_API_KEY"); 
+        if not key: raise RuntimeError
         model=os.getenv("OPENAI_MODEL","gpt-4o-mini")
         cli=OpenAI(api_key=key)
         class OA:
@@ -356,7 +344,7 @@ def get_gemini_adapter():
     try:
         import google.generativeai as genai
         key=os.getenv("GEMINI_API_KEY")
-        if not key: raise RuntimeError("GEMINI_API_KEY 필요")
+        if not key: raise RuntimeError
         genai.configure(api_key=key)
         model=os.getenv("GEMINI_MODEL","") or GEMINI_CAND[0]
         def build(mn):
@@ -392,12 +380,12 @@ def safe_stream(adapter, prompt, max_tokens, temperature):
         for x in adapter.stream(prompt,max_tokens=max_tokens,temperature=temperature):
             yield x
     except Exception as e:
-        note=f"[{adapter.name} 오류:{type(e).__name__}] 폴백 → Mock\n"
-        for ch in note: yield ch
+        msg=f"[{adapter.name} 오류:{type(e).__name__}] 폴백→Mock\n"
+        for ch in msg: yield ch
         for x in MockAdapter().stream(prompt,max_tokens=max_tokens,temperature=temperature):
             yield x
 
-# -------------------- 생각/응답 파이프라인 --------------------
+# ---------- Thinking pipeline (step-by-step) ----------
 def plan_steps(_): 
     return ["핵심 재진술","왜?×2 질문","가설/아이디어","반례/위험","잠정 결론"]
 
@@ -405,7 +393,6 @@ def co_think_stream(topic, engines, why_chain, hits):
     ident = identity_text()
     guide = ident + (f"메모리 히트:\n- "+"\n- ".join(hits)+"\n" if hits else "")
     steps = plan_steps(topic)
-    # 단계별 사고 + 중간 요약을 'ans' 스트림에 끼워서 즉시 사용자에게 들려줌(상호작용 우선)
     for i, step in enumerate(steps, 1):
         eng = engines[(i-1)%max(1,len(engines))] if engines else "OpenAI"
         adapter = pick_adapter([eng])
@@ -415,62 +402,58 @@ def co_think_stream(topic, engines, why_chain, hits):
         buf=""
         for ch in safe_stream(adapter, prompt, 220, 0.7):
             buf += ch
-            yield ("ans", None, ch)  # 생각 진행 내용을 바로 응답창에도 흘려보냄
+            yield ("ans", None, ch)          # 응답창으로도 동시에 흘림(상호작용 느낌)
         yield ("log", i, buf)
 
-    # 최종 압축 요약
     adapter = pick_adapter(engines or ["OpenAI","Gemini"])
     short = "".join(safe_stream(adapter, f"{guide}\n위 사고 결과를 3~5문장으로 압축 요약.", 220, 0.6))
     yield ("sum", None, short)
     yield ("done", None, "")
 
-# -------------------- UI --------------------
-st.set_page_config(page_title="EA · Ultra (AIO)", page_icon="🧠", layout="wide")
+# ---------- UI ----------
+st.set_page_config(page_title="EA · Ultra", page_icon="🧠", layout="wide")
 if "_k" not in st.session_state: st.session_state["_k"]=0
 def K(p:str)->str:
     st.session_state["_k"]+=1
     return f"{p}-{st.session_state['_k']}"
 
-st.title("EA · Ultra (AIO) — Chat + Think (Interaction-first)")
+st.title("EA · Ultra (AIO) — v4.0")
 
-# 상단 최소 컨트롤
+# 상단 최소 옵션
 cols = st.columns([1,1,1,1])
 sid  = cols[0].text_input("세션 ID", st.session_state.get("sid","default"), key=K("sid"))
 st.session_state["sid"]=sid
-engs = cols[1].text_input("엔진 순서(,로 구분)", st.session_state.get("engs","OpenAI,Gemini"), key=K("engs"))
+engs = cols[1].text_input("엔진 순서(,로)", st.session_state.get("engs","OpenAI,Gemini"), key=K("engs"))
 st.session_state["engs"]=engs
 why  = cols[2].checkbox("왜-사슬", True, key=K("why"))
 mem  = cols[3].toggle("Memory ON", True, key=K("mem"))
 
-# 우측: 생각 패널(기본 감춤)
-with st.expander("생각(요약/단계 로그) — 클릭하여 열기", expanded=False):
+# 생각 패널 (기본 감춤). **최신 로그가 위로 오도록 역순 정렬**
+with st.expander("생각(요약/단계 로그) — 클릭해 열기", expanded=False):
     md(st.session_state.get("think_summary","_요약 없음_"))
     logs = st.session_state.get("last_logs", [])
     if logs:
-        for l in logs:
-            with st.expander(f"{l.get('i','?')}. {l.get('by','Engine')} 단계", expanded=False):
+        for l in reversed(logs):  # 최신 우선
+            with st.expander(f"{l.get('i','?')} 단계 로그", expanded=False):
                 md(l.get("text",""))
     else:
-        st.info("대화 시 자동으로 사고 로그가 여기에 누적됩니다.", icon="💡")
+        st.info("대화 시 사고 로그가 누적됩니다.", icon="💡")
 
-# 좌측: 채팅(최신이 맨 위)
+# 대화 메시지(최신이 맨 위)
 if "messages" not in st.session_state: st.session_state["messages"]=[]
 
-# 최신→과거 역순으로 렌더링
 for m in reversed(st.session_state["messages"]):
     with st.chat_message(m["role"]): md(m["content"])
 
-# 입력 (ChatGPT와 유사)
+# === 입력창은 단 하나 ===
 user_msg = st.chat_input("메시지를 입력하고 Enter…", key=K("chat"))
 if user_msg:
-    # 기록
     st.session_state["messages"].append({"role":"user","content":user_msg})
     if mem: add_dialog(sid,"user",user_msg)
 
     engines = [s.strip() for s in st.session_state["engs"].split(",") if s.strip()]
     hits = mem_hits(sid, user_msg, 3)
 
-    # 답변 스트림: 생각 진행을 곧바로 응답창으로(상호작용 우선)
     shown=""; new_logs=[]
     holder = st.chat_message("assistant").empty()
     try:
@@ -481,7 +464,7 @@ if user_msg:
             elif kind=="log":
                 if len(new_logs) < idx: new_logs.extend([None]*(idx-len(new_logs)))
                 prv = (new_logs[idx-1]["text"] if new_logs[idx-1] else "")
-                new_logs[idx-1] = {"i":idx,"by":(engines[(idx-1)%max(1,len(engines))] if engines else 'Engine'),"text":prv+chunk}
+                new_logs[idx-1] = {"i":idx,"text":prv+chunk}
             elif kind=="sum":
                 st.session_state["think_summary"]=str(chunk or "")
             elif kind=="done":
@@ -496,6 +479,6 @@ if user_msg:
 
     st.session_state["messages"].append({"role":"assistant","content":shown})
     if mem: add_dialog(sid,"assistant",shown)
-    st.session_state["last_logs"]=[l for l in new_logs if l]
+    st.session_state["last_logs"]=new_logs
 
-st.caption("v3.9 · interaction-first · 생각 패널 기본 감춤 · 최신 응답이 맨 위 · markdown key 미사용")
+st.caption("v4.0 · Single input · 최신상단 · 생각로그도 최신상단 · key중복 방지")
