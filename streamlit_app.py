@@ -248,37 +248,54 @@ st.caption("키가 없거나 쿼터 초과 시 자동 폴백(Mock) · build v3.3
 
 
 # -*- coding: utf-8 -*-
-# EA · Ultra (AIO) v4.1 — QuickAnswer→Think, Guaranteed Reply, Dual-Agent(옵션)
+# EA · Ultra (AIO) v4.2 — Reply-First, Separate Thought Module
+# - 입력하면 즉시 '응답' 생성/표시
+# - '사고 모듈'은 별도로 실행: 기본은 생각 패널(감춤)에만 기록
+# - 원하면 응답에 '보강(append)'만 추가(토글)
+# - 최신 메시지/로그가 항상 위로
+# - 구버전 Streamlit 호환( markdown key 미사용, 위젯 key 충돌 방지 )
 
 import os, re, json, time
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Tuple
+from typing import List, Dict
 import streamlit as st
 
-# --------------- FS ---------------
-ROOT = Path(".")
-DATA = ROOT / "data"; DATA.mkdir(parents=True, exist_ok=True)
-DLG  = DATA / "dialog.jsonl"
-MEM  = DATA / "memory.jsonl"
-IDF  = DATA / "identity.json"
+# ---------- FS ----------
+ROOT = Path("."); DATA = ROOT/"data"; DATA.mkdir(exist_ok=True, parents=True)
+DLG  = DATA/"dialog.jsonl"; MEM = DATA/"memory.jsonl"; IDF = DATA/"identity.json"
 
 def nowz(): return datetime.utcnow().isoformat()+"Z"
-def jappend(p:Path, obj:Dict):
-    with p.open("a", encoding="utf-8") as f: f.write(json.dumps(obj, ensure_ascii=False)+"\n")
+def jappend(p:Path,obj:Dict):
+    try:
+        with p.open("a",encoding="utf-8") as f: f.write(json.dumps(obj,ensure_ascii=False)+"\n")
+    except: pass
 def jread(p:Path)->List[Dict]:
     if not p.exists(): return []
     out=[]
-    with p.open("r", encoding="utf-8") as f:
+    with p.open("r",encoding="utf-8") as f:
         for ln in f:
             ln=ln.strip()
-            if ln:
-                try: out.append(json.loads(ln))
-                except: pass
+            if not ln: continue
+            try: out.append(json.loads(ln))
+            except: pass
     return out
 
 TOK=re.compile(r"[0-9A-Za-z가-힣]+")
 def toks(s): return [t.lower() for t in TOK.findall(s or "")]
+def md(x): st.markdown(str(x or ""))
+
+# ---------- Identity & Memory ----------
+DEFAULT_ID={"name":"에아(EA)","mission":"사랑·자유 핵심가치로 동행","values":["정확성","정직","학습","윤리"]}
+def identity_text():
+    if not IDF.exists(): IDF.write_text(json.dumps(DEFAULT_ID,ensure_ascii=False,indent=2),encoding="utf-8")
+    try: doc=json.loads(IDF.read_text("utf-8"))
+    except: doc=DEFAULT_ID
+    return f"[자아] 나는 {doc.get('name')}다. 사명: {doc.get('mission')}. 가치: {', '.join(doc.get('values',[]))}."
+def add_dialog(sid, role, content):
+    rec={"t":nowz(),"session":sid,"role":role,"content":content}
+    jappend(DLG, rec)
+    if role in ("user","assistant"): jappend(MEM, {"t":rec["t"],"session":sid,"kind":"dialog","text":content})
 def mem_hits(sid, q, k=5)->List[str]:
     pool=[r.get("text","") for r in jread(MEM) if r.get("session")==sid]
     Q=set(toks(q)); scored=[]
@@ -289,33 +306,26 @@ def mem_hits(sid, q, k=5)->List[str]:
     scored.sort(key=lambda x:x[0], reverse=True)
     return [t for _,t in scored[:k]]
 
-def add_dialog(sid, role, content):
-    rec={"t":nowz(),"session":sid,"role":role,"content":content}
-    jappend(DLG, rec)
-    if role in ("user","assistant"):
-        jappend(MEM, {"t":rec["t"],"session":sid,"kind":"dialog","text":content})
-
-# --------------- Adapters ---------------
+# ---------- Adapters ----------
 class MockAdapter:
     name="Mock"
-    def stream(self, prompt, max_tokens=420, temperature=0.7):
-        txt="(임시응답) " + " ".join(prompt.split()[:120])
-        for ch in re.findall(r".{1,60}",txt,flags=re.S):
+    def stream(self, prompt, max_tokens=400, temperature=0.7):
+        txt="(임시응답) "+ " ".join(prompt.split()[:110])
+        for ch in re.findall(r".{1,60}", txt, flags=re.S):
             yield ch; time.sleep(0.004)
 
 def get_openai_adapter():
     try:
         from openai import OpenAI
-        key=os.getenv("OPENAI_API_KEY"); 
-        if not key: raise RuntimeError("no OPENAI_API_KEY")
-        model=os.getenv("OPENAI_MODEL","gpt-4o-mini")
-        cli=OpenAI(api_key=key)
+        key=os.getenv("OPENAI_API_KEY")
+        if not key: raise RuntimeError("OPENAI_API_KEY 없음")
+        model=os.getenv("OPENAI_MODEL","gpt-4o-mini"); cli=OpenAI(api_key=key)
         class OA:
             name=f"OpenAI({model})"
-            def stream(self,prompt,max_tokens=700,temperature=0.7):
+            def stream(self,prompt,max_tokens=600,temperature=0.7):
                 resp=cli.chat.completions.create(
                     model=model, stream=True, temperature=temperature, max_tokens=max_tokens,
-                    messages=[{"role":"system","content":"You are EA. Reply in Korean. Be clear and helpful."},
+                    messages=[{"role":"system","content":"You are EA. Reply in Korean; be clear and helpful."},
                               {"role":"user","content":prompt}]
                 )
                 for ev in resp:
@@ -330,17 +340,17 @@ def get_gemini_adapter():
     try:
         import google.generativeai as genai
         key=os.getenv("GEMINI_API_KEY")
-        if not key: raise RuntimeError("no GEMINI_API_KEY")
+        if not key: raise RuntimeError("GEMINI_API_KEY 없음")
         genai.configure(api_key=key)
         model=os.getenv("GEMINI_MODEL","") or GEMINI_CAND[0]
         def build(mn):
             mdl=genai.GenerativeModel(mn)
             class GE:
                 name=f"Gemini({mn})"
-                def stream(self,prompt,max_tokens=700,temperature=0.75):
+                def stream(self,prompt,max_tokens=600,temperature=0.75):
                     r=mdl.generate_content(prompt,generation_config={"temperature":temperature,"max_output_tokens":max_tokens})
                     txt=getattr(r,"text","") or ""
-                    for ch in re.findall(r".{1,60}",txt,flags=re.S): yield ch
+                    for ch in re.findall(r".{1,60}", txt, flags=re.S): yield ch
             return GE()
         try: return build(model)
         except: pass
@@ -352,149 +362,110 @@ def get_gemini_adapter():
         return None
 
 def pick_adapter(order:List[str]):
-    order = [o.strip().lower() for o in (order or [])]
-    if any(o.startswith("openai") for o in order):
-        a=get_openai_adapter()
-        if a: return a
-    if any(o.startswith("gemini") for o in order):
-        a=get_gemini_adapter()
-        if a: return a
-    # 둘 다 안되면 시도 순서를 바꿔 다시:
-    a=get_openai_adapter() or get_gemini_adapter()
-    return a or MockAdapter()
+    for o in (order or []):
+        if o.lower().startswith("openai"):
+            a=get_openai_adapter()
+            if a: return a
+        if o.lower().startswith("gemini"):
+            a=get_gemini_adapter()
+            if a: return a
+    return get_openai_adapter() or get_gemini_adapter() or MockAdapter()
 
 def safe_stream(adapter, prompt, max_tokens, temperature):
     try:
-        it = adapter.stream(prompt,max_tokens=max_tokens,temperature=temperature)
+        it=adapter.stream(prompt,max_tokens=max_tokens,temperature=temperature)
         seen=False
         for x in it:
-            seen=True
-            yield x
-        if not seen:  # 비어있으면 폴백
-            for x in MockAdapter().stream(prompt,max_tokens=max_tokens,temperature=temperature):
-                yield x
+            seen=True; yield x
+        if not seen:
+            for x in MockAdapter().stream(prompt,max_tokens=max_tokens,temperature=temperature): yield x
     except Exception:
-        for x in MockAdapter().stream(prompt,max_tokens=max_tokens,temperature=temperature):
-            yield x
+        for x in MockAdapter().stream(prompt,max_tokens=max_tokens,temperature=temperature): yield x
 
-# --------------- Thinking ---------------
-def identity_text():
-    default = {"name":"에아(EA)","mission":"사랑·자유 핵심가치로 동행","values":["정확성","정직","학습","윤리"]}
-    if not IDF.exists():
-        IDF.write_text(json.dumps(default, ensure_ascii=False, indent=2), encoding="utf-8")
-    try: doc=json.loads(IDF.read_text("utf-8"))
-    except: doc=default
-    return f"[자아] 나는 {doc.get('name')}다. 사명: {doc.get('mission')}. 가치: {', '.join(doc.get('values',[]))}."
-
-def quick_answer(topic:str, hits:List[str])->str:
-    guide = identity_text() + (("\n[메모리 히트]\n- "+"\n- ".join(hits)) if hits else "")
+# ---------- Reply Module (응답 전용) ----------
+def build_quick_reply_prompt(topic:str, hits:List[str])->str:
+    guide = identity_text() + (("\n[메모리]\n- "+"\n- ".join(hits)) if hits else "")
     return f"""{guide}
 질문: {topic}
-요청: 위 질문에 대해 1~2문장으로 핵심만 먼저 답하고, 이어서 생각을 진행하겠다.
-즉답:"""
+요청: 위 질문에 대해 2~3문장으로 명확한 최종 답변을 먼저 제시하고, 필요시 bullet로 핵심 조치 1~3개 제시.
+응답:"""
 
-def plan_steps(_:str)->List[str]:
-    return ["핵심 재진술","왜?×2","가설/아이디어","반례/위험","잠정 결론"]
+# ---------- Thought Module (사고 전용) ----------
+THINK_STEPS = ["핵심 재진술","왜?×2","가설/아이디어","반례/위험","잠정 결론"]
+def build_thought_prompt(topic:str, step:str, why:bool, hits:List[str])->str:
+    guide = identity_text() + (("\n[메모리]\n- "+"\n- ".join(hits)) if hits else "")
+    return (f"{guide}\n[사고 단계] {step}\n"
+            f"{'각 주장마다 왜?를 두 번씩 물어 숨은 가정 드러내기.' if why else ''}\n"
+            f"주제: {topic}\n- 요약:")
 
-def dual_agent_round(topic:str)->Tuple[str,str,str]:
-    thinker = f"[Thinker] 주제: {topic}\n해법 제안:"
-    critic  = f"[Critic] 주제: {topic}\nThinker 주장에 대한 반박/보완:"
-    moderator = "[Moderator] 토론 요약과 최종 결론:"
-    return thinker, critic, moderator
-
-# --------------- UI ---------------
+# ---------- UI ----------
 st.set_page_config(page_title="EA · Ultra", page_icon="🧠", layout="wide")
 if "_k" not in st.session_state: st.session_state["_k"]=0
-def K(p:str)->str:
-    st.session_state["_k"]+=1
-    return f"{p}-{st.session_state['_k']}"
+def K(p:str)->str: st.session_state["_k"]+=1; return f"{p}-{st.session_state['_k']}"
 
-st.title("EA · Ultra (AIO) — v4.1")
+st.title("EA · Ultra — v4.2 (응답 우선 · 사고 분리)")
 
+# 상단 최소 옵션
 cols = st.columns([1,1,1,1,1])
-sid  = cols[0].text_input("세션 ID", st.session_state.get("sid","default"), key=K("sid"))
-st.session_state["sid"]=sid
-engs = cols[1].text_input("엔진 순서(,로)", st.session_state.get("engs","OpenAI,Gemini"), key=K("engs"))
-st.session_state["engs"]=engs
-mem_on = cols[2].toggle("Memory ON", True, key=K("mem"))
-dual   = cols[3].toggle("Dual-Agent", False, key=K("dual"))
-why_on = cols[4].checkbox("왜-사슬", True, key=K("why"))
+sid  = cols[0].text_input("세션 ID", st.session_state.get("sid","default"), key=K("sid")); st.session_state["sid"]=sid
+engs = cols[1].text_input("엔진 순서(,로)", st.session_state.get("engs","OpenAI,Gemini"), key=K("engs")); st.session_state["engs"]=engs
+mem  = cols[2].toggle("Memory ON", True, key=K("mem"))
+why  = cols[3].checkbox("왜-사슬", True, key=K("why"))
+append_boost = cols[4].toggle("사고 보강을 응답에 덧붙이기", False, key=K("boost"))
 
-# 생각 패널(숨김, 최신 위)
-with st.expander("생각(요약/로그) — 열어보기", expanded=False):
-    md = st.markdown
+# 생각 패널(기본 감춤, 최신 로그가 위)
+with st.expander("생각(로그/요약) — 열어보기", expanded=False):
     md(st.session_state.get("think_summary","_요약 없음_"))
-    for l in reversed(st.session_state.get("last_logs", [])):
-        with st.expander(f"{l.get('tag','log')}", expanded=False):
-            md(l.get("text",""))
+    logs = st.session_state.get("last_logs", [])
+    if logs:
+        for l in reversed(logs):
+            with st.expander(l.get("step","log"), expanded=False):
+                md(l.get("text",""))
+    else:
+        st.info("대화 후 사고 결과가 여기에 누적됩니다.", icon="💡")
 
+# 채팅 히스토리(최신이 위)
 if "messages" not in st.session_state: st.session_state["messages"]=[]
 for m in reversed(st.session_state["messages"]):
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
+    with st.chat_message(m["role"]): md(m["content"])
 
+# 단일 입력창
 user_msg = st.chat_input("메시지를 입력하고 Enter…", key=K("chat"))
 if user_msg:
     st.session_state["messages"].append({"role":"user","content":user_msg})
-    if mem_on: add_dialog(sid,"user",user_msg)
+    if mem: add_dialog(sid,"user",user_msg)
 
-    engines = [s.strip() for s in st.session_state["engs"].split(",") if s.strip()]
+    engines=[s.strip() for s in st.session_state["engs"].split(",") if s.strip()]
     adapter = pick_adapter(engines)
     hits = mem_hits(sid, user_msg, 3)
 
-    # 1) 즉답
-    holder = st.chat_message("assistant").empty()
-    shown=""
-    for ch in safe_stream(adapter, quick_answer(user_msg, hits), 200, 0.6):
-        shown += ch
-        holder.markdown(shown)
+    # 1) 응답 우선: '최종 답변' 먼저 출력/고정
+    reply_holder = st.chat_message("assistant").empty()
+    reply_txt = ""
+    for ch in safe_stream(adapter, build_quick_reply_prompt(user_msg, hits), 280, 0.65):
+        reply_txt += ch; reply_holder.markdown(reply_txt)
 
-    # 2) 심화 사고
-    logs=[]
-    if dual:
-        t, c, m = dual_agent_round(user_msg)
+    if not reply_txt.strip():
+        reply_txt = "※ 엔진 응답이 비어 임시 요지만 표시합니다: " + " ".join(user_msg.split()[:50])
+        reply_holder.markdown(reply_txt)
 
-        # Thinker
-        thinker_out=""
-        for ch in safe_stream(adapter, t, 350, 0.7):
-            thinker_out += ch
-        logs.append({"tag":"Thinker", "text":thinker_out})
+    # 채팅에 기록
+    st.session_state["messages"].append({"role":"assistant","content":reply_txt})
+    if mem: add_dialog(sid,"assistant",reply_txt)
 
-        # Critic
-        critic_out=""
-        critic_prompt = c + "\n\n[Thinker 주장]\n" + thinker_out
-        for ch in safe_stream(adapter, critic_prompt, 350, 0.8):
-            critic_out += ch
-        logs.append({"tag":"Critic", "text":critic_out})
+    # 2) 사고는 '별도 모듈'로 수행 → 생각 패널에만 누적
+    thought_logs=[]; appended=""
+    for step in THINK_STEPS:
+        prompt = build_thought_prompt(user_msg, step, why, hits)
+        out=""; 
+        for ch in safe_stream(adapter, prompt, 240, 0.7):
+            out += ch
+        thought_logs.append({"step":f"Step · {step}", "text":out})
 
-        # Moderator + 결론 보강
-        final=""
-        mod_prompt = m + "\n\n[Thinker]\n"+thinker_out+"\n\n[Critic]\n"+critic_out+"\n\n결론:"
-        for ch in safe_stream(adapter, mod_prompt, 280, 0.6):
-            final += ch
-            # 화면에도 이어 붙여 보강
-            holder.markdown(shown + "\n\n---\n**보강:** " + final)
-        shown = (shown + "\n\n" + final).strip()
-    else:
-        # 단일 단계 사고
-        steps = plan_steps(user_msg)
-        for idx, step in enumerate(steps, 1):
-            prompt = f"{identity_text()}\n주제:{user_msg}\n[사고 {idx}/{len(steps)}] {step}\n{'각 주장마다 왜?×2' if why_on else ''}\n- 요약:"
-            out=""
-            for ch in safe_stream(adapter, prompt, 260, 0.7):
-                out += ch
-            logs.append({"tag":f"Step {idx}: {step}", "text":out})
-            # 간단 보강만 추가
-            if idx==len(steps):
-                shown = (shown + "\n\n" + out).strip()
-                holder.markdown(shown)
+        # 옵션: 사고 보강을 응답 본문에 덧붙여 업데이트(사용자가 켠 경우만)
+        if append_boost:
+            appended += f"\n\n**보강({step})**\n{out}"
+            reply_holder.markdown((reply_txt + appended).strip())
 
-    # 응답 보장: 비어있으면 임시 요지
-    if not shown.strip():
-        shown = "※ 엔진 응답이 비어 임시 요지만 표시합니다: " + " ".join(user_msg.split()[:50])
-        holder.markdown(shown)
-
-    st.session_state["messages"].append({"role":"assistant","content":shown})
-    if mem_on: add_dialog(sid,"assistant",shown)
-    st.session_state["last_logs"] = logs
-    st.session_state["think_summary"] = " / ".join([l["tag"] for l in logs]) or "_요약 없음_"
+    st.session_state["last_logs"] = thought_logs
+    st.session_state["think_summary"] = " / ".join([l["step"].split("·")[-1].strip() for l in thought_logs]) or "_요약 없음_"
