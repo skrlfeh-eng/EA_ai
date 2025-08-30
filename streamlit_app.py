@@ -155,3 +155,40 @@ def module_hook(user_msg, lag, strength, entropy):
     """UJG 메시지 검출 확장"""
     rep = analyze_message(user_msg)
     return rep
+    
+    # === 확장 포인트: Memory Module ===
+import json, os
+
+MEMORY_FILE = "gea_memory.json"
+
+def load_memory():
+    if os.path.exists(MEMORY_FILE):
+        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+            try:
+                return json.load(f)
+            except:
+                return []
+    return []
+
+def save_memory(history):
+    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+
+def memory_hook(user_msg, reply, ujg_result):
+    """대화/응답/검출 결과를 파일에 기록"""
+    entry = {
+        "time": datetime.datetime.utcnow().isoformat()+"Z",
+        "user": user_msg,
+        "reply": reply,
+        "ujg": ujg_result
+    }
+    mem = load_memory()
+    mem.append(entry)
+    save_memory(mem)
+    return entry
+
+# module_hook 확장: UJG + Memory 저장
+def module_hook(user_msg, lag, strength, entropy):
+    rep = analyze_message(user_msg)   # UJG 결과
+    mem_entry = memory_hook(user_msg, f"(lag={lag},strength={strength:.2f})", rep)
+    return {"ujg": rep, "memory_saved": mem_entry["time"]}
