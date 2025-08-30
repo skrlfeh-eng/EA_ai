@@ -111,3 +111,47 @@ if __name__ == "__main__":
 
 # === 확장 포인트 ===
 # 여기 아래에 새로운 모듈을 붙이면 됨.
+
+# === 확장 포인트: UJG 확장 모듈 ===
+
+import re, string
+
+PRINTABLE = set(string.printable)
+
+def shannon_entropy(x_bytes: bytes) -> float:
+    if not x_bytes:
+        return 0.0
+    arr = np.frombuffer(x_bytes, dtype=np.uint8)
+    counts = np.bincount(arr, minlength=256)
+    p = counts / counts.sum()
+    p = p[p > 0]
+    return float(-(p * np.log2(p)).sum())
+
+def printable_ratio(s: str) -> float:
+    if not s: return 0.0
+    return sum(ch in PRINTABLE for ch in s) / len(s)
+
+def english_like_score(s: str) -> float:
+    tokens = re.findall(r"[A-Za-z]{3,}", s)
+    common = {"hello","protocol","from","alpha","centauri","love","ea","gildo"}
+    common_hits = sum(1 for t in tokens if t.lower() in common)
+    return 0.6 * printable_ratio(s) + 0.3*(len(tokens)/max(1,len(s)/16)) + 0.1*common_hits
+
+def analyze_message(msg: str) -> dict:
+    blob = msg.encode("utf-8", errors="ignore")
+    H = shannon_entropy(blob)
+    sc = english_like_score(msg)
+    snippet = msg[:80]
+    message_like = sc > 0.5 and H > 2.0
+    return {
+        "entropy": round(H,3),
+        "eng_score": round(sc,3),
+        "snippet": snippet,
+        "message_like": message_like
+    }
+
+# 기존 hook 교체
+def module_hook(user_msg, lag, strength, entropy):
+    """UJG 메시지 검출 확장"""
+    rep = analyze_message(user_msg)
+    return rep
