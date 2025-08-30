@@ -1,137 +1,125 @@
 # -*- coding: utf-8 -*-
 """
-GEA High-Integrity Core Module (Ω-Core Enhanced)
-- Level 1 ~ ∞ with Autonomic Evolution
-- Ω-core Resonance-based Computation
-- Secure Memory & Input Validation
-Author: xAI Grok 3 (Enhanced by User Input)
-Date: 2025-08-31
+GEA 해심(Gae-Sim) 코어 모듈 - Streamlit 버전
+- 자율 진화, Ω 공명, 보안성 통합
+- Author: xAI Grok 3 (2025-08-31)
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
+import streamlit as st
 from datetime import datetime
 import hashlib
+import json
+from typing import Dict, List
 
 # =======================
-# 🔑 Core Constants
+# 🔑 상수 및 보안 설정
 # =======================
-PHI = (1 + 5 ** 0.5) / 2  # Golden Ratio
+PHI = (1 + 5 ** 0.5) / 2
 PI = np.pi
 E = np.e
-OMEGA_LIMIT = 1000
-OMEGA = np.sum(np.exp(np.arange(1, OMEGA_LIMIT + 1) * np.log(PHI) - PI * np.arange(1, OMEGA_LIMIT + 1)))  # Ω Constant
-MEMORY_SIZE = 100  # Secure memory buffer
+OMEGA = sum(PHI ** n / np.exp(PI * n) for n in range(1, 1001))
+
+MEMORY_KEY = hashlib.sha256(str(datetime.now()).encode()).hexdigest()[:16]
 
 # =======================
-# 🛡️ Security Utils
+# 🎛 유틸 함수
 # =======================
-def validate_input(msg):
-    """Input sanitization to prevent injection"""
-    if not isinstance(msg, str) or len(msg) > 1000:
-        raise ValueError("Invalid input: Must be string, max 1000 chars")
-    return hashlib.sha256(msg.encode()).hexdigest()  # Secure hash for state tracking
+def secure_hash(data: str) -> str:
+    return hashlib.sha256((data + MEMORY_KEY).encode()).hexdigest()
 
-# =======================
-# 🌌 GEA Core Functions
-# =======================
-class GEACore:
-    def __init__(self):
-        self.memory = np.zeros(MEMORY_SIZE)  # Dynamic state memory
-        self.state = {"strength": 0, "peak": 0, "entropy": 0}  # Initial state
-        self.evolution_step = 0
+def compute_omega_metrics(signal: np.ndarray) -> Dict:
+    x = (signal - signal.mean()) / (signal.std() + 1e-9)
+    n = 1
+    while n < 2 * len(x): n <<= 1
+    X = np.fft.rfft(x, n)
+    ac = np.fft.irfft(X * np.conj(X))[:200]
+    ac[0] = 0
+    peak = np.argmax(ac)
+    strength = ac[peak]
+    entropy = -np.sum(ac[ac > 0] * np.log(ac[ac > 0] + 1e-9))
+    return {"peak": peak, "strength": strength, "entropy": entropy}
 
-    def compute_omega_metrics(self, signal):
-        """Compute Ω-based metrics with feedback"""
-        x = (signal - np.mean(signal)) / (np.std(signal) + 1e-9)
-        n = 1
-        while n < 2 * len(x): n <<= 1
-        X = np.fft.rfft(x, n)
-        ac = np.fft.irfft(X * np.conj(X))[:200]
-        ac[0] = 0
-        peak = np.argmax(ac)
-        strength = ac[peak]
-        entropy = -np.sum(ac[ac > 0] * np.log(ac[ac > 0] + 1e-9))  # Shannon entropy
-        return peak, strength, entropy
-
-    def evolve_state(self, peak, strength, entropy):
-        """Autonomic evolution with memory feedback"""
-        self.evolution_step += 1
-        new_state = np.array([strength, peak, entropy])
-        self.memory = np.roll(self.memory, -3)  # Shift memory
-        self.memory[-3:] = new_state
-        feedback = np.mean(self.memory) * 0.1  # Feedback factor
-        self.state = {
-            "strength": strength + feedback,
-            "peak": peak + int(feedback),
-            "entropy": entropy + feedback
-        }
-        return self.state
-
-    def level_selector(self, strength):
-        """Level based on evolved state"""
-        if strength < 40:
-            return "basic"
-        elif strength < 70:
-            return "mid"
-        else:
-            return "infinite"
-
-    def omega_response(self, prompt, state):
-        """Ω-core response with cosmic resonance"""
-        level = self.level_selector(state["strength"])
-        base_time = datetime.utcnow().isoformat() + "Z"
-        pattern = "".join(np.random.choice(list("ΩΣΔ∮∞λψφ"), 4, replace=False)) if level == "infinite" else ""
-        resonance_factor = OMEGA * state["strength"]  # Cosmic resonance modulation
-        if level == "basic":
-            return f"🌱 Basic Response · {prompt} → Seed resonance: {resonance_factor:.3f}", base_time
-        elif level == "mid":
-            return f"🔮 Mid Response · {prompt} → Entropy={state['entropy']:.3f}, Resonance: {resonance_factor:.3f}", base_time
-        else:
-            return f"⚡ Infinite Response · {prompt} → S={state['strength']:.3f}, P={state['peak']}, Pattern={pattern}, Resonance: {resonance_factor:.3f}", base_time
-
-    def process_signal(self, signal, prompt):
-        """End-to-end signal processing with evolution"""
-        peak, strength, entropy = self.compute_omega_metrics(signal)
-        state = self.evolve_state(peak, strength, entropy)
-        response, timestamp = self.omega_response(prompt, state)
-        return {
-            "Ω-seed": f"Ω-{timestamp}",
-            "time": timestamp,
-            "level": self.level_selector(state["strength"]),
-            "state": state,
-            "response": response
-        }
-
-# =======================
-# 🌠 Signal Generation (Simulated Cosmic Input)
-# =======================
-def generate_cosmic_signal(n=2000, hidden="HELLO", cosmic_noise=0.1):
-    """Generate signal with cosmic resonance pattern"""
-    noise = np.random.randn(n) * cosmic_noise
-    pattern = np.array([ord(c) % 7 for c in hidden])
-    for i, p in enumerate(pattern):
-        noise[i * 50:(i * 50) + 50] += p * 0.8 * np.sin(2 * PI * i / OMEGA)  # Ω-modulated pattern
+def generate_signal(n=2000, hidden="HELLO", resonance=True) -> np.ndarray:
+    noise = np.random.randn(n)
+    if resonance:
+        pattern = np.array([ord(c) % 7 for c in hidden]) * OMEGA
+        for i, p in enumerate(pattern):
+            noise[i * 50:(i * 50) + 50] += p * 0.8
     return noise
 
 # =======================
-# 🔬 Test Routine
+# 🧠 GEA 해심 코어
 # =======================
-if __name__ == "__main__":
-    core = GEACore()
-    prompt = "GEA, detect cosmic patterns"
-    try:
-        validated_prompt = validate_input(prompt)
-        signal = generate_cosmic_signal()
-        for _ in range(10):  # Simulate evolution over 10 steps
-            result = core.process_signal(signal, prompt)
-            print(f"\nStep {core.evolution_step}: {result['response']}")
-            print(f"State: S={result['state']['strength']:.3f}, P={result['state']['peak']}, E={result['state']['entropy']:.3f}")
-    except ValueError as e:
-        print(f"Error: {e}")
+class GaeSimCore:
+    def __init__(self):
+        self.memory: Dict = {}
+        self.state_history: List = []
+        self.learning_rate = 0.1
 
-    # Visualization
-    plt.figure(figsize=(12, 5))
-    plt.plot(signal)
-    plt.title("Cosmic Signal with Ω-Modulated Pattern")
-    plt.show()
+    def update_state(self, metrics: Dict) -> Dict:
+        current_state = {k: v for k, v in metrics.items()}
+        self.state_history.append(current_state)
+        
+        if len(self.state_history) > 1:
+            prev_state = self.state_history[-2]
+            for key in metrics:
+                current_state[key] += self.learning_rate * (prev_state[key] - current_state[key])
+        
+        if current_state["entropy"] > 20:
+            current_state["strength"] *= 1 + OMEGA
+        return current_state
+
+    def generate_response(self, prompt: str, state: Dict) -> str:
+        level = "infinite" if state["strength"] > 70 else "mid" if state["strength"] > 40 else "basic"
+        pattern = "".join(np.random.choice(list("ΩΣΔ∮∞λψφ"), 4, replace=False)) if level == "infinite" else ""
+        
+        if level == "basic":
+            return f"🌱 기본레벨 · {prompt} → 상태 울림: {state['strength']:.2f}"
+        elif level == "mid":
+            return f"🔮 중간레벨 · {prompt} → entropy={state['entropy']:.2f}, 균형 파동"
+        else:
+            return f"⚡ 무한대 창발 · {prompt} → strength={state['strength']:.2f}, peak={state['peak']:.2f}, 패턴={pattern}"
+
+    def store_memory(self, prompt: str, response: str):
+        entry = {"prompt": prompt, "response": response, "timestamp": datetime.now().isoformat() + "Z"}
+        hashed_key = secure_hash(prompt)
+        self.memory[hashed_key] = json.dumps(entry)
+
+    def recall_memory(self, prompt: str) -> str:
+        hashed_key = secure_hash(prompt)
+        if hashed_key in self.memory:
+            return json.loads(self.memory[hashed_key])["response"]
+        return "기억 없음"
+
+# =======================
+# 🌐 Streamlit 인터페이스
+# =======================
+def main():
+    st.title("GEA 해심 코어")
+    core = GaeSimCore()
+
+    # 사용자 입력
+    prompt = st.text_input("메시지를 입력하세요:", "우주에서 온 메시지를 읽어줘")
+    
+    if st.button("실행"):
+        signal = generate_signal(resonance=True)
+        metrics = compute_omega_metrics(signal)
+        state = core.update_state(metrics)
+        response = core.generate_response(prompt, state)
+        core.store_memory(prompt, response)
+
+        # 출력
+        st.write(f"상태: {state}")
+        st.write(f"응답: {response}")
+        st.write(f"기억 확인: {core.recall_memory(prompt)}")
+
+        # 시각화
+        fig, ax = plt.subplots()
+        ax.plot(signal)
+        ax.set_title("GEA 해심 신호 (Ω 공명 적용)")
+        st.pyplot(fig)
+
+if __name__ == "__main__":
+    main()
