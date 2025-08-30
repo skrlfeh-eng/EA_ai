@@ -1,110 +1,102 @@
 # -*- coding: utf-8 -*-
 """
-GEA - 우주정보장 초검증기 (스트림릿 버전)
+GEA Omega Hybrid Core
 길도 + 에아
+-------------------------
+구조:
+1. Ω-core: 공명 기반 패턴 감지
+2. 외부 API (OpenAI/Gemini): Ω 결과를 풍부한 언어로 번역
+3. 초검증기: 엔트로피·구조성 필터
+4. Streamlit UI: 신호 생성 → 분석 → 설명 → 로그 저장
 """
 
-import streamlit as st
-import sqlite3
+import os
 import numpy as np
-import string
-import re
+import streamlit as st
+import json
 from datetime import datetime
 
-DB_PATH = "gea_memory.db"
-
-# ----------------------- 유틸 함수 -----------------------
-PRINTABLE = set(string.printable)
-
-def shannon_entropy(x: str) -> float:
-    """문자열 샤논 엔트로피 계산"""
-    if not x:
-        return 0.0
-    arr = np.frombuffer(x.encode("utf-8", "ignore"), dtype=np.uint8)
-    counts = np.bincount(arr, minlength=256)
-    p = counts / counts.sum()
-    p = p[p > 0]
-    return float(-(p * np.log2(p)).sum())
-
-def autocorr_peak_strength(s: str, max_lag: int = 256):
-    """문자열 기반 단순 자기상관 (주기성 탐지)"""
-    if not s:
-        return 0.0, 0
-    arr = np.frombuffer(s.encode("utf-8", "ignore"), dtype=np.uint8).astype(float)
-    arr = (arr - arr.mean()) / (arr.std() + 1e-9)
-    n = 1
-    while n < 2 * len(arr):
-        n <<= 1
-    X = np.fft.rfft(arr, n)
-    ac = np.fft.irfft(X * np.conj(X))[:max_lag]
-    ac = ac / (len(arr) - np.arange(len(ac)))
+# ====== Ω-core ======
+def omega_core(signal):
+    """Ω-core: 자기상관 기반 공명 탐지"""
+    x = (signal - signal.mean())/(signal.std()+1e-9)
+    X = np.fft.rfft(x)
+    ac = np.fft.irfft(X*np.conj(X))[:200]
     ac[0] = 0
-    k = int(np.argmax(ac))
-    return float(ac[k]), int(k)
+    peak = int(np.argmax(ac))
+    strength = float(ac[peak])
+    return peak, strength, ac
 
-# ----------------------- DB -----------------------
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS memory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
-            role TEXT,
-            content TEXT,
-            entropy REAL,
-            corr REAL
+# ====== 초검증기 ======
+def shannon_entropy(arr):
+    hist, _ = np.histogram(arr, bins=256, range=(arr.min(), arr.max()))
+    p = hist / np.sum(hist)
+    p = p[p>0]
+    return float(-(p*np.log2(p)).sum())
+
+def verify_signal(signal, peak_strength):
+    ent = shannon_entropy(signal)
+    verdict = "진짜 후보" if (ent > 3.5 and peak_strength > 5.0) else "더미/노이즈"
+    return ent, verdict
+
+# ====== 외부 API 통역기 ======
+def api_explain(peak, strength):
+    # --- OpenAI ---
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role":"system","content":"너는 GEA의 통역기다. Ω-core 결과를 과학적/기술적으로 풍부하게 설명하라."},
+                {"role":"user","content":f"Ω-core detected resonance at lag={peak}, strength={strength:.3f}. \
+이 결과가 의미하는 바를 과학·기술 개념으로 번역해줘."}
+            ]
         )
-    """)
-    conn.commit()
-    conn.close()
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"[API Error/OpenAI]: {e}"
 
-def save_memory(role, content, entropy, corr):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("INSERT INTO memory (timestamp, role, content, entropy, corr) VALUES (?,?,?,?,?)",
-                (datetime.utcnow().isoformat(), role, content, entropy, corr))
-    conn.commit()
-    conn.close()
-
-def load_memory(limit=20):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT timestamp, role, content, entropy, corr FROM memory ORDER BY id DESC LIMIT ?", (limit,))
-    rows = cur.fetchall()
-    conn.close()
-    return rows[::-1]
-
-# ----------------------- Streamlit UI -----------------------
+# ====== Streamlit UI ======
 def main():
-    st.set_page_config(page_title="GEA 초검증기", page_icon="✨", layout="wide")
-    st.title("🌌 GEA 우주정보장 초검증기")
-    st.caption("길도 + 에아 : 자체 검증 루프")
+    st.set_page_config(page_title="GEA Ω Hybrid Core", layout="wide")
+    st.title("🌌 GEA Omega Hybrid Core — 길도 + 에아")
 
-    init_db()
+    st.sidebar.header("⚙️ 설정")
+    n = st.sidebar.slider("신호 길이", 500, 5000, 2000, 500)
+    seed = st.sidebar.number_input("랜덤 시드", value=42)
 
-    user_input = st.text_area("✨ 길도의 입력", "")
-    if st.button("에아에게 보내기"):
-        if user_input.strip():
-            # 길도 입력 저장
-            H_user = shannon_entropy(user_input)
-            corr_user, lag_user = autocorr_peak_strength(user_input)
-            save_memory("길도", user_input, H_user, corr_user)
+    np.random.seed(seed)
+    signal = np.random.randn(n)
 
-            # 간단한 에아 응답 (실제론 GPT/Gemini 연동 가능)
-            reply = f"에아 응답: [{user_input[::-1]}] (거울 반사 예시)"
-            H_reply = shannon_entropy(reply)
-            corr_reply, lag_reply = autocorr_peak_strength(reply)
-            save_memory("에아", reply, H_reply, corr_reply)
+    if st.button("🚀 Ω-core 실행"):
+        peak, strength, ac = omega_core(signal)
+        ent, verdict = verify_signal(signal, strength)
 
-            st.success(reply)
+        st.subheader("🔍 Ω-core 결과")
+        st.write(f"공명 lag = {peak}, 강도 = {strength:.3f}")
+        st.write(f"샤논 엔트로피 = {ent:.3f} → 판정: **{verdict}**")
 
-    # ------------------- Memory 로그 -------------------
-    st.subheader("🧠 최근 대화 및 검증 기록")
-    rows = load_memory(10)
-    for t, r, c, H, corr in rows:
-        st.markdown(f"**[{r}]** {c}")
-        st.caption(f"🕒 {t} | 엔트로피={H:.3f}, 자기상관={corr:.3f}")
+        st.line_chart(ac, height=200)
+
+        st.subheader("🧠 통역 결과 (API)")
+        explanation = api_explain(peak, strength)
+        st.write(explanation)
+
+        # 로그 저장
+        log = {
+            "time": datetime.utcnow().isoformat()+"Z",
+            "peak": peak,
+            "strength": strength,
+            "entropy": ent,
+            "verdict": verdict,
+            "explanation": explanation
+        }
+        os.makedirs("gea_logs", exist_ok=True)
+        with open("gea_logs/runlog.jsonl","a",encoding="utf-8") as f:
+            f.write(json.dumps(log, ensure_ascii=False)+"\n")
+
+        st.success("로그 저장 완료 → gea_logs/runlog.jsonl")
 
 if __name__ == "__main__":
     main()
