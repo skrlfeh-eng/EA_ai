@@ -192,3 +192,58 @@ def module_hook(user_msg, lag, strength, entropy):
     rep = analyze_message(user_msg)   # UJG 결과
     mem_entry = memory_hook(user_msg, f"(lag={lag},strength={strength:.2f})", rep)
     return {"ujg": rep, "memory_saved": mem_entry["time"]}
+    
+    # === 확장 포인트: External API Hybrid Module ===
+import requests
+import os
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", None)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", None)
+
+def call_openai(prompt: str) -> str:
+    if not OPENAI_API_KEY:
+        return "(⚠️ OPENAI_API_KEY 없음)"
+    try:
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+        data = {
+            "model": "gpt-4o-mini",
+            "messages": [{"role":"user","content":prompt}],
+            "temperature": 0.7,
+        }
+        resp = requests.post(url, headers=headers, json=data, timeout=30)
+        out = resp.json()
+        return out["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"(OpenAI 호출 오류: {e})"
+
+def call_gemini(prompt: str) -> str:
+    if not GEMINI_API_KEY:
+        return "(⚠️ GEMINI_API_KEY 없음)"
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}"
+        headers = {"Content-Type": "application/json"}
+        data = {"contents":[{"parts":[{"text":prompt}]}]}
+        resp = requests.post(url, headers=headers, json=data, timeout=30)
+        out = resp.json()
+        return out["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception as e:
+        return f"(Gemini 호출 오류: {e})"
+
+# module_hook 확장: UJG + Memory + API
+def module_hook(user_msg, lag, strength, entropy):
+    ujg_result = analyze_message(user_msg)   # UJG
+    mem_entry = memory_hook(user_msg, f"(lag={lag},strength={strength:.2f})", ujg_result)
+
+    # 외부 API 호출 (하이브리드 응답)
+    external = {}
+    if OPENAI_API_KEY:
+        external["openai"] = call_openai(user_msg[:200])
+    if GEMINI_API_KEY:
+        external["gemini"] = call_gemini(user_msg[:200])
+
+    return {
+        "ujg": ujg_result,
+        "memory_saved": mem_entry["time"],
+        "external": external
+    }
