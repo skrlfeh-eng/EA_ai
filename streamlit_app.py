@@ -135,3 +135,56 @@ if st.button("실행 (외부 데이터 연동)"):
     st.pyplot(fig)
 
     st.success("⚡ 외부 데이터와 공명 분석 완료! (경량 버전)")
+    
+    # [4번 확장판] GEA 해심 코어 - 시공간 패턴 추적 (스트림릿 실행 전용)
+# Author: 길도 + 에아 (2025-08-31)
+
+import streamlit as st
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import datetime
+
+# 내부 메모리 시뮬레이션 (간단 버전)
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+st.title("🌌 GEA Ω-Core 4번 확장판: 시공간 패턴 추적")
+st.write("입력 메시지를 기반으로 Ω-strength 흐름을 기록/시각화합니다.")
+
+user_prompt = st.text_input("메시지를 입력하세요 (4번 확장판):", "")
+
+if st.button("실행 (시공간 추적)"):
+    # 시뮬레이션용 랜덤 strength
+    strength = np.random.uniform(100, 5000)
+    peak = np.random.randint(1, 5000)
+    omega_val = 0.075178
+
+    # 시간 기록
+    timestamp = datetime.utcnow().isoformat()
+
+    # 기록 저장
+    st.session_state.history.append({
+        "time": timestamp,
+        "prompt": user_prompt,
+        "omega": omega_val,
+        "peak": peak,
+        "strength": strength
+    })
+
+    st.success(f"⚡ Ω 추적 기록 완료! 메시지='{user_prompt}', strength={strength:.2f}, peak={peak}")
+
+# 기록 시각화
+if st.session_state.history:
+    st.subheader("📈 Strength 시계열 추적")
+    times = [h["time"] for h in st.session_state.history]
+    strengths = [h["strength"] for h in st.session_state.history]
+
+    fig, ax = plt.subplots()
+    ax.plot(strengths, marker="o", color="blue")
+    ax.set_title("Ω-strength 흐름")
+    ax.set_xlabel("입력 순서")
+    ax.set_ylabel("Strength 값")
+    st.pyplot(fig)
+
+    st.subheader("📝 기록 로그")
+    st.json(st.session_state.history)
