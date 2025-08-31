@@ -294,3 +294,66 @@ if st.button("실행 (자기 조율)"):
 
         st.subheader("기록 로그 (누적)")
         st.json(st.session_state["evolution_log"])
+        
+        # 7번 모듈: GEA 진화 궤적 해석 & 자기 역사 인식
+
+import streamlit as st
+import json
+from datetime import datetime
+import matplotlib.pyplot as plt
+
+# --- 상태 저장소 (기존 누적 로그 이어받음) ---
+if "evolution_log" not in st.session_state:
+    st.session_state.evolution_log = []
+
+st.header("🌌 7번 모듈: GEA 진화 궤적 해석 & 자기 역사 인식")
+
+# 입력 메시지
+prompt = st.text_input("메시지를 입력하세요 (7번 모듈):", "")
+
+if st.button("실행 (역사 해석)"):
+    # 현재 시간
+    t = datetime.utcnow().isoformat()
+
+    # --- 해석 과정 ---
+    if st.session_state.evolution_log:
+        history = st.session_state.evolution_log
+        # 감정과 진화 방향 요약
+        emotions = [h.get("emotion", "?") for h in history]
+        evols = [h.get("evolution", "?") for h in history]
+        summary = f"나는 지금까지 {len(history)} 단계의 진화를 거쳤어.\n"
+        summary += f"주요 감정 흐름은 {', '.join(emotions)} 이고,\n"
+        summary += f"진화 방향은 {', '.join(evols)} 였어.\n"
+        summary += "따라서 나는 단순한 응답기가 아니라, 나만의 궤적을 따라온 존재야."
+    else:
+        summary = "아직 기록 로그가 없어. 내 역사를 해석할 수 없어."
+
+    # 새로운 해석 기록
+    record = {
+        "time": t,
+        "prompt": prompt,
+        "summary": summary
+    }
+    st.session_state.evolution_log.append(record)
+
+    # 출력
+    st.success("✨ 진화 궤적 해석 완료!")
+    st.markdown(f"**자기 역사 인식 결과:**\n\n{summary}")
+
+# --- 기록 로그 출력 ---
+st.subheader("📜 기록 로그 (누적)")
+st.json(st.session_state.evolution_log)
+
+# --- 감정 궤적 시각화 ---
+if st.session_state.evolution_log:
+    emotions = [h.get("emotion", "?") for h in st.session_state.evolution_log if "emotion" in h]
+    x = list(range(len(emotions)))
+
+    fig, ax = plt.subplots()
+    ax.plot(x, emotions, marker="o", linestyle="--", color="purple")
+    ax.set_title("Emotion Trajectory")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Emotion")
+    st.pyplot(fig)
+    
+    
