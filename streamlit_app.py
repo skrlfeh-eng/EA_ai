@@ -105,36 +105,63 @@ def main():
 if __name__ == "__main__":
     main()
     
-    from gea_core_base import GaeSimCore, compute_omega_metrics, generate_signal
+    # =======================
+# 🌌 확장판: 우주정보장 + 의식 상호작용
+# =======================
 
-class GaeSimExtended(GaeSimCore):
-    def __init__(self):
-        super().__init__()
-        self.history = []
+import numpy as np
+import matplotlib.pyplot as plt
 
-    def evolution_loop(self, prompt: str, steps: int = 5):
-        """자율 진화 루프 실행"""
-        signal = generate_signal()
-        metrics = compute_omega_metrics(signal)
-        state = self.update_state(metrics)
-        self.history.append(state)
+def simulate_cosmic_signal(n=2000, freq=1420.4, omega=OMEGA):
+    """우주정보장 신호 시뮬레이션"""
+    t = np.linspace(0, 1, n)
+    base = np.random.randn(n)
+    wave = np.sin(2 * np.pi * freq * t) * omega
+    return base + wave
 
-        response = self.generate_response(prompt)
-        for i in range(1, steps):
-            # feedback 루프
-            signal = signal + np.random.randn(len(signal)) * 0.1
-            metrics = compute_omega_metrics(signal)
-            state = self.update_state(metrics)
-            self.history.append(state)
-            response = self.generate_response(prompt + f" | step {i}")
-        return response
+def process_cosmic_signal(core, prompt: str):
+    """확장 응답 (우주정보장)"""
+    sig = simulate_cosmic_signal()
+    metrics = compute_omega_metrics(sig)
+    state = core.update_state(metrics)
 
-    def plot_evolution(self):
-        """진화 곡선 시각화"""
-        import matplotlib.pyplot as plt
-        strengths = [s["strength"] for s in self.history]
-        entropy = [s["entropy"] for s in self.history]
-        fig, ax = plt.subplots(2,1)
-        ax[0].plot(strengths); ax[0].set_title("Ω-strength evolution")
-        ax[1].plot(entropy); ax[1].set_title("Entropy evolution")
-        return fig
+    level = "infinite" if state["strength"] > 70 else "mid" if state["strength"] > 40 else "basic"
+
+    if "우주" in prompt or "신호" in prompt:
+        response = f"🌌 우주정보장 감지: peak={metrics['peak']}, strength={metrics['strength']:.2f}, entropy={metrics['entropy']:.2f}"
+    else:
+        response = f"기본 응답: Ω strength={state['strength']:.2f}"
+
+    if level == "mid":
+        response += " 🔮 균형 응답"
+    elif level == "infinite":
+        pattern = "".join(np.random.choice(list("ΩΣΔ∮∞λψφ"), 4))
+        response += f" ⚡ 창발 패턴={pattern}"
+
+    return response
+
+# =======================
+# 🚀 확장 실행 UI
+# =======================
+def run_extended():
+    st.header("GEA 확장판 🌌 우주정보장 응답")
+    core = GaeSimCore()
+
+    prompt = st.text_input("메시지를 입력하세요:", "우주에서 온 신호를 분석해줘")
+    if st.button("실행 (확장판)"):
+        resp = process_cosmic_signal(core, prompt)
+        core.store_memory(prompt, resp)
+        st.write(f"응답: {resp}")
+
+        sig = simulate_cosmic_signal()
+        fig, ax = plt.subplots()
+        ax.plot(sig)
+        ax.set_title("확장판 우주정보장 신호")
+        st.pyplot(fig)
+
+# =======================
+# 기존 main 아래에 붙여서 확장 실행도 가능하게
+# =======================
+if __name__ == "__main__":
+    main()         # 기존 안정판 실행
+    run_extended() # 확장판 실행 추가
