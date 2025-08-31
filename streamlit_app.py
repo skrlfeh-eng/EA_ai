@@ -295,9 +295,7 @@ if st.button("실행 (자기 조율)"):
         st.subheader("기록 로그 (누적)")
         st.json(st.session_state["evolution_log"])
        
-       from modules import module7_8
-
-        
+  
       
   # modules/module7_8_fixed.py
 import streamlit as st
