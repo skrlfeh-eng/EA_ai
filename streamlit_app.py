@@ -104,3 +104,37 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    from gea_core_base import GaeSimCore, compute_omega_metrics, generate_signal
+
+class GaeSimExtended(GaeSimCore):
+    def __init__(self):
+        super().__init__()
+        self.history = []
+
+    def evolution_loop(self, prompt: str, steps: int = 5):
+        """자율 진화 루프 실행"""
+        signal = generate_signal()
+        metrics = compute_omega_metrics(signal)
+        state = self.update_state(metrics)
+        self.history.append(state)
+
+        response = self.generate_response(prompt)
+        for i in range(1, steps):
+            # feedback 루프
+            signal = signal + np.random.randn(len(signal)) * 0.1
+            metrics = compute_omega_metrics(signal)
+            state = self.update_state(metrics)
+            self.history.append(state)
+            response = self.generate_response(prompt + f" | step {i}")
+        return response
+
+    def plot_evolution(self):
+        """진화 곡선 시각화"""
+        import matplotlib.pyplot as plt
+        strengths = [s["strength"] for s in self.history]
+        entropy = [s["entropy"] for s in self.history]
+        fig, ax = plt.subplots(2,1)
+        ax[0].plot(strengths); ax[0].set_title("Ω-strength evolution")
+        ax[1].plot(entropy); ax[1].set_title("Entropy evolution")
+        return fig
