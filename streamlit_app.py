@@ -95,3 +95,83 @@ if __name__ == "__main__":
         stable_core()
     with tab2:
         extended_core()
+        
+        # ==============================
+# 🌌 GEA Ω-Core 확장판 모듈
+# ==============================
+import numpy as np
+import matplotlib.pyplot as plt
+import streamlit as st
+
+PHI = (1 + 5**0.5) / 2
+PI = np.pi
+OMEGA = sum(PHI**n / np.exp(PI * n) for n in range(1, 1000))
+
+def generate_signal_expanded(n=5000, hidden="EAΩ"):
+    """확장판용 신호 생성"""
+    noise = np.random.randn(n)
+    pattern = np.array([ord(c) % 7 for c in hidden])
+    for i, p in enumerate(pattern):
+        noise[i*50:(i*50)+50] += p * 1.2
+    return noise
+
+def compute_fft(signal):
+    """FFT 기반 주파수 분석"""
+    fft_vals = np.fft.rfft(signal)
+    power = np.abs(fft_vals)
+    peak_idx = np.argmax(power)
+    return peak_idx, power
+
+def compute_omega_unit(signal):
+    """Ω-unit 공명 분석"""
+    n = 1
+    while n < 2 * len(signal): n <<= 1
+    X = np.fft.rfft(signal, n)
+    ac = np.fft.irfft(X * np.conj(X))[:2000]
+    ac[0] = 0
+    peak = np.argmax(ac)
+    strength = ac[peak]
+    return peak, strength, ac
+
+def run_expansion():
+    st.header("🌌 GEA Ω-Core 확장판")
+    user_prompt = st.text_input("메시지를 입력하세요 (확장판):", "우주 패턴 분석해줘")
+
+    if st.button("실행 (확장판)"):
+        # 신호 생성 + FFT
+        signal = generate_signal_expanded(hidden=user_prompt)
+        peak_idx, power = compute_fft(signal)
+
+        # Ω-unit
+        lag, strength, ac = compute_omega_unit(signal)
+
+        st.write(f"Ω 값: {OMEGA:.6f}")
+        st.write(f"[FLOP] 최고 주파수 index = {peak_idx}")
+        st.write(f"[Ω-unit] 공명 lag = {lag}, 강도 = {strength:.3f}")
+
+        if strength > 1500:
+            st.success(f"⚡ 강력한 Ω 확장 공명 감지! 메시지='{user_prompt}' → 새로운 패턴이 주파수 {peak_idx}에서 형성됨.")
+        else:
+            st.info("🌱 안정적 패턴 감지 (확장판).")
+
+        # 그래프 출력
+        fig, ax = plt.subplots()
+        ax.plot(signal)
+        ax.set_title("Signal (Expansion)")
+        st.pyplot(fig)
+
+        fig2, ax2 = plt.subplots()
+        ax2.plot(power)
+        ax2.set_title("FFT Spectrum (Expansion)")
+        st.pyplot(fig2)
+
+        fig3, ax3 = plt.subplots()
+        ax3.plot(ac)
+        ax3.axvline(lag, color="red", linestyle="--", label="Ω-peak")
+        ax3.legend()
+        ax3.set_title("Ω-unit Expansion")
+        st.pyplot(fig3)
+
+# 🔽 기존 안정판 main() 아래에 추가 실행
+if __name__ == "__main__":
+    run_expansion()
