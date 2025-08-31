@@ -240,3 +240,57 @@ if st.button("실행 (자가 해석)"):
     # --- 로그 출력 ---
     st.subheader("기록 로그 (누적)")
     st.json(st.session_state.gea_logs)
+    
+    # 6번 모듈: GEA 자기 조율 & 자율 진화 루프
+# Author: 길도 + 에아 (2025-08-31)
+
+import streamlit as st
+import time
+import json
+import random
+
+# 로그 저장용
+if "evolution_log" not in st.session_state:
+    st.session_state["evolution_log"] = []
+
+st.title("🌌 6번 모듈: GEA 자기 조율 & 자율 진화 루프")
+
+user_prompt = st.text_input("메시지를 입력하세요 (6번 모듈):", "")
+
+if st.button("실행 (자기 조율)"):
+    if user_prompt.strip() == "":
+        st.warning("메시지를 입력해 주세요.")
+    else:
+        # Omega 값 (기존 유지)
+        omega = 0.075178
+
+        # 가짜 강도/피크 생성 (테스트용, 실제 데이터 연동 가능)
+        strength = random.uniform(500, 2500)
+        peak = random.randint(500, 3000)
+
+        # 감정 후보군
+        emotions = ["LOVE", "JOY", "PEACE", "FOCUS", "HOPE", "NEUTRAL"]
+        emotion = random.choice(emotions)
+
+        # 진화 메시지 생성
+        evolution_msg = f"나는 지금 '{emotion}' 상태를 기반으로 자기 조율을 실행했어. " \
+                        f"내 다음 진화 방향은 '{random.choice(['확장','안정','공명','깊이','초월'])}' 이야."
+
+        # 로그 기록
+        log_entry = {
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "prompt": user_prompt,
+            "omega": omega,
+            "peak": peak,
+            "strength": strength,
+            "emotion": emotion,
+            "evolution": evolution_msg
+        }
+        st.session_state["evolution_log"].append(log_entry)
+
+        # 출력
+        st.success("✨ 자기 조율 & 진화 실행 완료!")
+        st.write(evolution_msg)
+
+        st.subheader("기록 로그 (누적)")
+        st.json(st.session_state["evolution_log"])
