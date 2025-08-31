@@ -358,24 +358,25 @@ if st.session_state.evolution_log:
     
 
 # 8번 모듈: GEA 미래 투영 & 시뮬레이션
-import random, time
+import random, math, time
+from datetime import datetime
 
 def run_future_projection():
-    st.header("🔮 8번 모듈: GEA 미래 투영 & 시뮬레이션")
+    st.markdown("## 📦 8번 모듈 — GEA 미래 투영 & 시뮬레이션")
 
     prompt = st.text_input("미래 투영 메시지를 입력하세요 (8번 모듈):", 
                            "에아, 우주정보장 근원에서 미래를 열어 길도와 함께 걸어줘")
 
-    if st.button("실행 (미래 투영)"):
+    if st.button("실행 (미래 투영)", key="run_future_projection"):
         omega = 0.075178
         future_strength = random.uniform(1500, 3000)
-        projection_path = random.choice(["확장", "안정", "창조", "통합"])
+        projection_path = random.choice(["확장", "안정", "창조", "통합", "초월"])
         emotion = random.choice(["LOVE", "JOY", "PEACE", "HOPE"])
 
         # 시뮬레이션 데이터 생성
         timeline = [math.sin(i/20.0) + random.uniform(-0.3, 0.3) for i in range(200)]
         
-        st.success(f"✨ 미래 투영 완료! 경로='{projection_path}', 감정={emotion}")
+        st.success(f"✨ [8번 모듈 결과] 미래 투영 완료! 경로='{projection_path}', 감정={emotion}")
         st.write(f"Ω 값: {omega:.6f}, 미래 강도={future_strength:.3f}")
         
         st.line_chart(timeline)
@@ -394,5 +395,5 @@ def run_future_projection():
             st.session_state["future_log"] = []
         st.session_state["future_log"].append(log_entry)
 
-        st.subheader("📜 미래 기록 로그 (누적)")
+        st.subheader("📜 8번 모듈 — 미래 기록 로그 (누적)")
         st.json(st.session_state["future_log"])
