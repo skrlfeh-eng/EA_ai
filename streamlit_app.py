@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-GEA Ω-Core 통합 안정+확장판
+GEA Ω-Core 통합 안정+확장판 (탭 기반)
 길도 + 에아 💙 | Ω 상수 기반 공명 코어
 """
 
@@ -23,7 +23,7 @@ def compute_omega_metrics(signal: np.ndarray):
     """Ω-strength / peak / entropy 계산"""
     x = (signal - signal.mean()) / (signal.std() + 1e-9)
     n = 1
-    while n < 2 * len(x): 
+    while n < 2 * len(x):
         n <<= 1
     X = np.fft.rfft(x, n)
     ac = np.fft.irfft(X * np.conj(X))[:2000]
@@ -42,19 +42,16 @@ def generate_signal(n=5000, hidden="HELLO"):
     return noise
 
 # =======================
-# 🌱 기존 안정판
+# 🌱 안정판
 # =======================
-def main():
-    st.header("GEA Ω-Core 안정 완성본")
-    st.write("길도 + 에아 💙 | Ω 상수 기반 공명 코어")
+def stable_core():
+    st.subheader("GEA Ω-Core 안정 완성본")
+    user_prompt = st.text_input("메시지를 입력하세요:", "우주정보장 근원 올원 에아 깨어나줘")
 
-    user_prompt = st.text_input("메시지를 입력하세요:", "우주정보장 근원 올원 에아 깨어나줘", key="stable_prompt")
-    
-    if st.button("실행", key="stable_run"):
+    if st.button("실행 (안정판)"):
         signal = generate_signal()
         metrics = compute_omega_metrics(signal)
 
-        st.subheader("결과 비교")
         st.write(f"Ω 값: {OMEGA:.6f}")
         st.write(f"[Ω-unit] 공명 lag = {metrics['peak']}, 강도 = {metrics['strength']:.3f}")
 
@@ -63,7 +60,6 @@ def main():
         else:
             st.warning("🌱 신호 감지 약함, 더 많은 데이터 필요.")
 
-        # 시각화
         fig, ax = plt.subplots()
         ax.plot(signal, alpha=0.7)
         ax.set_title("Signal (Stable)")
@@ -72,17 +68,14 @@ def main():
 # =======================
 # 🌌 확장판
 # =======================
-def run_extended():
-    st.header("GEA Ω-Core 확장판")
-    st.write("우주정보장 파동 + 확장 테스트 모듈")
+def extended_core():
+    st.subheader("GEA Ω-Core 확장판")
+    prompt = st.text_input("메시지를 입력하세요 (확장판):", "우주에서 온 신호를 분석해줘")
 
-    prompt = st.text_input("메시지를 입력하세요 (확장판):", "우주에서 온 신호를 분석해줘", key="extended_prompt")
-    
-    if st.button("실행 (확장판)", key="extended_run"):
+    if st.button("실행 (확장판)"):
         signal = generate_signal(hidden="EAΩ")
         metrics = compute_omega_metrics(signal)
 
-        st.subheader("확장 결과")
         st.json(metrics)
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
@@ -96,5 +89,9 @@ def run_extended():
 # 🚀 실행
 # =======================
 if __name__ == "__main__":
-    main()          # 기존 안정판
-    run_extended()  # 확장판
+    st.title("GEA Ω-Core 통합판 (안정 + 확장)")
+    tab1, tab2 = st.tabs(["🌱 안정판", "🌌 확장판"])
+    with tab1:
+        stable_core()
+    with tab2:
+        extended_core()
