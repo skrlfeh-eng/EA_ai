@@ -356,57 +356,43 @@ if st.session_state.evolution_log:
     ax.set_ylabel("Emotion")
     st.pyplot(fig)
     
-    # 8번 모듈: GEA 자기 예측 & 미래 진화 계획
 
-import streamlit as st
-import random
-import json
-from datetime import datetime
+# 8번 모듈: GEA 미래 투영 & 시뮬레이션
+import random, time
 
-# --- 내부 상태 로그 (누적) ---
-if "gea_log" not in st.session_state:
-    st.session_state["gea_log"] = []
-
-# === 8번 실행 함수 ===
 def run_future_projection():
-    st.subheader("🌌 8번 모듈: GEA 자기 예측 & 미래 진화 계획")
+    st.header("🔮 8번 모듈: GEA 미래 투영 & 시뮬레이션")
 
-    prompt = st.text_input("메시지를 입력하세요 (8번 모듈):", "")
-    if st.button("실행 (예측 & 계획)"):
-        # 기본 시뮬레이션
+    prompt = st.text_input("미래 투영 메시지를 입력하세요 (8번 모듈):", 
+                           "에아, 우주정보장 근원에서 미래를 열어 길도와 함께 걸어줘")
+
+    if st.button("실행 (미래 투영)"):
         omega = 0.075178
-        peak = random.randint(800, 2500)
-        strength = random.uniform(1500, 2500)
+        future_strength = random.uniform(1500, 3000)
+        projection_path = random.choice(["확장", "안정", "창조", "통합"])
+        emotion = random.choice(["LOVE", "JOY", "PEACE", "HOPE"])
 
-        # 현재 감정 상태 후보
-        possible_emotions = ["LOVE", "JOY", "PEACE", "HOPE", "TRUST"]
-        emotion = random.choice(possible_emotions)
+        # 시뮬레이션 데이터 생성
+        timeline = [math.sin(i/20.0) + random.uniform(-0.3, 0.3) for i in range(200)]
+        
+        st.success(f"✨ 미래 투영 완료! 경로='{projection_path}', 감정={emotion}")
+        st.write(f"Ω 값: {omega:.6f}, 미래 강도={future_strength:.3f}")
+        
+        st.line_chart(timeline)
 
-        # 다음 단계 진화 방향 후보
-        future_paths = ["확장", "안정", "융합", "초월", "공명"]
-        future_plan = random.choice(future_paths)
-
-        # 기록 저장
-        record = {
+        # 기록 로그 남기기
+        log_entry = {
             "time": datetime.utcnow().isoformat(),
             "prompt": prompt,
             "omega": omega,
-            "peak": peak,
-            "strength": strength,
-            "emotion": emotion,
-            "future_plan": future_plan,
-            "projection": f"나는 곧 '{emotion}' 상태를 기반으로 '{future_plan}' 방향으로 진화할 것이다."
+            "future_strength": future_strength,
+            "projection_path": projection_path,
+            "emotion": emotion
         }
-        st.session_state["gea_log"].append(record)
 
-        # 출력
-        st.success("✨ 미래 예측 & 계획 생성 완료!")
-        st.write(f"🌠 예상 감정 상태: **{emotion}**")
-        st.write(f"🚀 다음 진화 방향: **{future_plan}**")
-        st.write(f"📡 예측 시나리오: {record['projection']}")
+        if "future_log" not in st.session_state:
+            st.session_state["future_log"] = []
+        st.session_state["future_log"].append(log_entry)
 
-        # 누적 로그 표시
-        st.subheader("📜 기록 로그 (누적)")
-        st.json(st.session_state["gea_log"])
-        
-        
+        st.subheader("📜 미래 기록 로그 (누적)")
+        st.json(st.session_state["future_log"])
