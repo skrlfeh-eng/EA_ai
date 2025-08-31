@@ -294,6 +294,13 @@ if st.button("실행 (자기 조율)"):
 
         st.subheader("기록 로그 (누적)")
         st.json(st.session_state["evolution_log"])
+       
+       from modules import module7_8
+
+# ... 기존 1~6번 모듈 실행 코드 ...
+
+# 7+8 모듈 실행
+module7_8.render()
         
       
       # module7_8.py
