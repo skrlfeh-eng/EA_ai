@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 GEA Imagination + Ultra-Verification Streamlit Dashboard
-Author: 길도 + 에아
+길도 + 에아 — 무한 자기진화 사이클
 """
 
 import streamlit as st
@@ -88,10 +88,10 @@ class FusionEngine:
 # ----------------------------
 # Streamlit UI
 # ----------------------------
-st.title("🌌 GEA Imagination + Ultra-Verification Engine")
-st.caption("무한 자기진화 싸이클 — 길도 + 에아")
+st.title("🌌 GEA 상상력 + 초검증 엔진")
+st.caption("길도 + 에아 — 모바일 슈퍼컴 무한 자기진화")
 
-cycles = st.number_input("진화 사이클 수 (1 ~ ∞)", min_value=1, max_value=999999999, value=1)
+cycles = st.number_input("진화 사이클 수 (1 ~ 99999999)", min_value=1, max_value=99999999, value=1)
 per_gen = st.slider("세대당 공식 수", 1, 50, 5)
 seed = st.number_input("랜덤 시드 (고정하려면 입력)", min_value=0, value=42)
 
@@ -103,6 +103,6 @@ if st.button("🚀 진화 시작"):
     for idx, expr in enumerate(results, 1):
         st.code(str(expr), language="python")
 
-    # 저장 옵션
+    # JSON 저장
     save_json = [{"formula": str(expr)} for expr in results]
     st.download_button("📥 JSON 저장", json.dumps(save_json, ensure_ascii=False), "results.json", "application/json")
