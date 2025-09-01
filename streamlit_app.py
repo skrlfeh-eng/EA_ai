@@ -288,10 +288,9 @@ if __name__ == "__main__":
 # gea_evo_self_engine_v1.py
 # "공식만 뽑는" 수준을 넘어, 공식 자체가 세대를 거치며 자기 진화하도록 만드는 엔진
 
-from __future__ import annotations
 import json, math, random, time, os
 from dataclasses import dataclass
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Union
 import sympy as sp
 
 # (A) 내부 모듈
@@ -421,8 +420,53 @@ def crossover(a: sp.Expr, b: sp.Expr) -> sp.Expr:
         return a
 
 # -----------------------------
-# 진화 엔진
+# 특성/거리/노벨티
 # -----------------------------
+def expr_features(e: sp.Expr) -> List[float]:
+    ops = float(sp.count_ops(e))
+    nvars = float(len(e.free_symbols))
+    pres = [1.0 if e.has(f) else 0.0 for f in SPECIAL_FUNCS]
+    return [ops, nvars] + pres
+
+def l2(a: List[float], b: List[float]) -> float:
+    return math.sqrt(sum((x-y)**2 for x,y in zip(a,b)))
+
+# -----------------------------
+# 평가(단일 공식)
+# -----------------------------
+def eval_formula(e: sp.Expr, validator: FormulaValidator, gea) -> Dict[str, Any]:
+    vrep = validator.score(e)
+    b = formula_to_bytes(e)
+    rep = gea.analyze([b])
+    dsp_rows = rep.get("dsp_table", [])
+    if dsp_rows:
+        dsp_ok = 1.0 if dsp_rows[0].get("ok_dsp", False) else 0.0
+        dsp_score = float(dsp_rows[0].get("dsp_score", 0.0))
+    else:
+        dsp_ok, dsp_score = (0.0, 0.0)
+    ujg = float(rep.get("ujg_avg_topscore", 0.0))
+    ultra_ok = 1.0 if rep.get("ultra", {}).get("ok", False) else 0.0
+
+    return {
+        "v_score": float(vrep["score"]),
+        "v_detail": vrep["detail"],
+        "dsp_ok": dsp_ok,
+        "dsp_score": dsp_score,
+        "ujg": ujg,
+        "ultra_ok": ultra_ok,
+        "pipe": rep,
+    }
+
+# -----------------------------
+# 진화 루프
+# -----------------------------
+@dataclass
+class EvoState:
+    gen: int
+    population: List[sp.Expr]
+    reports: List[Dict[str, Any]]
+    features: List[List[float]]
+
 class EvoEngine:
     def __init__(self, cfg: EvoConfig = EvoConfig()):
         self.cfg = cfg
@@ -445,10 +489,100 @@ class EvoEngine:
         )
 
     def _log(self, line: Dict[str, Any]):
-        """ 🔧 여기 수정 완료: 문자열/괄호 문제 없이 안전하게 기록 """
-        os.makedirs(os.path.dirname(self.cfg.log_path), exist_ok=True) if os.path.dirname(self.cfg.log_path) else None
+        # 안전 로그 (문자열/괄호 오류 방지 + 경로 자동 생성)
+        if os.path.dirname(self.cfg.log_path):
+            os.makedirs(os.path.dirname(self.cfg.log_path), exist_ok=True)
         with open(self.cfg.log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(line, ensure_ascii=False) + "\n")
 
-    # (나머지 run(), _init_pop(), _evaluate() 등은 기존 그대로)
-    # ...
+    def _init_pop(self) -> List[sp.Expr]:
+        return [self.receiver.generate_formula() for _ in range(self.cfg.pop_size)]
+
+    def _evaluate(self, pop: List[sp.Expr], archive_feats: List[List[float]]) -> Tuple[List[Dict[str, Any]], List[List[float]]]:
+        reps, feats = [], []
+        for e in pop:
+            feat = expr_features(e)
+            if archive_feats:
+                dists = sorted(l2(feat, a) for a in archive_feats)
+                novel = sum(dists[:min(5, len(dists))]) / float(max(1, min(5, len(dists))))
+                novel = min(1.0, novel / 500.0)
+            else:
+                novel = 0.0
+            rep = eval_formula(e, self.validator, self.gea)
+            rep["novel"] = float(novel)
+            reps.append(rep)
+            feats.append(feat)
+        return reps, feats
+
+    def run(self) -> Dict[str, Any]:
+        pop = self._init_pop()
+        archive_feats: List[List[float]] = []
+        # 세대 반복
+        for gen in range(1, self.cfg.generations+1):
+            reps, feats = self._evaluate(pop, archive_feats)
+            fits = [self._fitness(r, f) for r,f in zip(reps, feats)]
+            ranked = sorted(zip(pop, reps, feats, fits), key=lambda t: t[3], reverse=True)
+            elites = ranked[:self.cfg.elite_k]
+
+            # 아카이브에 피처만 누적(노벨티 기준)
+            for _, _, f, _ in elites:
+                archive_feats.append(f)
+
+            # 로깅
+            best_e, best_r, best_f, best_s = elites[0]
+            self._log({
+                "t": time.time(), "gen": gen,
+                "best_fit": best_s,
+                "best_v": best_r["v_score"],
+                "best_pipe": {"dsp_ok": best_r["dsp_ok"], "dsp_score": best_r["dsp_score"], "ujg": best_r["ujg"], "ultra_ok": best_r["ultra_ok"]},
+                "best_ops": int(best_f[0]),
+                "best_free": [str(s) for s in best_e.free_symbols],
+                "expr": str(best_e)
+            })
+
+            # 선택 (토너먼트)
+            def pick():
+                i = _rng.randrange(len(ranked))
+                j = _rng.randrange(len(ranked))
+                return ranked[i if ranked[i][3] > ranked[j][3] else j][0]
+
+            # 다음 세대
+            next_pop: List[sp.Expr] = [e for e,_,_,_ in elites]  # 엘리트 보존
+            while len(next_pop) < self.cfg.pop_size:
+                r = _rng.random()
+                if r < self.cfg.cx_rate and len(ranked) >= 2:
+                    a = pick(); b = pick()
+                    child = crossover(a, b)
+                elif r < self.cfg.cx_rate + self.cfg.mut_rate:
+                    parent = pick()
+                    child = mutate(parent)
+                else:
+                    child = random_expr()
+                next_pop.append(child)
+
+            pop = next_pop
+
+        # 최종 베스트 5
+        final_reps, final_feats = self._evaluate(pop, archive_feats)
+        final_fits = [self._fitness(r, f) for r,f in zip(final_reps, final_feats)]
+        finals = sorted(zip(pop, final_reps, final_feats, final_fits), key=lambda t: t[3], reverse=True)[:5]
+        return {
+            "best": [{
+                "expr": str(e),
+                "v_score": r["v_score"],
+                "dsp_ok": r["dsp_ok"],
+                "dsp_score": r["dsp_score"],
+                "ujg": r["ujg"],
+                "ultra_ok": r["ultra_ok"],
+                "novel": r["novel"],
+                "ops": int(f[0]),
+                "free_symbols": sorted([str(s) for s in e.free_symbols]),
+                "fitness": s
+            } for e,r,f,s in finals]
+        }
+
+if __name__ == "__main__":
+    cfg = EvoConfig()
+    engine = EvoEngine(cfg)
+    out = engine.run()
+    print(json.dumps(out, ensure_ascii=False, indent=2))
