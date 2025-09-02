@@ -1,17 +1,33 @@
 # -*- coding: utf-8 -*-
-# GEA 자가진화 수학 — 유일식/구조진화/노벨티 v2 (NO matplotlib)
-# 입력(내장함수/CSV) → 목표(MSE+복잡도-노벨티) → 구조 진화 → 실시간 표시
-import streamlit as st
-import sympy as sp
-import numpy as np
-import pandas as pd
-import random, time, json, math
+# GEA 자가진화 수학 — 유일식/구조진화/노벨티 v2 (SAFE: 최소 의존성, 강력 예외표시)
+# 필요 패키지: streamlit, numpy, sympy
+# 실행: streamlit run gea_evo_symbolic_unique_v2_safe.py
+
+import sys, traceback, json, math, time, random
 from typing import List, Tuple, Set
 
-st.set_page_config(page_title="GEA 자가진화 수학(유일식/노벨티)", layout="wide")
-st.title("🌌 GEA 자가진화 수학 — 유일식/구조진화/노벨티 v2 (no-mpl)")
+import streamlit as st
 
-# ---------- 공통 심볼/조각 ----------
+# ---- 안전 임포트: 필수 패키지 점검 ----
+MISSING = []
+try:
+    import numpy as np
+except Exception:
+    MISSING.append("numpy")
+try:
+    import sympy as sp
+except Exception:
+    MISSING.append("sympy")
+
+st.set_page_config(page_title="GEA 자가진화 수학(유일/노벨티 SAFE)", layout="wide")
+st.title("🌌 GEA 자가진화 수학 — 유일식/구조진화/노벨티 v2 (SAFE)")
+
+if MISSING:
+    st.error("필수 패키지가 없습니다: " + ", ".join(MISSING))
+    st.code("pip install " + " ".join(MISSING), language="bash")
+    st.stop()
+
+# -------------------- 공통 심볼/조각 --------------------
 x = sp.Symbol('x', real=True)
 BIN = [lambda a,b: a+b, lambda a,b: a-b, lambda a,b: a*b, lambda a,b: a/(b+1e-6)]
 UNA = [lambda a:a, lambda a:sp.sin(a), lambda a:sp.cos(a), lambda a:sp.tan(a),
@@ -39,15 +55,15 @@ def features(e: sp.Expr)->List[float]:
     pres=[1.0 if e.has(fn) else 0.0 for fn in (sp.sin,sp.cos,sp.tan,sp.exp,sp.log,sp.sqrt)]
     return [ops]+pres
 
-def l2(a,b): return math.sqrt(sum((x-y)**2 for x,y in zip(a,b)))
+def l2(a,b): return math.sqrt(sum((u-v)**2 for u,v in zip(a,b)))
 
-# ---------- 타깃 데이터 ----------
+# -------------------- 타깃 입력 --------------------
 with st.sidebar:
-    st.header("🎯 타깃")
+    st.header("🎯 타깃 데이터")
     mode = st.radio("소스", ["내장 함수","CSV 업로드"], horizontal=True)
     seed = st.number_input("Seed", 42, step=1)
     random.seed(int(seed)); np.random.seed(int(seed))
-    n_points = st.slider("표본", 50, 3000, 400, 50)
+    n_points = st.slider("표본 개수", 50, 3000, 400, 50)
     x_min, x_max = st.slider("x 범위", -10.0, 10.0, (-3.0,3.0))
     xs = np.linspace(x_min, x_max, int(n_points))
 
@@ -60,19 +76,23 @@ with st.sidebar:
             "x**3-2*x": lambda t: t**3 - 2*t,
             "sin(x)*exp(-x**2/5)": lambda t: np.sin(t)*np.exp(-(t**2)/5.0)
         }
-        noise = st.slider("노이즈", 0.0, 1.0, 0.0, 0.05)
+        noise = st.slider("노이즈(내장 함수용)", 0.0, 1.0, 0.0, 0.05)
         ys = fns[fsel](xs) + np.random.normal(0, noise, xs.shape)
         target_label = fsel
     else:
-        up = st.file_uploader("CSV(x,y 2열)", type=["csv"])
-        if up is None: st.stop()
-        arr = np.loadtxt(up, delimiter=",")
-        if arr.ndim==1 or arr.shape[1]<2:
-            st.error("CSV는 2개 열(x,y)이 필요합니다."); st.stop()
-        xs, ys = arr[:,0], arr[:,1]
-        target_label = "uploaded.csv"
+        up = st.file_uploader("CSV 업로드 (x,y 두 열)", type=["csv"])
+        if up is None:
+            st.info("CSV를 업로드하면 시작할 수 있어요."); st.stop()
+        try:
+            arr = np.loadtxt(up, delimiter=",", dtype=float)
+            if arr.ndim==1 or arr.shape[1]<2:
+                st.error("CSV는 2열(x,y)이 필요합니다."); st.stop()
+            xs, ys = arr[:,0], arr[:,1]
+            target_label = "uploaded.csv"
+        except Exception as e:
+            st.error("CSV 읽기 중 오류"); st.exception(e); st.stop()
 
-# ---------- 설정 ----------
+# -------------------- 진화 설정 --------------------
 st.header("🧬 진화 설정")
 c1,c2,c3,c4,c5 = st.columns(5)
 with c1: pop = st.number_input("개체수", 10, 300, 80, step=10)
@@ -86,7 +106,7 @@ with c7: nov_w = st.slider("노벨티 가중(−)", 0.0, 1.0, 0.2, 0.05)
 with c8: elite_k = st.number_input("엘리트", 1, 80, 8)
 dedup = st.checkbox("유일식 강제(중복 금지)", True)
 
-# ---------- 적합도 ----------
+# -------------------- 목적함수 --------------------
 def fitness(e: sp.Expr, xs, ys, comp_lambda, nov_bonus)->Tuple[float,float,int,float]:
     try:
         f = sp.lambdify(x, e, modules=["numpy"])
@@ -101,7 +121,7 @@ def fitness(e: sp.Expr, xs, ys, comp_lambda, nov_bonus)->Tuple[float,float,int,f
     total = mse + comp_lambda*comp - nov_bonus
     return total, mse, comp, nov_bonus
 
-# ---------- 변이/교차(구조변화 강제) ----------
+# -------------------- 변이/교차 --------------------
 def rand_subexpr(e: sp.Expr):
     parts = list(e.atoms(sp.Symbol, sp.Number, sp.Function)) or [e]
     return random.choice(parts)
@@ -127,7 +147,7 @@ def crossover(a: sp.Expr, b: sp.Expr)->sp.Expr:
     sa = rand_subexpr(a); sb = rand_subexpr(b)
     return simplify_soft(a.xreplace({sa: sb}))
 
-# ---------- 초기 개체군 ----------
+# -------------------- 초기 개체군 --------------------
 def init_pop(n:int, depth:int, seen:Set[str])->List[sp.Expr]:
     out=[]; tries=0
     while len(out)<n and tries<n*50:
@@ -141,7 +161,7 @@ def init_pop(n:int, depth:int, seen:Set[str])->List[sp.Expr]:
         tries += 1
     return out
 
-# ---------- 노벨티 ----------
+# -------------------- 노벨티 --------------------
 def novelty_score(e: sp.Expr, archive_feats: List[List[float]])->float:
     if not archive_feats: return 0.0
     f = features(e)
@@ -149,87 +169,91 @@ def novelty_score(e: sp.Expr, archive_feats: List[List[float]])->float:
     k = min(5, len(dists))
     return float(sum(dists[:k]) / max(1,k))
 
-# ---------- UI 자리 ----------
-run = st.button("🚀 시작")
-pl_best = st.empty(); pl_curve = st.empty(); pl_plot = st.empty(); pl_stats = st.empty()
+# -------------------- 실행 --------------------
+run = st.button("🚀 진화 시작")
+pl_best = st.empty(); pl_curve = st.empty(); pl_preview = st.empty(); pl_stats = st.empty()
 
-# ---------- 실행 ----------
 if run:
-    random.seed(int(seed)); np.random.seed(int(seed))
-    seen: Set[str] = set()
-    pop_exprs = init_pop(int(pop), int(depth), seen)
-    archive: List[List[float]] = []
-    best_hist=[]
+    try:
+        random.seed(int(seed)); np.random.seed(int(seed))
+        seen: Set[str] = set()
+        pop_exprs = init_pop(int(pop), int(depth), seen)
+        archive: List[List[float]] = []
+        best_hist=[]; mse_curve=[]
 
-    t0=time.time()
-    for gen in range(int(gens)):
-        # 평가
-        scored=[]
-        for e in pop_exprs:
-            nov = novelty_score(e, archive)
-            total, mse, comp, _ = fitness(e, xs, ys, comp_l, nov_w*nov)
-            scored.append((total, mse, comp, nov, e))
-        scored.sort(key=lambda t: t[0])
+        t0=time.time()
+        for gen in range(int(gens)):
+            scored=[]
+            for e in pop_exprs:
+                nov = novelty_score(e, archive)
+                total, mse, comp, _ = fitness(e, xs, ys, comp_l, nov_w*nov)
+                scored.append((total, mse, comp, nov, e))
+            scored.sort(key=lambda t: t[0])
 
-        elites = [t[4] for t in scored[:int(elite_k)]]
-        for e in elites: archive.append(features(e))
+            elites = [t[4] for t in scored[:int(elite_k)]]
+            for e in elites: archive.append(features(e))
 
-        best = scored[0]; best_expr = best[4]
-        best_hist.append((gen, best[1], best[2], best[3], expr_hash(best_expr)))
+            best = scored[0]; best_expr = best[4]
+            best_hist.append((gen, best[1], best[2], best[3], expr_hash(best_expr)))
+            mse_curve.append(best[1])
 
-        pl_best.markdown(
-            f"**세대 {gen}**  \n"
-            f"- 최적식(사람용): `{sp.sstr(best_expr)}`  \n"
-            f"- 손실(MSE): **{best[1]:.6f}** | 복잡도: **{best[2]}** | 노벨티: **{best[3]:.3f}**"
-        )
+            # 표시
+            pl_best.markdown(
+                f"**세대 {gen}**  \n"
+                f"- 최적식(사람용): `{sp.sstr(best_expr)}`  \n"
+                f"- 손실(MSE): **{best[1]:.6f}** | 복잡도: **{best[2]}** | 노벨티: **{best[3]:.3f}**"
+            )
+            # 예측 미니 프리뷰
+            try:
+                f_best = sp.lambdify(x, best_expr, modules=['numpy'])
+                with np.errstate(all='ignore'):
+                    yhat = np.array(f_best(xs), dtype=float)
+            except Exception:
+                yhat = np.full_like(xs, np.nan)
+            pl_preview.write({
+                "x[:5]": [float(v) for v in xs[:5]],
+                "target[:5]": [float(v) for v in ys[:5]],
+                "best[:5]": [float(v) for v in yhat[:5]]
+            })
 
-        # Target vs Best (라인차트)
-        try:
-            f_best = sp.lambdify(x, best_expr, modules=["numpy"])
-            with np.errstate(all='ignore'):
-                yhat = np.array(f_best(xs), dtype=float)
-        except Exception:
-            yhat = np.full_like(xs, np.nan)
-        df_tb = pd.DataFrame({"x": xs, "target": ys, "best": yhat}).set_index("x")
-        pl_plot.line_chart(df_tb)
+            # 다음 세대
+            next_pop = list(elites)
+            tries_limit = 40
+            while len(next_pop) < int(pop):
+                r = random.random()
+                if r < cx and len(pop_exprs)>=2:
+                    a = random.choice(pop_exprs); b = random.choice(pop_exprs)
+                    child = crossover(a,b)
+                elif r < cx + mut:
+                    parent = random.choice(pop_exprs)
+                    child = mutate(parent)
+                else:
+                    child = simplify_soft(rand_tree(int(depth)))
+                h = expr_hash(child); tries=0
+                while dedup and (h in seen) and tries < tries_limit:
+                    child = mutate(child); h = expr_hash(child); tries += 1
+                if (not dedup) or (h not in seen):
+                    next_pop.append(child); seen.add(h)
 
-        # MSE curve
-        df_curve = pd.DataFrame({"gen":[g for g,_,_,_,_ in best_hist],
-                                 "mse":[m for _,m,_,_,_ in best_hist]}).set_index("gen")
-        pl_curve.line_chart(df_curve)
+            uniq_ratio = len({expr_hash(e) for e in next_pop}) / float(len(next_pop))
+            pl_stats.info(f"세대 {gen}: 유일식 비율 {uniq_ratio*100:.1f}% | 아카이브 {len(archive)}")
 
-        # 다음 세대
-        next_pop = list(elites)
-        tries_limit = 40
-        while len(next_pop) < int(pop):
-            r = random.random()
-            if r < cx and len(pop_exprs)>=2:
-                a = random.choice(pop_exprs); b = random.choice(pop_exprs)
-                child = crossover(a,b)
-            elif r < cx + mut:
-                parent = random.choice(pop_exprs)
-                child = mutate(parent)
-            else:
-                child = simplify_soft(rand_tree(int(depth)))
-            h = expr_hash(child); tries=0
-            while dedup and (h in seen) and tries < tries_limit:
-                child = mutate(child); h = expr_hash(child); tries += 1
-            if (not dedup) or (h not in seen):
-                next_pop.append(child); seen.add(h)
+            pop_exprs = next_pop
+            time.sleep(0.02)
 
-        uniq_ratio = len({expr_hash(e) for e in next_pop}) / float(len(next_pop))
-        pl_stats.info(f"세대 {gen}: 유일식 비율 {uniq_ratio*100:.1f}% | 아카이브 {len(archive)}")
+        st.success(f"완료! {int(gens)}세대 / 경과 {time.time()-t0:.2f}s")
+        result = {
+            "target": target_label,
+            "history": [{"gen":g,"mse":float(m),"comp":int(c),"nov":float(n),"hash":h} for g,m,c,n,h in best_hist],
+            "best_expr": sp.sstr(sp.simplify(pop_exprs[0])),
+            "mse_curve": mse_curve
+        }
+        st.download_button("📥 결과 JSON", data=json.dumps(result, ensure_ascii=False, indent=2),
+                           file_name="gea_unique_v2_safe.json", mime="application/json")
 
-        pop_exprs = next_pop
-        time.sleep(0.02)
-
-    st.success(f"완료! {int(gens)}세대 / 경과 {time.time()-t0:.2f}s")
-    result = {
-        "target": target_label,
-        "history": [{"gen":g,"mse":float(m),"comp":int(c),"nov":float(n),"hash":h} for g,m,c,n,h in best_hist],
-        "best_expr": sp.sstr(sp.simplify(pop_exprs[0]))
-    }
-    st.download_button("📥 결과 JSON", data=json.dumps(result, ensure_ascii=False, indent=2),
-                       file_name="gea_unique_v2.json", mime="application/json")
+    except Exception as e:
+        st.error("실행 중 예외가 발생했습니다.")
+        st.exception(e)
+        st.stop()
 else:
-    st.info("좌측에서 타깃을 정하고, 위의 설정을 조절한 뒤 **[🚀 시작]**을 누르세요.")
+    st.info("좌측에서 타깃(내장 함수 또는 CSV)을 고르고, 위의 설정을 맞춘 뒤 **[🚀 진화 시작]**을 눌러주세요.")
